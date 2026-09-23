@@ -6,8 +6,6 @@ import { err, ok } from './result.ts'
 export interface GitHubWriteGateOptions {
   /** True when a person has trusted the controller to write to this repository. */
   mayWrite: (github: string) => boolean
-  /** Called once for each refused write, so a person sees why nothing happened. */
-  onRefused: (github: string) => void
   source: GitHubTokenProvider
 }
 
@@ -16,7 +14,19 @@ export function repositoryQuarantineReason(github: string): string {
   return `The controller has never been trusted to write to ${github}. Enable writes for it first.`
 }
 
-const writeAccess = new Set<GitHubRepositoryAccess>(['contents_write', 'item_write', 'workflows_write'])
+export function isRepositoryWriteQuarantineReason(message: string): boolean {
+  const prefix = 'The controller has never been trusted to write to '
+  const suffix = '. Enable writes for it first.'
+  const start = message.indexOf(prefix)
+  return start >= 0 && message.endsWith(suffix) && message.length > start + prefix.length + suffix.length
+}
+
+const writeAccess = new Set<GitHubRepositoryAccess>([
+  'contents_write',
+  'item_write',
+  'pull_request_merge',
+  'workflows_write',
+])
 
 /**
  * Refuses every write credential to a repository nobody enabled.
@@ -30,7 +40,6 @@ export function createGitHubWriteGate(options: GitHubWriteGateOptions): GitHubTo
     getToken(repository, access, signal) {
       if (!writeAccess.has(access) || options.mayWrite(repository))
         return options.source.getToken(repository, access, signal)
-      options.onRefused(repository)
       return Promise.resolve(
         err({
           repository,
@@ -55,20 +64,24 @@ export async function preflightGitHubWriteAccess(
   return ok(undefined)
 }
 
-interface RepositoryWorker<Task extends { repository: string }, Value> {
-  run: (task: Task, signal: AbortSignal) => Promise<Result<Value, string>>
+interface RepositoryWorker<Task extends { repository: string }, Value, Context extends unknown[]> {
+  run: (task: Task, signal: AbortSignal, ...context: Context) => Promise<Result<Value, string>>
 }
 
 /** Refuses work before an Agent turn when its required GitHub access is absent. */
-export function withGitHubWritePreflight<Task extends { repository: string }, Value>(options: {
+export function withGitHubWritePreflight<
+  Task extends { repository: string },
+  Value,
+  Context extends unknown[],
+>(options: {
   accesses: readonly GitHubRepositoryAccess[]
   source: GitHubTokenProvider
-  worker: RepositoryWorker<Task, Value>
-}): RepositoryWorker<Task, Value> {
+  worker: RepositoryWorker<Task, Value, Context>
+}): RepositoryWorker<Task, Value, Context> {
   return {
-    async run(task, signal) {
+    async run(task, signal, ...context) {
       const access = await preflightGitHubWriteAccess(options.source, task.repository, options.accesses, signal)
-      return access._tag === 'Err' ? access : options.worker.run(task, signal)
+      return access._tag === 'Err' ? access : options.worker.run(task, signal, ...context)
     },
   }
 }

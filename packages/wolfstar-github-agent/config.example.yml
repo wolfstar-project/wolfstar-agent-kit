@@ -17,6 +17,23 @@ agent:
     claude: 20
     codex: 20
     opencode: 50
+  # The most Agent slots Hogwild may be set to. Wolfstar sets the count in force
+  # from the dashboard System pane or the tray, and it survives a restart.
+  # maximum_active_agents: 4
+  # Memory one Agent is assumed to need. The service divides its memory by this
+  # number and starts there. It is the suggestion the System pane shows, and a
+  # higher count still runs. A 30 GiB host with these defaults suggests 2.
+  # memory_per_agent_gib: 8
+  # Memory the service leaves to the host before it counts slots.
+  # host_reserve_gib: 8
+  # Reasoning effort per Agent provider and role. A listed role replaces that
+  # provider's own default. A pinned Agent selection with an explicit
+  # Reasoning effort still wins. Values: none, low, medium, high, xhigh, max.
+  # Roles: adversarial_review, baseline_repair, conflict_resolution,
+  # issue_triage, issue_work, review_fix, routine_scan, routine_fix.
+  # reasoning_effort:
+  #   opencode:
+  #     review_fix: medium
 github:
   app_id: 12345
   private_key_path: /home/wolfstar/.config/wolfstar-github-agent/app.pem
@@ -25,6 +42,9 @@ server:
   host: 127.0.0.1
   port: 3210
   allowed_origin: https://wolfstar-github-agent.localhost
+  # Origins allowed to frame the dashboard, for example a talk deck. HTTPS, or
+  # http://localhost with a port. Leave it out to deny framing.
+  # frame_ancestors: [http://localhost:3000]
 # GitHub webhooks remove most polling latency. The listener runs on its own
 # port carrying one route, so a tunnel in front of it cannot reach the
 # dashboard or the control API. Point the GitHub App webhook URL at it and set
@@ -35,6 +55,21 @@ webhook:
   secret_path: /home/wolfstar/.config/wolfstar-github-agent/webhook-secret
 storage:
   path: /home/wolfstar/.local/share/wolfstar-github-agent/state.sqlite
+# The Jev classification service, reached through the Cloudflare AI endpoint.
+# Off unless configured. Pull request triage uses it for prose-only pull
+# requests; without it those get a full Review.
+# The token needs Account > Workers AI > Read. Mode 0600, owner you, and at
+# least 32 characters. Pin the model version once confidence thresholds are
+# tuned.
+# classification:
+#   account_id: your-cloudflare-account-id
+#   token_path: /home/wolfstar/.config/wolfstar-github-agent/classification-token
+#   gateway_id: wolfstar-github-agent
+#   model: typesafe/jev
+#   # The confidence an Issue triage route needs before it skips the Agent
+#   # turn, from 0.5 to 0.99. Leave it out and the Agent turn keeps every
+#   # route. Run evaluate-issue-triage first and set what it measures.
+#   issue_triage_band: 0.9
 # What may start work on this machine. Defaults to every trigger.
 # An always-on second machine runs [routine] while the desktop keeps [github].
 # The two sets never overlap, so neither machine can claim the other's task and
@@ -49,6 +84,10 @@ auto_merge:
   method: squash
 # No new issue work starts when open pull requests reach this limit.
 max_open_pull_requests: 8
+# Plan Ready Routine-filed issues as Batches: one planning turn groups related
+# issues, and its units run as sub agents under one Agent permit. Set false to
+# run every issue alone.
+issue_batches: true
 # With webhooks on, polling only has to catch what a delivery missed.
 poll_interval_seconds: 60
 issue_cutoff: 2026-07-14
@@ -63,3 +102,53 @@ repositories: []
 # Maintained repositories need an explicit policy. Without an installation,
 # the controller uses the authenticated GitHub account.
 # Set repositories[].max_open_pull_requests to hold new Issue work for one busy repository.
+# Set repositories[].priority to an integer from 0 to 100. Higher values claim
+# free Agent capacity first, across issue triage, Issue work, review, and repair.
+# Active Tasks finish. Other repositories run when no higher-priority Task can start.
+# Set repositories[].poll_interval_seconds to poll that repository separately.
+# It accepts 10 to 3600 seconds. Omit it to use the service polling interval.
+# A live demo can use priority: 100 and poll_interval_seconds: 15.
+# Set repositories[].reasoning_effort to override the listed provider roles for one repository.
+# Unlisted roles keep the global setting. An explicit pinned Reasoning effort wins.
+#   reasoning_effort:
+#     opencode:
+#       adversarial_review: medium
+#     codex:
+#       adversarial_review: medium
+# Set repositories[].auto_merge to widen Auto merge past the label for one owned
+# repository where a wrong merge costs little, such as a demo site:
+#   auto_merge:
+#     pull_requests: every      # labelled (default), contained, or every
+#     minimum_confidence: 80    # replaces $.auto_merge.minimum_confidence here
+# Set pull_requests: contained to let a low risk code change ship without a
+# person. Merge risk decides, from the changed paths and from the Review Agent.
+# Omit the whole block and nothing changes: only a labelled pull request merges.
+#   auto_merge:
+#     pull_requests: contained
+#     minimum_confidence: 95      # the bar a Contained pull request must clear
+#     merge_risk:
+#       max_changed_files: 12     # above this the pull request is Reviewable
+#       max_changed_lines: 300    # above this the pull request is Reviewable
+#       sensitive_paths:          # any match is Sensitive
+#         - "**/migrations/**"
+#         - "**/*.sql"
+#       contained_paths:          # omit to allow any path that is not Sensitive
+#         - "src/**"
+#         - "test/**"
+#       require_test_change: true   # a Contained verdict needs a changed test
+#       label_overrides_risk: true  # false makes a Sensitive verdict beat the label
+# A file an agent reads as instructions is always Sensitive. SKILL.md, AGENTS.md,
+# CLAUDE.md, .github, .claude and .codex need no entry, and a repository cannot
+# widen its own globs to cover them.
+# Package releases are disabled unless an owned Repository mapping includes release.
+# Enable webhooks, repository writes, pull_request_review, and automatic selection first.
+# Trust the publishing actor in writable_pr_authors so the version pull request receives Review.
+#   release:
+#     manifest: package.json
+#     version_files: [package.json]
+#     tag_prefix: v
+#     workflow: release.yml
+#     checks: [test, build]  # Exact GitHub Actions check names.
+#     changelog: CHANGELOG.md  # Optional existing file.
+# This policy permits the controller to merge its verified version pull request and create a tag.
+# Custom version generators, independent versions, and non-npm outputs need separate support.

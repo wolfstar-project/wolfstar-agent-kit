@@ -11,10 +11,14 @@ export HOME="$test_root/home"
 export WOLFSTAR_GITHUB_AGENT_CHECKOUT="$test_root/service"
 export SERVICE_TEST_CALLS="$test_root/curl.calls"
 export SERVICE_TEST_PNPM_CALLS="$test_root/pnpm.calls"
+export SERVICE_TEST_SYNC_CALLS="$test_root/sync.calls"
+
+export WOLFSTAR_GITHUB_AGENT_NODE="$test_root/bin/node"
 
 mkdir -p \
   "$WOLFSTAR_GITHUB_AGENT_CHECKOUT/.git" \
-  "$WOLFSTAR_GITHUB_AGENT_CHECKOUT/packages/wolfstar-github-agent" \
+  "$WOLFSTAR_GITHUB_AGENT_CHECKOUT/packages/wolfstar-github-agent/src" \
+  "$WOLFSTAR_GITHUB_AGENT_CHECKOUT/scripts" \
   "$HOME/.config/wolfstar-github-agent" \
   "$HOME/.local/bin" \
   "$test_root/bin"
@@ -26,6 +30,14 @@ printf '%s\n' \
   'printf '\''%s\n'\'' "$*" >> "$SERVICE_TEST_PNPM_CALLS"' \
   > "$HOME/.local/bin/pnpm"
 chmod +x "$HOME/.local/bin/pnpm"
+printf '%s\n' '#!/usr/bin/env bash' 'printf '\''context %s\n'\'' "$*" >> "$SERVICE_TEST_SYNC_CALLS"' \
+  > "$WOLFSTAR_GITHUB_AGENT_CHECKOUT/scripts/sync-agent-context.sh"
+printf '%s\n' '#!/usr/bin/env bash' 'printf '\''worktrunk %s\n'\'' "$*" >> "$SERVICE_TEST_SYNC_CALLS"' \
+  > "$WOLFSTAR_GITHUB_AGENT_CHECKOUT/scripts/worktrunk-config.sh"
+# Stands in for the deployed CLI. Its exit code is the configuration verdict.
+printf '%s\n' \
+  'process.exit(Number(process.env.SERVICE_TEST_CLI_EXIT || 0))' \
+  > "$WOLFSTAR_GITHUB_AGENT_CHECKOUT/packages/wolfstar-github-agent/src/cli.ts"
 
 git() {
   case "$*" in
@@ -79,6 +91,46 @@ fi
 
 if ! grep -F -- 'dashboard:build' "$SERVICE_TEST_PNPM_CALLS" >/dev/null; then
   printf '%s\n' 'service did not build the dashboard with the installed pnpm fallback' >&2
+  exit 1
+fi
+
+if ! grep -Fx -- 'context local' "$SERVICE_TEST_SYNC_CALLS" >/dev/null; then
+  printf '%s\n' 'service did not sync Agent instructions from the deployed commit' >&2
+  exit 1
+fi
+
+if ! grep -Fx -- 'worktrunk update' "$SERVICE_TEST_SYNC_CALLS" >/dev/null; then
+  printf '%s\n' 'service did not install Worktrunk settings from the deployed commit' >&2
+  exit 1
+fi
+
+# A configuration the new revision rejects must stop the deploy before the
+# restart. Restarting into it leaves systemd retrying a process that cannot
+# start, which is an outage until a person edits the configuration.
+if SERVICE_TEST_CLI_EXIT=1 PATH="$test_root/bin:/usr/bin:/bin" \
+  bash "$script_dir/service.sh" prepare-update >/dev/null 2>&1; then
+  printf '%s\n' 'service prepared an update although the new revision rejects the configuration' >&2
+  exit 1
+fi
+
+if ! SERVICE_TEST_CLI_EXIT=0 PATH="$test_root/bin:/usr/bin:/bin" \
+  bash "$script_dir/service.sh" prepare-update >/dev/null 2>&1; then
+  printf '%s\n' 'service refused an update although the new revision accepts the configuration' >&2
+  exit 1
+fi
+
+# A restart starts the same process as a deploy, and the configuration can move
+# between the two. A restart into a configuration this revision rejects is the
+# same outage, so it stops the same way.
+if SERVICE_TEST_CLI_EXIT=1 PATH="$test_root/bin:/usr/bin:/bin" \
+  bash "$script_dir/service.sh" restart >/dev/null 2>&1; then
+  printf '%s\n' 'service restarted although the deployed revision rejects the configuration' >&2
+  exit 1
+fi
+
+if ! SERVICE_TEST_CLI_EXIT=0 PATH="$test_root/bin:/usr/bin:/bin" \
+  bash "$script_dir/service.sh" restart >/dev/null 2>&1; then
+  printf '%s\n' 'service refused a restart although the deployed revision accepts the configuration' >&2
   exit 1
 fi
 

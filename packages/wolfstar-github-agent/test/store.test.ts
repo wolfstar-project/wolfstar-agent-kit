@@ -4,6 +4,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { agentProfile, CODEX_AGENT_PROFILE } from '../src/agent-profile.ts'
+import { MAXIMUM_RECOVERY_ATTEMPTS } from '../src/failure.ts'
+import { repositoryQuarantineReason } from '../src/github-write-gate.ts'
+import { ok } from '../src/result.ts'
+import { publishStoppedReviews } from '../src/review-stop-sweep.ts'
 import { routineReportCommand } from '../src/routine-report-controller.ts'
 import { openJournalStore } from '../src/store.ts'
 import { issueItem, pullRequestItem, repositoryMapping } from './fixtures.ts'
@@ -74,6 +78,135 @@ function settlementPublication(id: string) {
 }
 
 describe('journal store', () => {
+  it('holds write-dependent Tasks until repository writes are enabled', () => {
+    const repository = repositoryMapping()
+    const mutationStore = openJournalStore(':memory:', true)
+    stores.push(mutationStore)
+    mutationStore.syncRepositories([repository], '2026-09-02T00:00:00.000Z')
+    mutationStore.recordObservation({
+      externalId: 'quarantined-conflict',
+      observedAt: '2026-09-02T00:01:00.000Z',
+      source: 'poll',
+      subject: pullRequestItem(),
+    })
+
+    expect(mutationStore.claimNextConflictTask('conflict-worker', '2026-09-02T00:02:00.000Z', 60_000)).toBeNull()
+
+    mutationStore.setRepositoryWritesEnabled(repository.github, true)
+
+    expect(mutationStore.claimNextConflictTask('conflict-worker', '2026-09-02T00:03:00.000Z', 60_000)).not.toBeNull()
+
+    const reviewStore = openJournalStore(':memory:', true)
+    stores.push(reviewStore)
+    reviewStore.syncRepositories([repository], '2026-09-02T00:00:00.000Z')
+    reviewStore.recordObservation({
+      externalId: 'quarantined-review',
+      observedAt: '2026-09-02T00:01:01.000Z',
+      source: 'poll',
+      subject: pullRequestItem({ mergeState: 'clean' }),
+    })
+
+    expect(reviewStore.claimNextAdversarialReviewTask('review-worker', '2026-09-02T00:02:00.000Z', 60_000)).toBeNull()
+
+    reviewStore.setRepositoryWritesEnabled(repository.github, true)
+
+    expect(
+      reviewStore.claimNextAdversarialReviewTask('review-worker', '2026-09-02T00:03:00.000Z', 60_000),
+    ).not.toBeNull()
+  })
+
+  it('defers a running Task without an Incident when repository writes are disabled', () => {
+    const store = openJournalStore(':memory:', true)
+    stores.push(store)
+    const repository = repositoryMapping()
+    store.syncRepositories([repository], '2026-09-02T00:00:00.000Z')
+    store.setRepositoryWritesEnabled(repository.github, true)
+    store.recordObservation({
+      externalId: 'disabled-during-review',
+      observedAt: '2026-09-02T00:01:00.000Z',
+      source: 'poll',
+      subject: pullRequestItem({ mergeState: 'clean' }),
+    })
+    const task = store.claimNextAdversarialReviewTask('review-worker', '2026-09-02T00:02:00.000Z', 60_000)
+    if (task === null) throw new Error('Expected a Review Task.')
+
+    store.setRepositoryWritesEnabled(repository.github, false)
+
+    expect(
+      store.failWorkerTask({
+        taskId: task.id,
+        workerId: task.state.workerId,
+        fence: task.state.fence,
+        at: '2026-09-02T00:02:01.000Z',
+        reason: repositoryQuarantineReason(repository.github),
+      }),
+    ).toBe('Retrying')
+    expect(store.getDashboardSnapshot('2026-09-02T00:02:02.000Z').tasks).toContainEqual(
+      expect.objectContaining({ id: task.id, state: { _tag: 'Queued' } }),
+    )
+    expect(store.listIncidents()).toEqual([])
+  })
+
+  it.each(['owned', 'maintained'] as const)(
+    'defers an %s Publication when repository writes are disabled',
+    (ownership) => {
+      const store = openJournalStore(':memory:', true)
+      stores.push(store)
+      const repository = repositoryMapping({ ownership })
+      store.syncRepositories([repository], '2026-09-02T00:00:00.000Z')
+      store.setRepositoryWritesEnabled(repository.github, true)
+      store.recordObservation({
+        externalId: 'disabled-during-publication',
+        observedAt: '2026-09-02T00:01:00.000Z',
+        source: 'poll',
+        subject: pullRequestItem(),
+      })
+      const task = store.claimNextConflictTask('conflict-worker', '2026-09-02T00:02:00.000Z', 60_000)
+      if (task === null) throw new Error('Expected a conflict resolution Task.')
+      if (task.pullRequest.baseRef === undefined) throw new Error('Expected a base branch.')
+      const staged = store.stagePublication({
+        taskId: task.id,
+        workerId: task.state.workerId,
+        fence: task.state.fence,
+        at: '2026-09-02T00:02:01.000Z',
+        publication: {
+          _tag: 'UpdatePullRequest',
+          taskKind: 'resolve_conflict',
+          pullRequestNumber: task.pullRequestNumber,
+          commitSha: 'resolved-commit',
+          baseSha: task.pullRequest.baseSha,
+          baseRef: task.pullRequest.baseRef,
+          expectedHeadSha: task.pullRequest.headSha,
+          headRef: task.pullRequest.headRef,
+          artifactRef: 'resolved-artifact',
+          patchDigest: 'resolved-patch',
+          changedFiles: 1,
+        },
+      })
+      if (staged._tag === 'Rejected') throw new Error(staged.reason)
+      const command = store.claimNextPublication('publisher', '2026-09-02T00:02:02.000Z', 60_000)
+      if (command === null) throw new Error('Expected a Publication.')
+
+      store.setRepositoryWritesEnabled(repository.github, false)
+
+      expect(
+        store.failPublication({
+          commandId: command.id,
+          workerId: command.workerId,
+          fence: command.fence,
+          at: '2026-09-02T00:02:03.000Z',
+          reason: repositoryQuarantineReason(repository.github),
+        }),
+      ).toBe('Retrying')
+      expect(store.claimNextPublication('publisher', '2026-09-02T00:02:04.000Z', 60_000)).toBeNull()
+      expect(store.listIncidents()).toEqual([])
+
+      store.setRepositoryWritesEnabled(repository.github, true)
+
+      expect(store.claimNextPublication('publisher', '2026-09-02T00:02:05.000Z', 60_000)).not.toBeNull()
+    },
+  )
+
   it('includes Routines and their recent runs in the dashboard snapshot', () => {
     const store = createStore()
     store.syncRepositories([repositoryMapping()], '2026-08-28T00:00:00.000Z')
@@ -160,6 +293,17 @@ describe('journal store', () => {
       at: '2026-08-28T21:00:00.000Z',
     })
     if (run === null) throw new Error('Expected a Routine run.')
+    {
+      const task = store.claimNextRoutineRun('scanner', '2026-08-28T21:00:00.500Z', 45 * 60_000)
+      if (task === null || task.id !== run.id) throw new Error('Expected a queued Routine run.')
+      store.completeRoutineRun({
+        taskId: task.id,
+        workerId: task.state.workerId,
+        fence: task.state.fence,
+        at: '2026-08-28T21:00:01.000Z',
+        evidence: 'No open Sentry issues.',
+      })
+    }
 
     expect(store.getDashboardSnapshot('2026-08-28T21:00:01.000Z').routineRuns[0]?.reportState).toBeNull()
 
@@ -242,6 +386,17 @@ describe('journal store', () => {
       at: '2026-08-28T07:00:00.000Z',
     })
     if (run === null) throw new Error('Expected a Routine run.')
+    {
+      const task = store.claimNextRoutineRun('scanner', '2026-08-28T07:00:00.500Z', 45 * 60_000)
+      if (task === null || task.id !== run.id) throw new Error('Expected a queued Routine run.')
+      store.completeRoutineRun({
+        taskId: task.id,
+        workerId: task.state.workerId,
+        fence: task.state.fence,
+        at: '2026-08-28T07:00:01.000Z',
+        evidence: 'No open Sentry issues.',
+      })
+    }
     store.stageRoutineReport({
       command: routineReportCommand({
         repository: routine.repository,
@@ -396,6 +551,24 @@ describe('journal store', () => {
       to: 'Superseded',
       reason: 'The automated review did not finish before the Restart request.',
     })
+  })
+
+  it('allows restart after a dead Task lease expires', () => {
+    const store = createStore()
+    store.syncRepositories([repositoryMapping()], '2026-08-13T00:00:00.000Z')
+    store.recordObservation({
+      externalId: 'restart-expired-task',
+      observedAt: '2026-08-13T01:00:00.000Z',
+      source: 'poll',
+      subject: pullRequestItem(),
+    })
+    expect(store.claimNextConflictTask('conflict-1', '2026-08-13T01:01:00.000Z', 60_000)).not.toBeNull()
+
+    expect(store.prepareForRestart('2026-08-13T01:01:59.999Z')).toBe(false)
+    expect(store.prepareForRestart('2026-08-13T01:02:00.000Z')).toBe(true)
+
+    expect(store.recoverInterruptedAgentTasks('2026-08-13T01:02:01.000Z')).toBe(1)
+    expect(store.claimNextConflictTask('conflict-2', '2026-08-13T01:02:02.000Z', 60_000)?.state.fence).toBe(2)
   })
 
   it('keeps restart unsafe until a pending terminal Review Publication finishes', () => {
@@ -608,25 +781,28 @@ describe('journal store', () => {
     expect(result._tag).toBe('Conflict')
   })
 
-  it('queues conflict resolution for a writable pull request branch', () => {
-    const store = createStore()
-    store.syncRepositories([repositoryMapping()], '2026-08-13T00:00:00.000Z')
+  it.each(['owned', 'maintained'] as const)(
+    'queues conflict resolution for a writable branch when ownership is %s',
+    (ownership) => {
+      const store = createStore()
+      store.syncRepositories([repositoryMapping({ ownership })], '2026-08-13T00:00:00.000Z')
 
-    store.recordObservation({
-      externalId: 'poll-pr-24',
-      observedAt: '2026-08-13T01:00:00.000Z',
-      source: 'poll',
-      subject: pullRequestItem(),
-    })
+      store.recordObservation({
+        externalId: 'poll-pr-24',
+        observedAt: '2026-08-13T01:00:00.000Z',
+        source: 'poll',
+        subject: pullRequestItem(),
+      })
 
-    expect(store.getDashboardSnapshot('2026-08-13T01:00:00.000Z').tasks).toEqual([
-      expect.objectContaining({
-        repository: 'wolfstar-project/example',
-        pullRequestNumber: 24,
-        state: { _tag: 'Queued' },
-      }),
-    ])
-  })
+      expect(store.getDashboardSnapshot('2026-08-13T01:00:00.000Z').tasks).toEqual([
+        expect.objectContaining({
+          repository: 'wolfstar-project/example',
+          pullRequestNumber: 24,
+          state: { _tag: 'Queued' },
+        }),
+      ])
+    },
+  )
 
   it('keeps an older current failed Task in the Queue after newer history passes the snapshot limit', () => {
     const store = createStore()
@@ -699,7 +875,7 @@ describe('journal store', () => {
 
     expect(store.getDashboardSnapshot('2026-08-13T01:00:00.000Z').queue[0]?.state).toEqual({
       _tag: 'ActionRequired',
-      reason: 'Conflict resolution is off for maintained repositories. Resolve the merge conflicts on GitHub.',
+      reason: 'Conflict resolution is off for this repository. Enable it or resolve the merge conflicts on GitHub.',
     })
   })
 
@@ -777,6 +953,195 @@ describe('journal store', () => {
       _tag: 'Queued',
       work: 'conflict_resolution',
     })
+  })
+
+  it('requeues a re-conflict free of recovery budget', () => {
+    const store = createStore()
+    store.syncRepositories([repositoryMapping()], '2026-08-13T00:00:00.000Z')
+    const conflicting = pullRequestItem({ mergeState: 'conflicting' })
+    let elapsed = 0
+    const at = (): string => new Date(Date.parse('2026-08-13T01:00:00.000Z') + (elapsed += 1000)).toISOString()
+    store.recordObservation({ externalId: 'flapping', observedAt: at(), source: 'poll', subject: conflicting })
+    // More rounds than the recovery budget. GitHub changing its mind is not
+    // the controller's failure, so none of these spend budget.
+    for (let round = 0; round < MAXIMUM_RECOVERY_ATTEMPTS + 2; round += 1) {
+      store.recordObservation({
+        externalId: 'clean',
+        observedAt: at(),
+        source: 'poll',
+        subject: pullRequestItem({ mergeState: 'clean' }),
+      })
+      store.recordObservation({ externalId: 'flapping', observedAt: at(), source: 'poll', subject: conflicting })
+    }
+
+    expect(store.getDashboardSnapshot(at()).queue[0]?.state).toEqual({
+      _tag: 'Queued',
+      work: 'conflict_resolution',
+    })
+  })
+
+  it('stops requeueing a conflict whose publication keeps losing the base branch race', () => {
+    const store = createStore()
+    store.syncRepositories([repositoryMapping()], '2026-08-13T00:00:00.000Z')
+    const subject = pullRequestItem({ mergeState: 'conflicting' })
+    let elapsed = 0
+    const at = (): string => new Date(Date.parse('2026-08-13T01:00:00.000Z') + (elapsed += 1000)).toISOString()
+    store.recordObservation({ externalId: 'base-race', observedAt: at(), source: 'poll', subject })
+    const supersededPublication = (): boolean => {
+      const task = store.claimNextConflictTask('worker-1', at(), 600_000)
+      if (task === null) return false
+      const staged = store.stagePublication({
+        taskId: task.id,
+        workerId: task.state.workerId,
+        fence: task.state.fence,
+        at: at(),
+        publication: {
+          _tag: 'UpdatePullRequest',
+          taskKind: 'resolve_conflict',
+          pullRequestNumber: task.pullRequestNumber,
+          commitSha: `merge-${elapsed}`,
+          baseSha: task.pullRequest.baseSha,
+          baseRef: 'main',
+          expectedHeadSha: task.pullRequest.headSha,
+          headRef: task.pullRequest.headRef,
+          artifactRef: `refs/wolfstar-github-agent/publications/${elapsed}`,
+          patchDigest: 'patch',
+          changedFiles: 1,
+        },
+      })
+      if (staged._tag !== 'Staged') throw new Error(`Expected a staged publication, got ${staged._tag}.`)
+      const command = store.claimNextPublication('publisher-1', at(), 600_000)
+      if (command === null) throw new Error('Expected a claimed publication.')
+      store.supersedePublication({
+        commandId: command.id,
+        workerId: command.workerId,
+        fence: command.fence,
+        at: at(),
+        reason: 'The base branch changed before publication.',
+      })
+      // The next poll still sees the same head commit conflicting.
+      store.recordObservation({ externalId: 'base-race', observedAt: at(), source: 'poll', subject })
+      return true
+    }
+
+    // Each lost race repeats one whole agent turn for the same head commit.
+    // The first turn is free; every requeue after it spends one recovery.
+    for (let round = 0; round < MAXIMUM_RECOVERY_ATTEMPTS + 1; round += 1) expect(supersededPublication()).toBe(true)
+
+    expect(store.claimNextConflictTask('worker-1', at(), 600_000)).toBeNull()
+    expect(store.getDashboardSnapshot(at()).queue[0]?.state).toEqual({
+      _tag: 'ActionRequired',
+      reason:
+        'The base branch changed before publication. The controller resolved this conflict 6 times without publishing. Resolve it by hand, or push a new commit to the pull request.',
+    })
+    // A later poll of the same head commit must not wake it again.
+    store.recordObservation({ externalId: 'base-race', observedAt: at(), source: 'poll', subject })
+    expect(store.claimNextConflictTask('worker-1', at(), 600_000)).toBeNull()
+  })
+
+  it('stops requeueing a pull request that conflicts again after every resolution', () => {
+    const store = createStore()
+    store.syncRepositories([repositoryMapping()], '2026-08-13T00:00:00.000Z')
+    let elapsed = 0
+    const at = (): string => new Date(Date.parse('2026-08-13T01:00:00.000Z') + (elapsed += 1000)).toISOString()
+    // Every resolution publishes a merge commit, so the next poll sees a new
+    // head that GitHub still reports as conflicting. Each head is a new
+    // Revision with a fresh recovery budget, which is how one pull request
+    // took 148 turns in two days.
+    const observeConflict = (round: number): void => {
+      store.recordObservation({
+        externalId: `stale-${round}`,
+        observedAt: at(),
+        source: 'poll',
+        subject: pullRequestItem({ mergeState: 'conflicting', headSha: `head-${round}` }),
+      })
+    }
+    const resolveOnce = (): void => {
+      const task = store.claimNextConflictTask('worker-1', at(), 600_000)
+      if (task === null) throw new Error('Expected a running conflict task.')
+      expect(
+        store.completeTask({
+          taskId: task.id,
+          workerId: 'worker-1',
+          fence: task.state.fence,
+          at: at(),
+          evidence: 'merged',
+        }),
+      ).toBe(true)
+    }
+    for (let round = 0; round < MAXIMUM_RECOVERY_ATTEMPTS; round += 1) {
+      observeConflict(round)
+      resolveOnce()
+    }
+
+    observeConflict(MAXIMUM_RECOVERY_ATTEMPTS)
+
+    expect(store.claimNextConflictTask('worker-1', at(), 600_000)).toBeNull()
+    expect(store.getDashboardSnapshot(at()).queue[0]?.state).toEqual({
+      _tag: 'ActionRequired',
+      reason:
+        'The controller resolved this conflict 5 times in one day and the pull request conflicts again. Rebase it by hand.',
+    })
+    // The same head polled again must not wake it.
+    store.recordObservation({
+      externalId: `stale-${MAXIMUM_RECOVERY_ATTEMPTS}`,
+      observedAt: at(),
+      source: 'poll',
+      subject: pullRequestItem({ mergeState: 'conflicting', headSha: `head-${MAXIMUM_RECOVERY_ATTEMPTS}` }),
+    })
+    expect(store.claimNextConflictTask('worker-1', at(), 600_000)).toBeNull()
+  })
+
+  it('does not requeue a conflict whose base merges cleanly until the head or the base changes', () => {
+    const store = createStore()
+    store.syncRepositories([repositoryMapping()], '2026-08-13T00:00:00.000Z')
+    const subject = pullRequestItem({ mergeState: 'conflicting', headSha: 'head-1', baseSha: 'base-1' })
+    let elapsed = 0
+    const at = (): string => new Date(Date.parse('2026-08-13T01:00:00.000Z') + (elapsed += 1000)).toISOString()
+    store.recordObservation({ externalId: 'clean-merge', observedAt: at(), source: 'poll', subject })
+    const task = store.claimNextConflictTask('worker-1', at(), 600_000)
+    if (task === null) throw new Error('Expected a running conflict task.')
+    const cleanMerge = JSON.stringify({ _tag: 'CleanMerge', headSha: 'head-1', baseSha: 'base-1', baseRef: 'main' })
+
+    expect(
+      store.completeTask({
+        taskId: task.id,
+        workerId: 'worker-1',
+        fence: task.state.fence,
+        at: at(),
+        evidence: cleanMerge,
+      }),
+    ).toBe(true)
+
+    // GitHub keeps reporting the same stale state for the same head and base.
+    store.recordObservation({ externalId: 'clean-merge', observedAt: at(), source: 'poll', subject })
+    expect(store.claimNextConflictTask('worker-1', at(), 600_000)).toBeNull()
+    // A new Revision with the same head and base, such as a title edit, must not spend a turn either.
+    store.recordObservation({
+      externalId: 'clean-merge-renamed',
+      observedAt: at(),
+      source: 'poll',
+      subject: { ...subject, title: 'Renamed' },
+    })
+    expect(store.claimNextConflictTask('worker-1', at(), 600_000)).toBeNull()
+    expect(store.listIncidents()).toEqual([
+      expect.objectContaining({
+        scope: { _tag: 'Task', taskId: task.id, repository: 'wolfstar-project/example', itemNumber: subject.number },
+        severity: 'warning',
+        operation: 'resolve_conflict',
+        occurrences: 1,
+      }),
+    ])
+
+    // The base moved, so the merge must be redone and the stale warning closes.
+    store.recordObservation({
+      externalId: 'clean-merge-moved',
+      observedAt: at(),
+      source: 'poll',
+      subject: { ...subject, baseSha: 'base-2' },
+    })
+    expect(store.claimNextConflictTask('worker-1', at(), 600_000)).not.toBeNull()
+    expect(store.listIncidents()).toEqual([])
   })
 
   it('keeps a manually cancelled task cancelled across later polls', () => {
@@ -1175,7 +1540,7 @@ describe('journal store', () => {
       externalId: 'active-issue',
       observedAt: '2026-08-13T01:00:01.000Z',
       source: 'poll',
-      subject: issueItem(),
+      subject: issueItem({ author: 'wolfstar-project' }),
     })
     const conflict = store.claimNextConflictTask('conflict-worker', '2026-08-13T01:01:00.000Z', 600_000)
     const issue = store.claimNextIssueTriageTask('issue-worker', '2026-08-13T01:02:00.000Z', 600_000)
@@ -1229,7 +1594,7 @@ describe('journal store', () => {
       externalId: 'issue',
       observedAt: '2026-08-13T01:00:00.000Z',
       source: 'poll',
-      subject: issueItem(),
+      subject: issueItem({ author: 'wolfstar-project' }),
     })
     store.recordObservation({
       externalId: 'review-ready',
@@ -1265,30 +1630,61 @@ describe('journal store', () => {
     ])
   })
 
-  it('queues outside contributor issue work after approval and keeps the same agent session', () => {
+  it('reads the completed issue triage evidence back by Revision', () => {
     const store = createStore()
     store.syncRepositories([repositoryMapping()], '2026-08-13T00:00:00.000Z')
     store.recordObservation({
       externalId: 'issue-triage',
       observedAt: '2026-08-13T01:00:00.000Z',
       source: 'poll',
-      subject: issueItem(),
+      subject: issueItem({ author: 'wolfstar-project' }),
     })
-
     const task = store.claimNextIssueTriageTask('issue-worker', '2026-08-13T01:01:00.000Z', 600_000)
     if (task === null) throw new Error('Expected an issue triage Task.')
-    store.saveWorkerSession('wolfstar-project/example', 12, 'issue_triage', 'issue-session', '2026-08-13T01:01:05.000Z')
+    const evidence = JSON.stringify({ _tag: 'READY_TO_IMPLEMENT', summary: 'The parser drops the last byte.' })
 
-    expect(store.getDashboardSnapshot('2026-08-13T01:02:00.000Z').agents).toEqual([
-      expect.objectContaining({
-        _tag: 'ActiveAgent',
-        id: task.id,
-        role: 'issue_triage',
-        subjectKind: 'issue',
-        itemNumber: 12,
-        session: { _tag: 'Connected', id: 'issue-session' },
-      }),
+    expect(store.getIssueTriageEvidence('wolfstar-project/example', 12, task.revisionId)).toBeNull()
+    store.completeWorkerTask({
+      taskId: task.id,
+      workerId: 'issue-worker',
+      fence: task.state.fence,
+      at: '2026-08-13T01:02:00.000Z',
+      evidence,
+    })
+
+    expect(store.getIssueTriageEvidence('wolfstar-project/example', 12, task.revisionId)).toBe(evidence)
+    expect(store.getIssueTriageEvidence('wolfstar-project/example', 12, 'other-revision')).toBeNull()
+  })
+
+  it('holds outside contributor issue triage until Approval, then continues into work on its own', () => {
+    const store = createStore()
+    store.syncRepositories([repositoryMapping()], '2026-08-13T00:00:00.000Z')
+    const observed = store.recordObservation({
+      externalId: 'issue-triage',
+      observedAt: '2026-08-13T01:00:00.000Z',
+      source: 'poll',
+      subject: issueItem(),
+    })
+    if (observed._tag !== 'Inserted') throw new Error('Expected a new issue Revision.')
+
+    expect(store.claimNextIssueTriageTask('issue-worker', '2026-08-13T01:01:00.000Z', 600_000)).toBeNull()
+    expect(store.getDashboardSnapshot('2026-08-13T01:01:00.000Z').queue).toEqual([
+      expect.objectContaining({ number: 12, state: { _tag: 'AwaitingApproval', kind: 'issue_triage' } }),
     ])
+    expect(store.isIssueApprovalPending('wolfstar-project/example', 12, observed.revisionId)).toBe(true)
+    expect(
+      store.approveIssue({
+        repository: 'wolfstar-project/example',
+        issueNumber: 12,
+        revisionId: observed.revisionId,
+        at: '2026-08-13T01:01:01.000Z',
+      }),
+    ).toEqual({ _tag: 'Approved', work: 'issue_triage', taskId: expect.any(String) })
+    expect(store.isIssueApprovalPending('wolfstar-project/example', 12, observed.revisionId)).toBe(false)
+
+    const task = store.claimNextIssueTriageTask('issue-worker', '2026-08-13T01:01:02.000Z', 600_000)
+    if (task === null) throw new Error('Expected an issue triage Task.')
+    store.saveWorkerSession('wolfstar-project/example', 12, 'issue_triage', 'issue-session', '2026-08-13T01:01:05.000Z')
     expect(
       store.completeWorkerTask({
         taskId: task.id,
@@ -1298,26 +1694,24 @@ describe('journal store', () => {
         evidence: JSON.stringify({ _tag: 'READY_TO_IMPLEMENT' }),
       }),
     ).toBe(true)
-    expect(store.isIssueWorkApprovalReady('wolfstar-project/example', 12, task.revisionId)).toBe(true)
+
+    // One Approval covers the whole path. Nothing waits on a person again.
+    expect(store.getDashboardSnapshot('2026-08-13T01:02:01.000Z').queue).toEqual([
+      expect.objectContaining({ number: 12, state: { _tag: 'Queued', work: 'issue_work' } }),
+    ])
+    const work = store.claimNextIssueWorkTask('issue-worker', '2026-08-13T01:02:02.000Z', 600_000)
+    expect(work).toEqual(expect.objectContaining({ kind: 'issue_work', issueNumber: 12, revisionId: task.revisionId }))
+    expect(store.getWorkerSession('wolfstar-project/example', 12, 'issue_triage')).toBe('issue-session')
     expect(
-      store.approveIssueWork({
+      store.approveIssue({
         repository: 'wolfstar-project/example',
         issueNumber: 12,
-        revisionId: task.revisionId,
-        at: '2026-08-13T01:02:01.000Z',
+        revisionId: observed.revisionId,
+        at: '2026-08-13T01:02:03.000Z',
       }),
-    ).toEqual({ _tag: 'Approved', taskId: expect.any(String) })
-    expect(store.isIssueWorkApprovalReady('wolfstar-project/example', 12, task.revisionId)).toBe(false)
-    const work = store.claimNextIssueWorkTask('issue-worker', '2026-08-13T01:02:02.000Z', 600_000)
-    expect(work).toEqual(
-      expect.objectContaining({
-        kind: 'issue_work',
-        issueNumber: 12,
-        revisionId: task.revisionId,
-      }),
-    )
-    expect(store.getWorkerSession('wolfstar-project/example', 12, 'issue_triage')).toBe('issue-session')
-    expect(store.getDashboardSnapshot('2026-08-13T01:02:03.000Z').agents).toEqual([
+    ).toEqual({ _tag: 'Duplicate', work: 'issue_work', taskId: work?.id })
+
+    expect(store.getDashboardSnapshot('2026-08-13T01:02:03.500Z').agents).toEqual([
       expect.objectContaining({ role: 'issue_work', session: { _tag: 'Connected', id: 'issue-session' } }),
     ])
     if (work === null) throw new Error('Expected approved issue work.')
@@ -1333,6 +1727,7 @@ describe('journal store', () => {
           issueNumber: 12,
           pullRequestTitle: 'Fix #12: Broken thing',
           pullRequestBody: 'Closes #12.',
+          diagram: null,
           commitSha: 'issue-commit',
           baseSha: 'base-sha',
           baseRef: 'main',
@@ -1361,7 +1756,7 @@ describe('journal store', () => {
       externalId: 'slow-issue-triage-comment',
       observedAt: '2026-08-13T01:00:00.000Z',
       source: 'poll',
-      subject: issueItem(),
+      subject: issueItem({ author: 'wolfstar-project' }),
     })
     if (observed._tag !== 'Inserted') throw new Error('Expected a new issue Revision.')
     const task = store.claimNextIssueTriageTask('issue-worker', '2026-08-13T01:01:00.000Z', 600_000)
@@ -1421,7 +1816,7 @@ describe('journal store', () => {
       externalId: 'issue-triage-comment',
       observedAt: '2026-08-13T01:00:00.000Z',
       source: 'poll',
-      subject: issueItem(),
+      subject: issueItem({ author: 'wolfstar-project' }),
     })
     if (observed._tag !== 'Inserted') throw new Error('Expected a new issue Revision.')
     const task = store.claimNextIssueTriageTask('issue-worker', '2026-08-13T01:01:00.000Z', 600_000)
@@ -1477,7 +1872,7 @@ describe('journal store', () => {
       externalId: 'issue-triage-comment-rerun',
       observedAt: '2026-08-13T02:00:00.000Z',
       source: 'poll',
-      subject: issueItem({ title: 'Changed issue', updatedAt: '2026-08-13T02:00:00.000Z' }),
+      subject: issueItem({ author: 'wolfstar-project', title: 'Changed issue', updatedAt: '2026-08-13T02:00:00.000Z' }),
     })
     if (changed._tag !== 'Inserted') throw new Error('Expected a changed issue Revision.')
     const rerun = store.claimNextIssueTriageTask('issue-worker', '2026-08-13T02:01:00.000Z', 600_000)
@@ -1503,7 +1898,7 @@ describe('journal store', () => {
       externalId: 'label-bumped-issue',
       observedAt: '2026-08-13T01:00:00.000Z',
       source: 'poll',
-      subject: issueItem(),
+      subject: issueItem({ author: 'wolfstar-project' }),
     })
     if (observed._tag !== 'Inserted') throw new Error('Expected a new issue Revision.')
     const task = store.claimNextIssueTriageTask('issue-worker', '2026-08-13T01:01:00.000Z', 600_000)
@@ -1515,7 +1910,7 @@ describe('journal store', () => {
       externalId: 'label-bumped-issue-again',
       observedAt: '2026-08-13T01:01:30.000Z',
       source: 'poll',
-      subject: issueItem({ updatedAt: '2026-08-13T01:01:30.000Z' }),
+      subject: issueItem({ author: 'wolfstar-project', updatedAt: '2026-08-13T01:01:30.000Z' }),
     })
 
     const staged = store.stageIssueTriageComment({
@@ -1561,7 +1956,7 @@ describe('journal store', () => {
       expect.objectContaining({ kind: 'issue_work', issueNumber: 12, revisionId: triage.revisionId }),
     )
     expect(
-      store.approveIssueWork({
+      store.approveIssue({
         repository: 'wolfstar-project/example',
         issueNumber: 12,
         revisionId: triage.revisionId,
@@ -1611,9 +2006,9 @@ describe('journal store', () => {
       expect.objectContaining({
         number: 12,
         state: {
-          _tag: 'Pending',
+          _tag: 'ActionRequired',
           reason:
-            'wolfstar-project/example reached its limit of 1 open automated pull request. Merge or close one to start Issue work.',
+            'wolfstar-project/example has 1 open automated pull request; its limit is 1. Merge or close a pull request to start Issue work.',
         },
       }),
     )
@@ -1624,6 +2019,9 @@ describe('journal store', () => {
       source: 'poll',
       subject: { ...pullRequest, state: 'closed', updatedAt: '2026-08-13T01:02:04.000Z' },
     })
+    expect(store.claimNextAdversarialReviewTask('review', '2026-08-13T01:02:04.500Z', 600_000)?.pullRequestNumber).toBe(
+      99,
+    )
     expect(store.claimNextIssueWorkTask('issue-worker', '2026-08-13T01:02:05.000Z', 600_000)).toEqual(
       expect.objectContaining({ kind: 'issue_work', issueNumber: 12 }),
     )
@@ -1644,6 +2042,22 @@ describe('journal store', () => {
       subject: issueItem({ repository: 'nuxt/scripts' }),
     })
     if (observed._tag !== 'Inserted') throw new Error('Expected a new issue.')
+
+    expect(store.getDashboardSnapshot('2026-08-13T01:00:01.000Z').queue).toContainEqual(
+      expect.objectContaining({
+        repository: 'nuxt/scripts',
+        number: 12,
+        state: { _tag: 'AwaitingApproval', kind: 'issue_triage' },
+      }),
+    )
+    expect(
+      store.approveIssue({
+        repository: 'nuxt/scripts',
+        issueNumber: 12,
+        revisionId: observed.revisionId,
+        at: '2026-08-13T01:00:02.000Z',
+      }),
+    ).toEqual({ _tag: 'Approved', work: 'issue_triage', taskId: expect.any(String) })
     const triage = store.claimNextIssueTriageTask('issue-worker', '2026-08-13T01:01:00.000Z', 600_000)
     if (triage === null) throw new Error('Expected issue triage.')
     store.completeWorkerTask({
@@ -1653,22 +2067,6 @@ describe('journal store', () => {
       at: '2026-08-13T01:02:00.000Z',
       evidence: JSON.stringify({ _tag: 'READY_TO_IMPLEMENT' }),
     })
-
-    expect(store.getDashboardSnapshot('2026-08-13T01:02:01.000Z').queue).toContainEqual(
-      expect.objectContaining({
-        repository: 'nuxt/scripts',
-        number: 12,
-        state: { _tag: 'AwaitingApproval', kind: 'issue_work' },
-      }),
-    )
-    expect(
-      store.approveIssueWork({
-        repository: 'nuxt/scripts',
-        issueNumber: 12,
-        revisionId: observed.revisionId,
-        at: '2026-08-13T01:02:02.000Z',
-      }),
-    ).toEqual({ _tag: 'Approved', taskId: expect.any(String) })
     expect(store.claimNextIssueWorkTask('issue-worker', '2026-08-13T01:02:03.000Z', 600_000)).toEqual(
       expect.objectContaining({ kind: 'issue_work', issueNumber: 12, repositoryMapping: mapping }),
     )
@@ -1691,7 +2089,7 @@ describe('journal store', () => {
       externalId: 'user-authenticated-issue',
       observedAt: '2026-08-13T01:00:00.000Z',
       source: 'poll',
-      subject: issueItem({ repository: 'nuxt/scripts' }),
+      subject: issueItem({ repository: 'nuxt/scripts', author: 'wolfstar-project' }),
     })
 
     expect(store.claimNextIssueTriageTask('issue-worker', '2026-08-13T01:01:00.000Z', 600_000)).toEqual(
@@ -1704,12 +2102,21 @@ describe('journal store', () => {
     (route) => {
       const store = createStore()
       store.syncRepositories([repositoryMapping()], '2026-08-13T00:00:00.000Z')
-      store.recordObservation({
+      const observed = store.recordObservation({
         externalId: `issue-${route}`,
         observedAt: '2026-08-13T01:00:00.000Z',
         source: 'poll',
         subject: issueItem(),
       })
+      if (observed._tag !== 'Inserted') throw new Error('Expected a new issue Revision.')
+      expect(
+        store.approveIssue({
+          repository: 'wolfstar-project/example',
+          issueNumber: 12,
+          revisionId: observed.revisionId,
+          at: '2026-08-13T01:00:01.000Z',
+        }),
+      ).toEqual({ _tag: 'Approved', work: 'issue_triage', taskId: expect.any(String) })
       const task = store.claimNextIssueTriageTask('issue-worker', '2026-08-13T01:01:00.000Z', 600_000)
       if (task === null) throw new Error('Expected issue triage.')
 
@@ -1721,15 +2128,16 @@ describe('journal store', () => {
         evidence: JSON.stringify({ _tag: route }),
       })
 
+      expect(store.claimNextIssueWorkTask('issue-worker', '2026-08-13T01:02:01.000Z', 600_000)).toBeNull()
+      expect(store.isIssueApprovalPending('wolfstar-project/example', 12, observed.revisionId)).toBe(false)
       expect(
-        store.approveIssueWork({
+        store.approveIssue({
           repository: 'wolfstar-project/example',
           issueNumber: 12,
-          revisionId: task.revisionId,
-          at: '2026-08-13T01:02:01.000Z',
+          revisionId: observed.revisionId,
+          at: '2026-08-13T01:02:02.000Z',
         }),
-      ).toEqual({ _tag: 'Rejected', reason: { _tag: 'TriageRequired' } })
-      expect(store.claimNextIssueWorkTask('issue-worker', '2026-08-13T01:02:01.000Z', 600_000)).toBeNull()
+      ).toEqual({ _tag: 'Rejected', reason: { _tag: 'NothingToStart' } })
     },
   )
 
@@ -2309,6 +2717,158 @@ describe('journal store', () => {
     expect(store.listStoppedReviews()).toEqual([])
   })
 
+  it('banners its own comment when GitHub closes a pull request with another trusted comment', async () => {
+    const store = createStore()
+    store.syncRepositories([repositoryMapping()], '2026-08-13T00:00:00.000Z')
+    const pullRequest = pullRequestItem({ mergeState: 'clean' })
+    store.recordObservation({
+      externalId: 'closure-with-restored-label',
+      observedAt: '2026-08-13T01:00:00.000Z',
+      source: 'poll',
+      subject: pullRequest,
+    })
+    const review = store.claimNextAdversarialReviewTask('review-agent', '2026-08-13T01:01:00.000Z', 600_000)
+    if (review === null) throw new Error('Expected the Review Task.')
+    const agentBody = '### 🤖 PENDING\n\n- **CI gate:** PENDING. Base branch CI is still running.'
+    const staged = store.stageReviewStatus({
+      taskKind: 'adversarial_review',
+      phase: 'terminal',
+      taskId: review.id,
+      workerId: review.state.workerId,
+      fence: review.state.fence,
+      at: '2026-08-13T01:02:00.000Z',
+      revisionId: review.revisionId,
+      expectedHeadSha: pullRequest.headSha,
+      body: agentBody,
+    })
+    if (staged._tag === 'Rejected') throw new Error(staged.reason)
+    const command = store.claimReviewStatus(staged.commandId, 'status-worker', '2026-08-13T01:02:01.000Z', 60_000)
+    if (command === null) throw new Error('Expected the review status command.')
+    store.completeReviewStatus({
+      commandId: command.id,
+      workerId: command.workerId,
+      fence: command.fence,
+      at: '2026-08-13T01:02:02.000Z',
+      commentId: 42,
+      url: 'https://github.com/wolfstar-project/example/pull/24#issuecomment-42',
+    })
+    expect(
+      store.completeWorkerTask({
+        taskId: review.id,
+        workerId: review.state.workerId,
+        fence: review.state.fence,
+        at: '2026-08-13T01:02:03.000Z',
+        evidence: 'Waiting for Baseline repair baseline-task.',
+      }),
+    ).toBe(true)
+
+    // An external comment carries no target evidence and remains context only.
+    const headB = 'b'.repeat(40)
+    const trustedReview = {
+      _tag: 'Found',
+      authorLogin: 'wolfstar-project',
+      state: 'complete',
+      url: 'https://github.com/wolfstar-project/example/pull/24#issuecomment-77',
+    } as const
+    const pushed = store.recordObservation({
+      externalId: 'closure-with-restored-label-head-b',
+      observedAt: '2026-08-13T01:05:00.000Z',
+      source: 'poll',
+      subject: {
+        ...pullRequest,
+        headSha: headB,
+        updatedAt: '2026-08-13T01:05:00.000Z',
+        priorAutomatedReview: trustedReview,
+      },
+    })
+    if (pushed._tag !== 'Inserted') throw new Error('Expected the pushed head Revision.')
+    expect(store.claimNextTerminalReviewStatus('label-publisher', '2026-08-13T01:06:00.000Z', 60_000)).toBeNull()
+
+    const closed = store.recordObservation({
+      externalId: 'closure-with-restored-label-closed',
+      observedAt: '2026-08-13T01:07:00.000Z',
+      source: 'poll',
+      subject: {
+        ...pullRequest,
+        headSha: headB,
+        state: 'closed',
+        mergedAt: '2026-08-13T01:07:00.000Z',
+        updatedAt: '2026-08-13T01:07:00.000Z',
+        priorAutomatedReview: trustedReview,
+      },
+    })
+    if (closed._tag !== 'Inserted') throw new Error('Expected the closed pull request Revision.')
+    expect(
+      store.recordVerifiedPullRequestClosure({
+        repository: 'wolfstar-project/example',
+        pullRequestNumber: 24,
+        revisionId: closed.revisionId,
+        headSha: headB,
+        baseSha: pullRequest.baseSha,
+        disposition: { _tag: 'Merged' },
+        at: '2026-08-13T01:07:00.000Z',
+      }),
+    ).toBe(true)
+
+    const stopped = store.listStoppedReviews()
+    expect(stopped).toEqual([
+      expect.objectContaining({
+        commentId: 42,
+        publishedBody: agentBody,
+      }),
+    ])
+
+    const edits: Array<{ commentId: number; body: string }> = []
+    let closure: Parameters<ReturnType<typeof openJournalStore>['recordReviewClosure']>[0] | undefined
+    const { results } = await publishStoppedReviews(
+      {
+        github: {
+          clearAgentLabels: () => Promise.resolve(ok(undefined)),
+          getPullRequestReviewSnapshot: () => {
+            throw new Error('A merged pull request needs no snapshot.')
+          },
+          upsertReviewCheckRun: () => Promise.resolve(ok(undefined)),
+          editReviewStatus: (_repository, _number, commentId, _expectedBody, body) => {
+            // Comment 77 belongs to the trusted actor, so GitHub refuses the edit.
+            if (commentId === 77)
+              return Promise.resolve(
+                ok({ _tag: 'Foreign', reason: 'The stored automated review comment belongs to another GitHub actor.' }),
+              )
+            edits.push({ commentId, body })
+            return Promise.resolve(
+              ok({
+                _tag: 'Edited',
+                commentId,
+                url: `https://github.com/wolfstar-project/example/pull/24#issuecomment-${commentId}`,
+              }),
+            )
+          },
+        },
+        now: () => new Date('2026-08-13T01:08:00.000Z'),
+        repositories: [repositoryMapping()],
+        store: {
+          recordReviewClosure: (input) => {
+            closure = input
+            return true
+          },
+          recordDeletedReviewComment: () => true,
+          listStoppedReviews: () => store.listStoppedReviews(),
+          recordStoppedReviewStatus: () => true,
+        },
+      },
+      new AbortController().signal,
+    )
+
+    expect(results).toEqual([ok({ _tag: 'Published', repository: 'wolfstar-project/example', pullRequestNumber: 24 })])
+    expect(edits).toEqual([{ commentId: 42, body: expect.stringContaining('### 🤖 MERGED') }])
+    expect(closure).toEqual(
+      expect.objectContaining({
+        disposition: { _tag: 'Merged' },
+        result: expect.objectContaining({ _tag: 'Published', commentId: 42 }),
+      }),
+    )
+  })
+
   it('closes the READY status that replaced a PENDING Review', () => {
     const store = createStore()
     store.syncRepositories([repositoryMapping()], '2026-08-13T00:00:00.000Z')
@@ -2718,6 +3278,72 @@ describe('journal store', () => {
     })
 
     expect(queued._tag).toBe('Queued')
+  })
+
+  it('queues a Baseline repair from a gate refresh of the current pull request Revision', () => {
+    const store = createStore()
+    store.syncRepositories([repositoryMapping()], '2026-08-13T00:00:00.000Z')
+    const observed = store.recordObservation({
+      externalId: 'baseline-gate-pr',
+      observedAt: '2026-08-13T01:00:00.000Z',
+      source: 'poll',
+      subject: pullRequestItem({ mergeState: 'clean' }),
+    })
+    if (observed._tag !== 'Inserted') throw new Error('Expected the pull request Revision.')
+
+    const queued = store.queueBaselineRepairForGate({
+      repository: 'wolfstar-project/example',
+      pullRequestNumber: 24,
+      revisionId: observed.revisionId,
+      baseSha: 'base123',
+      at: '2026-08-13T01:02:00.000Z',
+    })
+    const again = store.queueBaselineRepairForGate({
+      repository: 'wolfstar-project/example',
+      pullRequestNumber: 24,
+      revisionId: observed.revisionId,
+      baseSha: 'base123',
+      at: '2026-08-13T01:03:00.000Z',
+    })
+    const repair = store.claimNextBaselineRepairTask('baseline-agent', '2026-08-13T01:04:00.000Z', 600_000)
+
+    expect(queued._tag).toBe('Queued')
+    expect(again).toEqual({ _tag: 'Existing', taskId: queued._tag === 'Queued' ? queued.taskId : '' })
+    expect(repair).toEqual(expect.objectContaining({ kind: 'baseline_repair', pullRequestNumber: 24 }))
+    expect(repair?.pullRequest.baseSha).toBe('base123')
+  })
+
+  it('refuses a gate refresh Baseline repair for a superseded pull request Revision', () => {
+    const store = createStore()
+    store.syncRepositories([repositoryMapping()], '2026-08-13T00:00:00.000Z')
+    const observed = store.recordObservation({
+      externalId: 'baseline-gate-stale-pr',
+      observedAt: '2026-08-13T01:00:00.000Z',
+      source: 'poll',
+      subject: pullRequestItem({ mergeState: 'clean' }),
+    })
+    if (observed._tag !== 'Inserted') throw new Error('Expected the pull request Revision.')
+    store.recordObservation({
+      externalId: 'baseline-gate-stale-pr-moved',
+      observedAt: '2026-08-13T01:01:00.000Z',
+      source: 'poll',
+      subject: pullRequestItem({
+        mergeState: 'clean',
+        headSha: 'moved-head-commit',
+        updatedAt: '2026-08-13T01:01:00.000Z',
+      }),
+    })
+
+    const queued = store.queueBaselineRepairForGate({
+      repository: 'wolfstar-project/example',
+      pullRequestNumber: 24,
+      revisionId: observed.revisionId,
+      baseSha: 'base123',
+      at: '2026-08-13T01:02:00.000Z',
+    })
+
+    expect(queued).toEqual({ _tag: 'Rejected', reason: 'The reviewed pull request Revision is no longer current.' })
+    expect(store.claimNextBaselineRepairTask('baseline-agent', '2026-08-13T01:04:00.000Z', 600_000)).toBeNull()
   })
 
   it('reports an external repository as unauthorized rather than rejected', () => {
@@ -3260,7 +3886,7 @@ describe('journal store', () => {
         fence: rerun.state.fence,
         at: '2026-08-13T01:02:03.000Z',
       }),
-    ).toEqual({ _tag: 'Queued', taskId: expect.any(String) })
+    ).toEqual({ _tag: 'Queued', taskId: expect.any(String), rounds: { number: 1, limit: 3 } })
   })
 
   it('does not carry Approval to a new Revision', () => {
@@ -3635,7 +4261,7 @@ describe('journal store', () => {
     expect(store.getDashboardSnapshot('2026-08-13T01:02:00.000Z').queue).toEqual([])
   })
 
-  it('revokes a running review when a trusted review covers the current head commit', () => {
+  it('keeps a running Review when a trusted comment has no target evidence', () => {
     const store = createStore()
     store.syncRepositories([repositoryMapping()], '2026-08-13T00:00:00.000Z')
     const pullRequest = pullRequestItem({ mergeState: 'clean' })
@@ -3671,13 +4297,10 @@ describe('journal store', () => {
         at: '2026-08-13T01:02:01.000Z',
         leaseMilliseconds: 45 * 60_000,
       }),
-    ).toBe(false)
+    ).toBe(true)
     expect(
-      store.getDashboardSnapshot('2026-08-13T01:02:01.000Z').tasks.find((item) => item.id === task.id)?.state,
-    ).toEqual({
-      _tag: 'Superseded',
-      reason: 'The current head commit already has an automated review.',
-    })
+      store.getDashboardSnapshot('2026-08-13T01:02:01.000Z').tasks.find((item) => item.id === task.id)?.state._tag,
+    ).toBe('Running')
   })
 
   it('keeps Review work when the prior automated comment is still active', () => {
@@ -3738,6 +4361,65 @@ describe('journal store', () => {
     const rerun = store.claimNextAdversarialReviewTask('reviewer-2', '2026-08-13T01:02:01.000Z', 10_000)
     expect(rerun).toEqual(expect.objectContaining({ id: first.id, revisionId: observed.revisionId }))
     expect(rerun?.state.fence).toBe(2)
+  })
+
+  it('replaces a stored skip once the same head has a completed Review', () => {
+    const store = createStore()
+    store.syncRepositories([repositoryMapping()], '2026-08-13T00:00:00.000Z')
+    const subject = pullRequestItem({ mergeState: 'clean' })
+    const observed = store.recordExactPullRequestObservation({
+      externalId: 'skip-then-reviewed',
+      observedAt: '2026-08-13T01:00:00.000Z',
+      subject,
+      pullRequestTriage: {
+        _tag: 'Skipped',
+        reason: 'model: classification chose skip with confidence 0.93.',
+        source: 'model',
+      },
+    })
+    if (observed._tag !== 'Inserted') throw new Error('Expected a new pull request.')
+    expect(
+      store.getLatestPullRequestTriageRun('wolfstar-project/example', subject.number, subject.headSha)?.outcome,
+    ).toBe('ReviewSkipped')
+
+    expect(
+      store.recordReviewRun({
+        id: 'override-review',
+        revisionId: observed.revisionId,
+        repository: 'wolfstar-project/example',
+        pullRequestNumber: subject.number,
+        headSha: subject.headSha,
+        provider: 'codex',
+        sessionId: 'session',
+        model: 'gpt-5.6',
+        agentVersion: '1.2.3',
+        skillDigest: 'd'.repeat(64),
+        startedAt: '2026-08-13T01:01:00.000Z',
+        completedAt: '2026-08-13T01:02:00.000Z',
+        gates: passedReviewGates(),
+        confidence: 100,
+        findings: [],
+      })._tag,
+    ).toBe('Inserted')
+
+    store.recordExactPullRequestObservation({
+      externalId: 'skip-then-reviewed-again',
+      observedAt: '2026-08-13T01:05:00.000Z',
+      subject,
+    })
+
+    expect(store.getLatestPullRequestTriageRun('wolfstar-project/example', subject.number, subject.headSha)).toEqual({
+      outcome: 'ReviewRequired',
+      reason: 'rule: this head commit already has a Review.',
+      completedAt: '2026-08-13T01:05:00.000Z',
+      settledAt: null,
+    })
+    const dashboardItem = store
+      .getDashboardSnapshot('2026-08-13T01:05:01.000Z')
+      .items.find((item) => item.number === subject.number)
+    expect(
+      dashboardItem !== undefined && dashboardItem.kind === 'pull_request' ? dashboardItem.triage?.outcome : undefined,
+    ).toBe('ReviewRequired')
   })
 
   it('lets the manual Review label override a skipped triage result', () => {
@@ -3845,10 +4527,15 @@ describe('journal store', () => {
     if (secondObservation._tag !== 'Inserted') throw new Error('Expected the new base revision.')
 
     expect(store.claimNextAdversarialReviewTask('reviewer-2', '2026-08-13T02:01:00.000Z', 10_000)).toBeNull()
-    expect(store.listWorkflowEvents({ stream: 'review_resolution', limit: 10 })).toContainEqual(
+    // The run answers the head commit, so it follows the head to the new base.
+    expect(store.listReviewRuns('wolfstar-project/example', 24)).toEqual([
       expect.objectContaining({
-        event: 'Recorded',
+        id: 'old-base-attempt',
         revisionId: secondObservation.revisionId,
+      }),
+    ])
+    expect(store.listWorkflowEvents({ stream: 'review_resolution', limit: 10 })).not.toContainEqual(
+      expect.objectContaining({
         to: 'ExistingReview',
       }),
     )
@@ -3919,6 +4606,232 @@ describe('journal store', () => {
     expect(store.claimNextAdversarialReviewTask('reviewer-2', '2026-08-13T02:01:00.000Z', 10_000)).toEqual(
       expect.objectContaining({ id: first.id }),
     )
+  })
+
+  it('keeps the stored Review when only Auto merge scope changes', () => {
+    const store = createStore()
+    const initialPolicy = repositoryMapping()
+    store.syncRepositories([initialPolicy], '2026-08-13T00:00:00.000Z')
+    store.recordObservation({
+      externalId: 'review-before-auto-merge-change',
+      observedAt: '2026-08-13T01:00:00.000Z',
+      source: 'poll',
+      subject: pullRequestItem({ mergeState: 'clean' }),
+    })
+    const first = store.claimNextAdversarialReviewTask('reviewer-1', '2026-08-13T01:01:00.000Z', 3_600_000)
+    if (first === null) throw new Error('Expected the first Review.')
+    store.recordReviewRun({
+      id: 'auto-merge-scope-review',
+      repository: first.repository,
+      pullRequestNumber: first.pullRequestNumber,
+      revisionId: first.revisionId,
+      headSha: first.pullRequest.headSha,
+      provider: 'codex',
+      sessionId: 'auto-merge-scope-session',
+      model: 'gpt-5.6',
+      agentVersion: '1.2.3',
+      skillDigest: 'f'.repeat(64),
+      startedAt: '2026-08-13T01:01:00.000Z',
+      completedAt: '2026-08-13T01:02:00.000Z',
+      gates: passedReviewGates(),
+      confidence: 95,
+      findings: [],
+    })
+    store.completeWorkerTask({
+      taskId: first.id,
+      workerId: first.state.workerId,
+      fence: first.state.fence,
+      at: '2026-08-13T01:02:00.000Z',
+      evidence: 'auto-merge-scope-review',
+    })
+
+    // Auto merge reads a verdict; it does not change one. A wider scope must
+    // not send every open pull request back through Review.
+    store.syncRepositories(
+      [{ ...initialPolicy, autoMerge: { _tag: 'Every', minimumConfidence: 90 } }],
+      '2026-08-13T02:00:00.000Z',
+    )
+    store.recordObservation({
+      externalId: 'review-after-auto-merge-change',
+      observedAt: '2026-08-13T02:00:01.000Z',
+      source: 'poll',
+      subject: pullRequestItem({ mergeState: 'clean' }),
+    })
+
+    expect(store.claimNextAdversarialReviewTask('reviewer-2', '2026-08-13T02:01:00.000Z', 10_000)).toBeNull()
+    expect(store.storedReviewForHead(first.repository, first.pullRequestNumber, first.pullRequest.headSha)).toEqual({
+      _tag: 'Current',
+      run: expect.objectContaining({ id: 'auto-merge-scope-review' }),
+    })
+  })
+
+  it('stops counting a stored Review run once trusted repository policy changes', () => {
+    const store = createStore()
+    const initialPolicy = repositoryMapping()
+    store.syncRepositories([initialPolicy], '2026-08-13T00:00:00.000Z')
+    store.recordObservation({
+      externalId: 'policy-scope-before',
+      observedAt: '2026-08-13T01:00:00.000Z',
+      source: 'poll',
+      subject: pullRequestItem({ mergeState: 'clean' }),
+    })
+    const first = store.claimNextAdversarialReviewTask('reviewer-1', '2026-08-13T01:01:00.000Z', 10_000)
+    if (first === null) throw new Error('Expected the first Review.')
+    store.recordReviewRun({
+      id: 'policy-scope-review',
+      repository: first.repository,
+      pullRequestNumber: first.pullRequestNumber,
+      revisionId: first.revisionId,
+      headSha: first.pullRequest.headSha,
+      provider: 'codex',
+      sessionId: 'policy-scope-session',
+      model: 'gpt-5.6',
+      agentVersion: '1.2.3',
+      skillDigest: 'f'.repeat(64),
+      startedAt: '2026-08-13T01:01:00.000Z',
+      completedAt: '2026-08-13T01:02:00.000Z',
+      gates: passedReviewGates(),
+      confidence: 95,
+      findings: [],
+    })
+    store.completeWorkerTask({
+      taskId: first.id,
+      workerId: first.state.workerId,
+      fence: first.state.fence,
+      at: '2026-08-13T01:02:00.000Z',
+      evidence: 'policy-scope-review',
+    })
+    expect(store.storedReviewForHead(first.repository, first.pullRequestNumber, first.pullRequest.headSha)).toEqual({
+      _tag: 'Current',
+      run: expect.objectContaining({ id: 'policy-scope-review' }),
+    })
+
+    store.syncRepositories(
+      [
+        {
+          ...initialPolicy,
+          writablePullRequestHeadPrefixes: [...initialPolicy.writablePullRequestHeadPrefixes, 'refactor/'],
+        },
+      ],
+      '2026-08-13T02:00:00.000Z',
+    )
+
+    // The planner requeues this head for a fresh Review. A worker that still
+    // resumed the stored run would complete without new evidence, and the
+    // planner would requeue it on every poll.
+    expect(store.storedReviewForHead(first.repository, first.pullRequestNumber, first.pullRequest.headSha)).toEqual({
+      _tag: 'Stale',
+    })
+    expect(store.storedReviewForHead(first.repository, first.pullRequestNumber, 'unreviewed-head')).toEqual({
+      _tag: 'None',
+    })
+  })
+
+  it('keeps a Running Review whose own run just landed through the next poll', () => {
+    const store = createStore()
+    store.syncRepositories([repositoryMapping()], '2026-08-13T00:00:00.000Z')
+    const pullRequest = pullRequestItem({ mergeState: 'clean' })
+    store.recordObservation({
+      externalId: 'running-review-first',
+      observedAt: '2026-08-13T01:00:00.000Z',
+      source: 'poll',
+      subject: pullRequest,
+    })
+    const task = store.claimNextAdversarialReviewTask('reviewer-1', '2026-08-13T01:01:00.000Z', 3_600_000)
+    if (task === null) throw new Error('Expected the Review Task.')
+    store.recordReviewRun({
+      id: 'landed-run',
+      repository: task.repository,
+      pullRequestNumber: task.pullRequestNumber,
+      revisionId: task.revisionId,
+      headSha: task.pullRequest.headSha,
+      provider: 'codex',
+      sessionId: 'landed-session',
+      model: 'gpt-5.6',
+      agentVersion: '1.2.3',
+      skillDigest: 'f'.repeat(64),
+      startedAt: '2026-08-13T01:01:00.000Z',
+      completedAt: '2026-08-13T01:10:00.000Z',
+      gates: passedReviewGates(),
+      confidence: 95,
+      findings: [],
+    })
+
+    // The worker records its run, then publishes. A poll between the two
+    // reads the head as reviewed and must not take the Task from that worker.
+    store.recordObservation({
+      externalId: 'running-review-poll',
+      observedAt: '2026-08-13T01:10:01.000Z',
+      source: 'poll',
+      subject: pullRequest,
+    })
+
+    expect(
+      store.completeWorkerTask({
+        taskId: task.id,
+        workerId: task.state.workerId,
+        fence: task.state.fence,
+        at: '2026-08-13T01:10:02.000Z',
+        evidence: 'landed-run',
+      }),
+    ).toBe(true)
+  })
+
+  it('refuses gate refreshes from an earlier repository policy', () => {
+    const store = createStore()
+    const mapping = repositoryMapping()
+    store.syncRepositories([mapping], '2026-08-13T00:00:00.000Z')
+    const observed = store.recordObservation({
+      externalId: 'old-policy',
+      observedAt: '2026-08-13T01:00:00.000Z',
+      source: 'poll',
+      subject: pullRequestItem({ mergeState: 'clean' }),
+    })
+    if (observed._tag !== 'Inserted') throw new Error('Expected a Review revision.')
+    finishReviewTask(store, '2026-08-13T01:00:30.000Z')
+    store.recordReviewRun({
+      id: 'old-policy-run',
+      repository: mapping.github,
+      pullRequestNumber: 24,
+      revisionId: observed.revisionId,
+      headSha: 'abc123',
+      provider: 'codex',
+      sessionId: 'session',
+      model: 'model',
+      agentVersion: '1',
+      skillDigest: 'f'.repeat(64),
+      startedAt: '2026-08-13T01:01:00.000Z',
+      completedAt: '2026-08-13T01:02:00.000Z',
+      gates: passedReviewGates(),
+      confidence: 95,
+      findings: [],
+    })
+    store.recordReviewPublication({
+      id: 'old-policy-publication',
+      reviewRunId: 'old-policy-run',
+      body: '### READY',
+      at: '2026-08-13T01:03:00.000Z',
+      result: { _tag: 'Published', githubCommentId: 42, url: 'url' },
+    })
+    store.syncRepositories(
+      [{ ...mapping, writablePullRequestHeadPrefixes: [...mapping.writablePullRequestHeadPrefixes, 'refactor/'] }],
+      '2026-08-13T02:00:00.000Z',
+    )
+
+    expect(store.listReviewGateRefreshes()).toEqual([])
+    expect(
+      store.stageReviewGateStatus({
+        reviewRunId: 'old-policy-run',
+        repository: mapping.github,
+        pullRequestNumber: 24,
+        revisionId: observed.revisionId,
+        expectedHeadSha: 'abc123',
+        gates: passedReviewGates(),
+        body: '### READY',
+        desiredOutcome: 'READY',
+        at: '2026-08-13T02:01:00.000Z',
+      })._tag,
+    ).toBe('Rejected')
   })
 
   it('releases a review after its completed Baseline repair becomes stale', () => {
@@ -4535,14 +5448,26 @@ describe('journal store', () => {
     )
   })
 
-  it('requires fresh triage before retrying approved issue work against a changed scope', () => {
+  it.each([
+    { ownership: 'owned', route: 'READY_TO_IMPLEMENT' },
+    { ownership: 'maintained', route: 'READY_TO_IMPLEMENT' },
+    { ownership: 'owned', route: 'WAIT_TO_IMPLEMENT' },
+    { ownership: 'maintained', route: 'WAIT_TO_IMPLEMENT' },
+  ] as const)('keeps Approval after fresh triage on $ownership with route $route', ({ ownership, route }) => {
     const store = createStore()
-    store.syncRepositories([repositoryMapping()], '2026-08-13T00:00:00.000Z')
-    store.recordObservation({
+    store.syncRepositories([repositoryMapping({ ownership })], '2026-08-13T00:00:00.000Z')
+    const observed = store.recordObservation({
       externalId: 'issue-scope-retry',
       observedAt: '2026-08-13T01:00:00.000Z',
       source: 'poll',
       subject: issueItem(),
+    })
+    if (observed._tag !== 'Inserted') throw new Error('Expected a new issue Revision.')
+    store.approveIssue({
+      repository: 'wolfstar-project/example',
+      issueNumber: 12,
+      revisionId: observed.revisionId,
+      at: '2026-08-13T01:00:00.500Z',
     })
     const triage = store.claimNextIssueTriageTask('triage-worker', '2026-08-13T01:00:01.000Z', 10_000)
     if (triage === null) throw new Error('Expected issue triage.')
@@ -4552,12 +5477,6 @@ describe('journal store', () => {
       fence: triage.state.fence,
       at: '2026-08-13T01:00:02.000Z',
       evidence: JSON.stringify({ _tag: 'READY_TO_IMPLEMENT' }),
-    })
-    store.approveIssueWork({
-      repository: 'wolfstar-project/example',
-      issueNumber: 12,
-      revisionId: triage.revisionId,
-      at: '2026-08-13T01:00:03.000Z',
     })
     const reason = 'The issue changed before work started.'
     for (const attempt of [1, 2, 3]) {
@@ -4583,28 +5502,66 @@ describe('journal store', () => {
       workerId: retriage.state.workerId,
       fence: retriage.state.fence,
       at: '2026-08-13T01:00:09.000Z',
+      evidence: JSON.stringify({ _tag: route }),
+    })
+    const work = store.claimNextIssueWorkTask('issue-worker-4', '2026-08-13T01:00:12.000Z', 10_000)
+    expect(work?.issueNumber ?? null).toBe(route === 'READY_TO_IMPLEMENT' ? 12 : null)
+    if (work !== null) {
+      expect(work.revisionId).toBe(triage.revisionId)
+      store.cancelTask({ taskId: work.id, at: '2026-08-13T01:00:13.000Z' })
+      store.recordObservation({
+        externalId: 'poll-after-cancellation',
+        observedAt: '2026-08-13T01:00:14.000Z',
+        source: 'poll',
+        subject: issueItem(),
+      })
+      expect(store.claimNextIssueWorkTask('issue-worker-5', '2026-08-13T01:00:15.000Z', 10_000)).toBeNull()
+    }
+  })
+
+  it('retries changed-scope issue work on a maintained repository', () => {
+    const store = createStore()
+    store.syncRepositories([repositoryMapping({ ownership: 'maintained' })], '2026-08-13T00:00:00.000Z')
+    const observed = store.recordObservation({
+      externalId: 'issue-scope-retry-maintained',
+      observedAt: '2026-08-13T01:00:00.000Z',
+      source: 'poll',
+      subject: issueItem(),
+    })
+    if (observed._tag !== 'Inserted') throw new Error('Expected a new issue Revision.')
+    store.approveIssue({
+      repository: 'wolfstar-project/example',
+      issueNumber: 12,
+      revisionId: observed.revisionId,
+      at: '2026-08-13T01:00:00.500Z',
+    })
+    const triage = store.claimNextIssueTriageTask('triage-worker', '2026-08-13T01:00:01.000Z', 10_000)
+    if (triage === null) throw new Error('Expected issue triage.')
+    store.completeWorkerTask({
+      taskId: triage.id,
+      workerId: triage.state.workerId,
+      fence: triage.state.fence,
+      at: '2026-08-13T01:00:02.000Z',
       evidence: JSON.stringify({ _tag: 'READY_TO_IMPLEMENT' }),
     })
-    expect(store.getDashboardSnapshot('2026-08-13T01:00:10.000Z').queue).toContainEqual(
-      expect.objectContaining({
-        number: 12,
-        state: { _tag: 'AwaitingApproval', kind: 'issue_work' },
-      }),
-    )
-    expect(
-      store.approveIssueWork({
-        repository: 'wolfstar-project/example',
-        issueNumber: 12,
-        revisionId: retriage.revisionId,
-        at: '2026-08-13T01:00:11.000Z',
-      }),
-    ).toEqual({ _tag: 'Approved', taskId: expect.any(String) })
-    expect(store.claimNextIssueWorkTask('issue-worker-4', '2026-08-13T01:00:12.000Z', 10_000)).toEqual(
-      expect.objectContaining({
-        kind: 'issue_work',
-        issueNumber: 12,
-      }),
-    )
+    for (const attempt of [1, 2, 3]) {
+      const at = `2026-08-13T01:00:0${attempt + 3}.000Z`
+      const task = store.claimNextIssueWorkTask(`issue-worker-${attempt}`, at, 10_000)
+      if (task === null) throw new Error(`Expected issue work attempt ${attempt}.`)
+      store.failTask({
+        taskId: task.id,
+        workerId: task.state.workerId,
+        fence: task.state.fence,
+        at,
+        reason: 'The issue changed before work started.',
+      })
+    }
+
+    // The same capability that claims the work decides the retry. Maintained
+    // repositories may work issues, so their changed-scope failures retriage.
+    expect(store.retryRecoverableWorkerFailures('2026-08-13T01:00:07.000Z')).toBe(1)
+    const retriage = store.claimNextIssueTriageTask('triage-worker-2', '2026-08-13T01:00:08.000Z', 10_000)
+    expect(retriage?.state.fence).toBe(2)
   })
 
   it('invalidates triage and Approval when human Issue content changes', () => {
@@ -4617,6 +5574,14 @@ describe('journal store', () => {
       subject: issueItem({ contentDigest: 'a'.repeat(64) }),
     })
     if (first._tag !== 'Inserted') throw new Error('Expected the first Issue Revision.')
+    expect(
+      store.approveIssue({
+        repository: 'wolfstar-project/example',
+        issueNumber: 12,
+        revisionId: first.revisionId,
+        at: '2026-08-13T01:00:00.500Z',
+      })._tag,
+    ).toBe('Approved')
     const triage = store.claimNextIssueTriageTask('triage-1', '2026-08-13T01:00:01.000Z', 60_000)
     if (triage === null) throw new Error('Expected Issue triage.')
     store.completeWorkerTask({
@@ -4626,14 +5591,9 @@ describe('journal store', () => {
       at: '2026-08-13T01:00:02.000Z',
       evidence: JSON.stringify({ _tag: 'READY_TO_IMPLEMENT' }),
     })
-    expect(
-      store.approveIssueWork({
-        repository: triage.repository,
-        issueNumber: triage.issueNumber,
-        revisionId: triage.revisionId,
-        at: '2026-08-13T01:00:03.000Z',
-      })._tag,
-    ).toBe('Approved')
+    expect(store.claimNextIssueWorkTask('issue-worker', '2026-08-13T01:00:03.000Z', 60_000)).toEqual(
+      expect.objectContaining({ kind: 'issue_work', revisionId: first.revisionId }),
+    )
 
     const changed = store.recordObservation({
       externalId: 'issue-content-changed',
@@ -4643,10 +5603,34 @@ describe('journal store', () => {
     })
     if (changed._tag !== 'Inserted') throw new Error('Expected changed Issue content to create a Revision.')
 
+    // New text is new outside text. The old Approval names a state that no longer exists.
     expect(store.claimNextIssueWorkTask('issue-worker', '2026-08-13T01:00:05.000Z', 60_000)).toBeNull()
-    expect(store.claimNextIssueTriageTask('triage-2', '2026-08-13T01:00:05.000Z', 60_000)).toMatchObject({
-      revisionId: changed.revisionId,
-    })
+    expect(store.claimNextIssueTriageTask('triage-2', '2026-08-13T01:00:05.000Z', 60_000)).toBeNull()
+    expect(store.getDashboardSnapshot('2026-08-13T01:00:05.000Z').queue).toContainEqual(
+      expect.objectContaining({
+        number: 12,
+        revisionId: changed.revisionId,
+        state: { _tag: 'AwaitingApproval', kind: 'issue_triage' },
+      }),
+    )
+    expect(
+      store.approveIssue({
+        repository: 'wolfstar-project/example',
+        issueNumber: 12,
+        revisionId: first.revisionId,
+        at: '2026-08-13T01:00:06.000Z',
+      }),
+    ).toEqual({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } })
+    expect(
+      store.approveIssue({
+        repository: 'wolfstar-project/example',
+        issueNumber: 12,
+        revisionId: changed.revisionId,
+        at: '2026-08-13T01:00:06.000Z',
+      }),
+    ).toEqual({ _tag: 'Approved', work: 'issue_triage', taskId: expect.any(String) })
+    const fresh = store.claimNextIssueTriageTask('triage-2', '2026-08-13T01:00:07.000Z', 60_000)
+    expect(fresh?.revisionId).toBe(changed.revisionId)
   })
 
   it('shows repeated pull request description failures instead of the Agent fallback', () => {
@@ -4822,6 +5806,84 @@ describe('journal store', () => {
     })
     expect(store.listWorkflowEvents({ stream: 'routine_run', limit: 10 }).map((event) => event.event)).toContain(
       'RestartRecovered',
+    )
+  })
+
+  it('requeues a Routine run that failed while the Agent provider was unreachable', () => {
+    const store = createStore()
+    store.syncRepositories([repositoryMapping()], '2026-08-13T00:00:00.000Z')
+    const [routine] = store.syncRoutines({
+      repository: 'wolfstar-project/example',
+      specSha: 'abc123',
+      entries: [{ name: 'sentry-checkin', crons: ['0 9 * * *'], timeZone: 'UTC', mode: 'propose', enabled: true }],
+      at: '2026-08-13T00:01:00.000Z',
+    })
+    if (routine === undefined) throw new Error('Expected a stored Routine.')
+    store.openRoutineRun({
+      routineId: routine.id,
+      scheduledFor: '2026-08-13T09:00:00.000Z',
+      specSha: routine.specSha,
+      at: '2026-08-13T09:00:01.000Z',
+    })
+    for (const attempt of [1, 2, 3]) {
+      const task = store.claimNextRoutineRun('routine-1', `2026-08-13T09:0${attempt}:00.000Z`, 60_000)
+      if (task === null) throw new Error('Expected a queued Routine run.')
+      expect(
+        store.failRoutineRun({
+          taskId: task.id,
+          workerId: task.state.workerId,
+          fence: task.state.fence,
+          at: `2026-08-13T09:0${attempt}:30.000Z`,
+          reason: 'The opencode session failed: Internal network failure, please try again later.',
+        }),
+      ).toBe(attempt < 3 ? 'Retrying' : 'Failed')
+    }
+    expect(store.claimNextRoutineRun('routine-2', '2026-08-13T09:04:00.000Z', 60_000)).toBeNull()
+
+    expect(store.retryRecoverableWorkerFailures('2026-08-13T09:05:00.000Z')).toBe(1)
+    expect(store.claimNextRoutineRun('routine-3', '2026-08-13T09:06:00.000Z', 60_000)).toMatchObject({
+      attempts: 1,
+      state: { fence: 4 },
+    })
+  })
+
+  it('leaves a failed Routine run alone once a newer instant has its own run', () => {
+    const store = createStore()
+    store.syncRepositories([repositoryMapping()], '2026-08-13T00:00:00.000Z')
+    const [routine] = store.syncRoutines({
+      repository: 'wolfstar-project/example',
+      specSha: 'abc123',
+      entries: [{ name: 'sentry-checkin', crons: ['0 9 * * *'], timeZone: 'UTC', mode: 'propose', enabled: true }],
+      at: '2026-08-13T00:01:00.000Z',
+    })
+    if (routine === undefined) throw new Error('Expected a stored Routine.')
+    store.openRoutineRun({
+      routineId: routine.id,
+      scheduledFor: '2026-08-13T09:00:00.000Z',
+      specSha: routine.specSha,
+      at: '2026-08-13T09:00:01.000Z',
+    })
+    for (const attempt of [1, 2, 3]) {
+      const task = store.claimNextRoutineRun('routine-1', `2026-08-13T09:0${attempt}:00.000Z`, 60_000)
+      if (task === null) throw new Error('Expected a queued Routine run.')
+      store.failRoutineRun({
+        taskId: task.id,
+        workerId: task.state.workerId,
+        fence: task.state.fence,
+        at: `2026-08-13T09:0${attempt}:30.000Z`,
+        reason: 'The opencode session failed: Internal network failure, please try again later.',
+      })
+    }
+    store.openRoutineRun({
+      routineId: routine.id,
+      scheduledFor: '2026-08-14T09:00:00.000Z',
+      specSha: routine.specSha,
+      at: '2026-08-14T09:00:01.000Z',
+    })
+
+    expect(store.retryRecoverableWorkerFailures('2026-08-14T09:00:02.000Z')).toBe(0)
+    expect(store.claimNextRoutineRun('routine-2', '2026-08-14T09:00:03.000Z', 60_000)?.scheduledFor).toBe(
+      '2026-08-14T09:00:00.000Z',
     )
   })
 
@@ -5894,7 +6956,11 @@ describe('agent selection', () => {
     const profile = store.getDashboardSnapshot('2026-08-18T01:00:01.000Z').agentProfile
 
     expect(profile.provider).toBe('opencode')
-    expect(profile.roles.adversarial_review).toEqual({ model: 'opencode-go/deepseek-v4-pro', reasoningEffort: 'low' })
+    expect(profile.roles.adversarial_review).toEqual({
+      model: 'opencode-go/deepseek-v4-pro',
+      reasoningEffort: 'low',
+      reasoningEffortExplicit: true,
+    })
     expect(profile.maximumActiveAgents).toBe(CODEX_AGENT_PROFILE.maximumActiveAgents)
   })
 
@@ -5981,5 +7047,46 @@ describe('agent selection', () => {
 
     expect(beforeSwitch).toBe('session-codex')
     expect(afterSwitch).toBeNull()
+  })
+})
+
+describe('agent slots', () => {
+  it('follows the host default until a count is set', () => {
+    const store = createStore()
+
+    expect(store.getAgentSlots()).toEqual({ hogwild: null, desktop: null })
+  })
+
+  it('keeps each host count independent and reads back the last one set', () => {
+    const store = createStore()
+
+    store.setAgentSlots({ host: 'hogwild', slots: 4, at: '2026-09-16T01:00:00.000Z' })
+    expect(store.getAgentSlots()).toEqual({ hogwild: 4, desktop: null })
+
+    store.setAgentSlots({ host: 'desktop', slots: 2, at: '2026-09-16T01:01:00.000Z' })
+    expect(store.getAgentSlots()).toEqual({ hogwild: 4, desktop: 2 })
+
+    store.setAgentSlots({ host: 'hogwild', slots: 0, at: '2026-09-16T01:02:00.000Z' })
+    expect(store.getAgentSlots()).toEqual({ hogwild: 0, desktop: 2 })
+  })
+
+  it('gives a host back its default when the count is cleared', () => {
+    const store = createStore()
+
+    store.setAgentSlots({ host: 'desktop', slots: 2, at: '2026-09-16T01:00:00.000Z' })
+    store.setAgentSlots({ host: 'desktop', slots: null, at: '2026-09-16T01:01:00.000Z' })
+
+    expect(store.getAgentSlots().desktop).toBeNull()
+  })
+
+  it('refuses a count that is not a whole number of Agents', () => {
+    const store = createStore()
+
+    expect(() => store.setAgentSlots({ host: 'hogwild', slots: -1, at: '2026-09-16T01:00:00.000Z' })).toThrow(
+      'nonnegative integer',
+    )
+    expect(() => store.setAgentSlots({ host: 'hogwild', slots: 1.5, at: '2026-09-16T01:00:00.000Z' })).toThrow(
+      'nonnegative integer',
+    )
   })
 })

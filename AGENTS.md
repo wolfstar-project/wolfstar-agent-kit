@@ -1,0 +1,52 @@
+# AGENTS.md
+
+Agent plugin for Nuxt/Vue/TypeScript workflows. No build step: bash hooks plus markdown skills.
+
+## Commands
+
+```bash
+check              # Parallel lint + typecheck + test (installed to ~/.local/bin)
+pnpm lint:fix      # Oxlint autofix + Oxfmt
+pnpm check:context # Verify installed Agent instructions match agent-context/
+pnpm sync:context # Install tracked Claude and Codex instructions, the commit-msg hook, and the opencode plugin
+pnpm sync:context:hogwild # Install tracked instructions on Hogwild
+pnpm test:opencode-hooks # Run the opencode plugin against the real hook scripts
+pnpm release patch|minor|major  # Bump version, tag, push (syncs plugin.json, marketplace.json, skill frontmatter)
+```
+
+## Architecture
+
+**Dual-directory layout**: the repo root holds workspace tooling (Oxlint, Oxfmt, release script). The actual plugin lives in `wolfstar-agent-kit/`, nested so workspace tooling doesn't collide with the plugin manifest.
+
+**Git hook** (`agent-context/git-hooks/commit-msg`): refuses a commit subject that is not Conventional Commits, under `~/pkg` and `~/sites` only. It also refuses a scope the repository's `GLOSSARY.md` retires in its `## Scopes` table, naming the replacement. That table lists retired spellings only, so a repository without one keeps every scope. `pnpm sync:context` installs it to `~/.config/git/hooks/` and points global `core.hooksPath` at that directory. It runs for every provider, because the GitHub agent workers use opencode or codex and never load a Claude Code plugin. A repository that sets `core.hooksPath` locally, through husky for example, overrides it.
+
+**opencode parity** (`wolfstar-agent-kit/plugins/opencode/wolfstar-hooks.ts`): the same provider gap reaches the tool hooks below. This plugin runs the same bash scripts over the same stdin and stdout contract. It denies a tool call by throwing, which opencode turns into a tool error the model reads. It rewrites a command by mutating `output.args` in place, because opencode hands that same object to the tool. A hook that fails, times out, or is missing logs to stderr and allows the call. It reads its hook list, its order, and its timeouts from the installed `plugin.json`, so it needs no list of its own. `pnpm sync:context` installs the scripts to `~/.local/share/wolfstar-agent-kit/hooks/`, the manifest to `~/.local/share/wolfstar-agent-kit/.claude-plugin/plugin.json`, and the plugin to `~/.config/opencode/plugins/wolfstar-hooks.ts`, locally and on Hogwild.
+
+**Hook lifecycle** (`wolfstar-agent-kit/hooks/`, wired in `.claude-plugin/plugin.json`):
+
+- `SessionStart`: detect project type (Nuxt module/app, UnJS, Vue, Node), show git info, warn if not pnpm
+- `PreToolUse` (Bash): block npm/yarn/npx (`pnpm-only.sh`); block raw `git worktree` mutation and `.claude/worktrees` paths (`wt-only.sh`); keep email read only (`himalaya-read-only.sh`); require the PR skill (`pr-skill-only.sh`); block work on an already-merged branch (`merged-branch-guard.sh`); on commit/push/PR run `check` and block on failure (`pre-commit-push.sh`)
+- `PostToolUse` (Write|Edit): Oxlint autofix and Oxfmt on the edited file
+- `PostToolUse` (Bash): append a `command-not-found.sh` install or BSD/GNU flag suggestion to the shell output, once per session per command
+
+`plugin.json` is the only place a hook is registered. `scripts/agent-context-hooks.sh` derives the hook list from it, in manifest order, and the sync script, the drift check, and the opencode plugin all read that derivation. So adding or renaming a hook is one edit to `plugin.json`. The opencode plugin maps the events itself: a PreToolUse Bash hook runs before the shell tool, a PostToolUse Write or Edit hook runs after a write, and a PostToolUse Bash hook has its `followup_message` suggestion appended to the shell tool output, because opencode has no followup-message contract. Files the hooks source, such as `check-config.sh`, are not hooks; the derivation finds them by reading the `source` lines.
+
+**Email is read only** (`hooks/himalaya-read-only.sh`): an agent may read mail and must never change or send it. The hook allows a fixed read set and denies everything else, because a denylist would miss the next subcommand himalaya adds. Hogwild carries a second, stronger guarantee: its `~/.config/himalaya/config.toml` has no send backend at all, so a send fails there whatever the agent does.
+
+**Disable hooks per-project**: `.claude/hooks.json` with `{"disabled": ["oxlint", "oxfmt", "pre-commit-push"]}`
+
+**Workflow** (`.github/workflows/test.yml`): four jobs on GitHub hosted runners, lint, typecheck, build, and test. The test job installs a pinned `wt`, because several suites drive the real binary. Every event ignores `**/*.md`, so a Markdown only push to `main` runs nothing.
+
+**Two service checkouts**: Hogwild runs the controller from its own clone, and the desktop runs `wolfstar-desktop-agent` from a clone of the same path on the desktop. Both halves of an offloaded turn must speak the same shape, so `pnpm service:hogwild:update` moves both and `DESKTOP_PROTOCOL` in `desktop-protocol.ts` guards the gap. A desktop reporting an older protocol is stood down, and the work stays on Hogwild. Raise that constant whenever the turn or report shape changes.
+
+**Worktrees**: `wt` (worktrunk) owns every worktree, at `<parent>/<repo>.<branch-slug>`. Full rules in `wolfstar-agent-kit/references/worktree-isolation.md`.
+
+## Adding Components
+
+**Hook**: `hooks/[name].sh`, registered in `plugin.json`. Source `check-config.sh` for disable support. Input arrives as stdin JSON (`tool_input.*`). Block with `{"decision":"block","reason":"..."}`. Continue (Stop only) with `{"decision":"followup_message","message":"..."}`.
+
+**Skill**: `skills/[name]/SKILL.md` with frontmatter (`description`, `user_invocable: true`). Keep SKILL.md to the decision-making core and push procedures, long bash blocks, and rubrics into `references/`. Add `templates/` for files the skill scaffolds, and only reference files that exist: dangling reference links cost a wasted turn mid-task.
+
+**Root docs**: every repository Wolfstar owns carries the same root set and `docs/` lifecycle. The contract is `wolfstar-agent-kit/references/root-docs.md`; `pkg-conform` applies it by checklist, and nothing enforces it automatically yet.
+
+Install locally with `/plugin install /path/to/wolfstar-agent-kit`.

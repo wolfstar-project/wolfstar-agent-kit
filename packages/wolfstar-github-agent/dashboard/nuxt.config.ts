@@ -3,7 +3,11 @@ export default defineNuxtConfig({
   pages: { pattern: ['**/*.vue', '!**/_*.vue'] },
   css: ['~/assets/css/main.css'],
   devtools: { enabled: true },
-  modules: ['@nuxt/ui', '@nuxt/fonts', '@nuxt/icon', '@vueuse/nuxt'],
+  modules: ['@nuxt/ui', '@nuxt/fonts', '@nuxt/icon', '@vueuse/nuxt', 'nuxt-skew-protection'],
+  skewProtection: {
+    updateStrategy: 'polling',
+    reloadStrategy: 'prompt',
+  },
   fonts: {
     families: [
       { name: 'Mona Sans', provider: 'google', weights: [400, 500, 600] },
@@ -34,9 +38,15 @@ export default defineNuxtConfig({
     },
   },
   nitro: {
+    // es2019 (the default) warns on BigInt literals bundled into the server chunks.
+    esbuild: {
+      options: {
+        target: 'esnext',
+      },
+    },
     prerender: {
       // `/kit` stays out on purpose. It is a dev page and nothing links to it.
-      routes: ['/', '/history', '/stats', '/watching', '/flow'],
+      routes: ['/', '/history', '/stats', '/watching', '/routines', '/flow'],
       ignore: ['/kit'],
     },
   },

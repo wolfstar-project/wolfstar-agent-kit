@@ -2,7 +2,13 @@ import type { Octokit } from 'octokit'
 import { describe, expect, it } from 'vitest'
 import { approvalLabels } from '../src/approval-labels.ts'
 import { BASELINE_REPAIR_MARKER, pullRequestPurpose } from '../src/baseline-repair-state.ts'
-import { createGitHubSource, isAutomatedGitHubActor, isIssueAtOrAfterCutoff } from '../src/github.ts'
+import { candidateFingerprintMarker } from '../src/candidate-issue-controller.ts'
+import {
+  createGitHubIssuePublisher,
+  createGitHubSource,
+  isAutomatedGitHubActor,
+  isIssueAtOrAfterCutoff,
+} from '../src/github.ts'
 import { AUTOMATED_ISSUE_TRIAGE_MARKER } from '../src/issue-triage-comment.ts'
 import { ok } from '../src/result.ts'
 import { trackingIssueBody } from '../src/routine-report-controller.ts'
@@ -227,6 +233,62 @@ describe('gitHub subjects', () => {
     expect(changedByHuman.contentDigest).not.toBe(initialIssue.contentDigest)
   })
 
+  it('reads one exact issue with the same semantic state as the open list', async () => {
+    const listComments = () => undefined
+    const issue = {
+      number: 12,
+      state: 'open',
+      title: 'Broken thing',
+      body: 'Please fix it.',
+      user: { login: 'wolfstar-github-agent[bot]', type: 'Bot' },
+      html_url: 'https://github.com/wolfstar-project/example/issues/12',
+      created_at: '2026-08-01T00:00:00.000Z',
+      updated_at: '2026-08-13T00:00:00.000Z',
+      labels: [{ name: 'routine:sentry-checkin' }, { name: 'wolfstar-agent-running' }],
+    }
+    const client = {
+      paginate: (method: unknown) =>
+        Promise.resolve(
+          method === listComments
+            ? [
+                {
+                  id: 1,
+                  body: 'Human detail.',
+                  updated_at: '2026-08-13T00:01:00.000Z',
+                  user: { login: 'wolfstar-project' },
+                },
+              ]
+            : [],
+        ),
+      rest: {
+        issues: {
+          get: () => Promise.resolve({ data: issue }),
+          listComments,
+        },
+      },
+    } as unknown as Octokit
+    const source = createGitHubSource({
+      actorLogin: () => 'wolfstar-github-agent[bot]',
+      createClient: () => client,
+      issueCutoff: '2026-07-01',
+      tokens: {
+        getToken: () => Promise.resolve(ok({ token: 'token', expiresAt: '2026-08-14T02:00:00.000Z' })),
+        invalidate: () => undefined,
+      },
+    })
+
+    expect(await source.getIssue(repositoryMapping(), 12)).toEqual(
+      ok(
+        expect.objectContaining({
+          number: 12,
+          state: 'open',
+          routineFiled: true,
+          contentDigest: expect.stringMatching(/^[a-f\d]{64}$/),
+        }),
+      ),
+    )
+  })
+
   it('uses one fixed inclusive issue cutoff', () => {
     expect(isIssueAtOrAfterCutoff('2026-07-13T23:59:59.999Z', '2026-07-14')).toBe(false)
     expect(isIssueAtOrAfterCutoff('2026-07-14T00:00:00.000Z', '2026-07-14')).toBe(true)
@@ -268,5 +330,31 @@ describe('gitHub subjects', () => {
         repository: 'wolfstar-project/example',
       }),
     ).toEqual({ _tag: 'Change' })
+  })
+})
+
+describe('open Candidate issue lookup', () => {
+  it.each([false, true])('ignores closed updates and reuses only an open issue: %s', async (includeOpen) => {
+    const body = candidateFingerprintMarker('dependency-updates')
+    const client = {
+      rest: { issues: { listForRepo: () => undefined } },
+      paginate: async () => [
+        { number: 1, html_url: 'https://github.com/example/issues/1', state: 'closed', body },
+        ...(includeOpen ? [{ number: 2, html_url: 'https://github.com/example/issues/2', state: 'open', body }] : []),
+      ],
+    } as unknown as Octokit
+    const publisher = createGitHubIssuePublisher({
+      createClient: () => client,
+      tokens: {
+        getToken: async () => ok({ token: 'token', expiresAt: '2026-09-16T00:00:00.000Z' }),
+        invalidate: () => undefined,
+      },
+    })
+    expect(
+      await publisher.findOpenIssueByFingerprint({
+        repository: repositoryMapping(),
+        fingerprint: 'dependency-updates',
+      }),
+    ).toEqual(ok(includeOpen ? { number: 2, url: 'https://github.com/example/issues/2' } : null))
   })
 })

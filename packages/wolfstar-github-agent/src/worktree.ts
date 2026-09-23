@@ -6,6 +6,7 @@ import type { Result } from './result.ts'
 import type {
   ClaimedAdversarialReviewTask,
   ClaimedBaselineRepairTask,
+  ClaimedBatch,
   ClaimedConflictResolutionTask,
   ClaimedIssueTriageTask,
   ClaimedIssueWorkTask,
@@ -33,6 +34,36 @@ export interface PreparedConflictWorktree {
   conflictedFiles: string[]
 }
 
+/**
+ * What merging the real base into the pull request head showed.
+ *
+ * GitHub reported two stacked pull requests as conflicting for days while
+ * their real base merged cleanly. A clean merge is a fact about GitHub's stale
+ * state, not a failure, so it is its own case and never spends Recovery budget.
+ */
+export type ConflictPrepareResult =
+  | { _tag: 'Conflicted'; worktree: PreparedConflictWorktree }
+  | ConflictCleanMergeEvidence
+
+/** Stored as the Completed evidence of a conflict Task whose base merged cleanly. */
+export interface ConflictCleanMergeEvidence {
+  _tag: 'CleanMerge'
+  headSha: string
+  baseSha: string
+  baseRef: string
+}
+
+export function parseConflictCleanMergeEvidence(evidence: string | null): ConflictCleanMergeEvidence | undefined {
+  if (evidence === null || !evidence.startsWith('{')) return undefined
+  const value = JSON.parse(evidence) as Partial<ConflictCleanMergeEvidence>
+  return value._tag === 'CleanMerge' &&
+    typeof value.headSha === 'string' &&
+    typeof value.baseSha === 'string' &&
+    typeof value.baseRef === 'string'
+    ? { _tag: 'CleanMerge', headSha: value.headSha, baseSha: value.baseSha, baseRef: value.baseRef }
+    : undefined
+}
+
 export interface VerifiedConflictPatch {
   digest: string
   changedFiles: number
@@ -57,10 +88,7 @@ export interface ConflictWorktreeManager {
     message: string,
     signal: AbortSignal,
   ) => Promise<Result<PreparedConflictPublication, string>>
-  prepare: (
-    task: ClaimedConflictResolutionTask,
-    signal: AbortSignal,
-  ) => Promise<Result<PreparedConflictWorktree, string>>
+  prepare: (task: ClaimedConflictResolutionTask, signal: AbortSignal) => Promise<Result<ConflictPrepareResult, string>>
   verify: (
     task: ClaimedConflictResolutionTask,
     worktree: PreparedConflictWorktree,
@@ -119,6 +147,8 @@ export interface AgentWorkspaceManager {
   ) => Promise<Result<PreparedWorkerWorkspace, string>>
   /** A Routine scan reads the default branch. It never starts from a pull request head. */
   prepareRoutine: (task: ClaimedRoutineRun, signal: AbortSignal) => Promise<Result<PreparedWorkerWorkspace, string>>
+  /** A Batch planning turn reads the default branch, so it can see which issues touch the same code. */
+  prepareBatch: (batch: ClaimedBatch, signal: AbortSignal) => Promise<Result<PreparedWorkerWorkspace, string>>
   verifyReview: (
     task: ClaimedAdversarialReviewTask,
     worktree: PreparedWorkerWorkspace,
@@ -658,7 +688,7 @@ export function createConflictWorktreeManager(options: ConflictWorktreeManagerOp
   async function prepare(
     task: ClaimedConflictResolutionTask,
     signal: AbortSignal,
-  ): Promise<Result<PreparedConflictWorktree, string>> {
+  ): Promise<Result<ConflictPrepareResult, string>> {
     const branch = agentWorktreeBranch(`pull-${task.pullRequestNumber}-${task.revisionId.slice(0, 12)}`, {
       taskId: task.id,
       fence: task.state.fence,
@@ -667,6 +697,11 @@ export function createConflictWorktreeManager(options: ConflictWorktreeManagerOp
 
     const headRef = `refs/wolfstar-github-agent/pull/${task.pullRequestNumber}`
     const baseRef = `refs/wolfstar-github-agent/base/${task.pullRequestNumber}`
+    // A stacked pull request merges into another pull request's head branch.
+    // Publication pins that same branch, so merging the default branch here
+    // resolved the wrong conflict and no publication ever matched its base.
+    const baseBranch = task.pullRequest.baseRef ?? task.repositoryMapping.defaultBranch
+    if (!isSafeGitRef(baseBranch)) return err('The pull request base branch is unsafe.')
     const token = await options.tokens.getToken(task.repository, 'read', signal)
     if (token._tag === 'Err') return err(token.error.message)
     const remoteUrl = options.remoteUrl?.(task.repository) ?? `https://github.com/${task.repository}.git`
@@ -677,7 +712,7 @@ export function createConflictWorktreeManager(options: ConflictWorktreeManagerOp
         '--no-tags',
         remoteUrl,
         `+refs/pull/${task.pullRequestNumber}/head:${headRef}`,
-        `+refs/heads/${task.repositoryMapping.defaultBranch}:${baseRef}`,
+        `+refs/heads/${baseBranch}:${baseRef}`,
       ],
       signal,
       token.value.token,
@@ -707,17 +742,32 @@ export function createConflictWorktreeManager(options: ConflictWorktreeManagerOp
       ],
       signal,
     )
-    const unmerged = await runGit(worktree.value, ['diff', '--name-only', '--diff-filter=U'], signal)
-    if (merge.exitCode === 0 || unmerged.stdout.length === 0) {
+    // `--no-commit` stops a clean merge before the commit and still exits 0.
+    // Only a conflict, or a merge that could not start, exits non-zero.
+    if (merge.exitCode === 0) {
       await runGit(worktree.value, ['merge', '--abort'], signal)
-      return err('Git no longer reports merge conflicts for this head commit.')
+      return ok({ _tag: 'CleanMerge', headSha: head.stdout, baseSha: base.stdout, baseRef: baseBranch })
+    }
+    const unmerged = await runGit(worktree.value, ['diff', '--name-only', '--diff-filter=U'], signal)
+    if (unmerged.exitCode !== 0) return err(`Could not list the conflicted files: ${unmerged.stderr}`)
+    // A merge that never started, for unrelated histories or a file in the way,
+    // has no unmerged files either. That used to read as "no longer conflicts"
+    // and hid the real error behind a retry.
+    if (unmerged.stdout.length === 0) {
+      await runGit(worktree.value, ['merge', '--abort'], signal)
+      return err(
+        `Git could not merge ${baseBranch} into the pull request head: ${cleanLine(merge.stderr || merge.stdout)}`,
+      )
     }
 
     return ok({
-      path: worktree.value,
-      headSha: head.stdout,
-      baseSha: base.stdout,
-      conflictedFiles: unmerged.stdout.split('\n').filter(Boolean).sort(),
+      _tag: 'Conflicted',
+      worktree: {
+        path: worktree.value,
+        headSha: head.stdout,
+        baseSha: base.stdout,
+        conflictedFiles: unmerged.stdout.split('\n').filter(Boolean).sort(),
+      },
     })
   }
 
@@ -826,7 +876,8 @@ export function createAgentWorkspaceManager(options: ConflictWorktreeManagerOpti
       | ClaimedBaselineRepairTask
       | ClaimedIssueTriageTask
       | ClaimedIssueWorkTask
-      | ClaimedRoutineRun,
+      | ClaimedRoutineRun
+      | ClaimedBatch,
     label: string,
     refs: string[],
     headRef: string,
@@ -854,6 +905,17 @@ export function createAgentWorkspaceManager(options: ConflictWorktreeManagerOpti
   }
 
   return {
+    async prepareBatch(batch, signal) {
+      const baseRef = `refs/wolfstar-github-agent/batches/${batch.id.slice(0, 12)}`
+      return prepareRepository(
+        batch,
+        `batch-${batch.id.slice(0, 12)}`,
+        [`+refs/heads/${batch.repositoryMapping.defaultBranch}:${baseRef}`],
+        baseRef,
+        signal,
+      )
+    },
+
     async prepareRoutine(task, signal) {
       // A Routine runs from the exact source commit stored when its Run opened.
       // A later default branch push cannot change queued work.
@@ -883,6 +945,16 @@ export function createAgentWorkspaceManager(options: ConflictWorktreeManagerOpti
     },
 
     async prepareFix(task, signal) {
+      if (task.pullRequest.state === 'closed' && task.pullRequest.mergedAt !== null) {
+        const ref = `refs/wolfstar-github-agent/fixes/${task.pullRequestNumber}/merged-base`
+        return prepareRepository(
+          task,
+          `fix-${task.pullRequestNumber}`,
+          [`+refs/heads/${task.repositoryMapping.defaultBranch}:${ref}`],
+          ref,
+          signal,
+        )
+      }
       const headRef = `refs/wolfstar-github-agent/fixes/${task.pullRequestNumber}/head`
       const baseRef = `refs/wolfstar-github-agent/fixes/${task.pullRequestNumber}/base`
       const prepared = await prepareRepository(
@@ -968,7 +1040,7 @@ export function createReviewFixWorktreeManager(options: ConflictWorktreeManagerO
 
     async verify(task, worktree, signal) {
       const head = await runGit(worktree.path, ['rev-parse', 'HEAD'], signal)
-      if (head.exitCode !== 0 || head.stdout !== task.pullRequest.headSha)
+      if (head.exitCode !== 0 || head.stdout !== worktree.headSha)
         return err('The agent changed HEAD. Agents must not commit or rewrite history.')
       const staged = await runGit(worktree.path, ['diff', '--cached', '--quiet'], signal)
       if (staged.exitCode !== 0) return err('The agent staged files. The controller must stage the verified repair.')
@@ -982,14 +1054,15 @@ export function createReviewFixWorktreeManager(options: ConflictWorktreeManagerO
       const changed = await runGit(worktree.path, ['diff', '--cached', '--name-only', '-z', 'HEAD'], signal)
       if (changed.exitCode !== 0) return err(`Could not inspect repaired files: ${changed.stderr}`)
       const changedPaths = changed.stdout.split('\0').filter(Boolean)
-      const contributorFork = task.pullRequest.headRepository.toLowerCase() !== task.repository.toLowerCase()
+      const contributorFork =
+        task.pullRequest.mergedAt === null &&
+        task.pullRequest.headRepository.toLowerCase() !== task.repository.toLowerCase()
       const workflowPath = contributorFork
         ? changedPaths.find((path) => path.startsWith('.github/workflows/'))
         : undefined
       if (workflowPath !== undefined)
         return err(`The controller cannot publish workflow changes to a contributor fork: ${workflowPath}.`)
       const changedFiles = changedPaths.length
-      if (changedFiles === 0) return err('The agent completed without changing any files.')
       return ok({
         digest: patch.digest,
         changedFiles,
@@ -1098,14 +1171,21 @@ export function createIssueWorktreeManager(options: ConflictWorktreeManagerOptio
       const diffCheck = await runGit(worktree.path, ['diff', '--check'], signal)
       if (diffCheck.exitCode !== 0)
         return err(`The change failed git diff check: ${diffCheck.stdout || diffCheck.stderr}`)
-      const add = await runGit(worktree.path, ['add', '--all'], signal)
+      // The graph document the Agent may leave for the description is the
+      // controller's input, never part of the change. An exclude pathspec
+      // cannot drop it: `git add` refuses a named path that a `.gitignore`
+      // covers, so a repository that ignores `.pr-lens` failed every Issue
+      // work Task. Stage everything, then drop the document from the index.
+      const add = await runGit(worktree.path, ['add', '--all', '--', '.'], signal)
       if (add.exitCode !== 0) return err(`Could not stage the verified change: ${add.stderr}`)
+      const dropped = await runGit(worktree.path, ['reset', '--quiet', 'HEAD', '--', '.pr-lens'], signal)
+      if (dropped.exitCode !== 0)
+        return err(`Could not drop the graph document from the verified change: ${dropped.stderr}`)
       const patch = await runGitDigest(worktree.path, contentDiffArgs('--cached', 'HEAD'), signal)
       if (patch.exitCode !== 0) return err(`Could not read the verified change: ${patch.stderr}`)
       const changed = await runGit(worktree.path, ['diff', '--cached', '--name-only', '-z', 'HEAD'], signal)
       if (changed.exitCode !== 0) return err(`Could not inspect changed files: ${changed.stderr}`)
       const changedPaths = changed.stdout.split('\0').filter(Boolean)
-      if (changedPaths.length === 0) return err('The agent completed without changing any files.')
       return ok({ digest: patch.digest, changedFiles: changedPaths.length, changedPaths })
     },
 
@@ -1228,6 +1308,8 @@ export interface GitPublicationRemoteOptions {
   root: string
   remoteUrl?: (repository: string) => string
   tokens: GitHubTokenProvider
+  /** Maintainer access for approved fork conflict merges containing workflow files. */
+  forkWorkflowTokens?: GitHubTokenProvider
 }
 
 function publicationRemoteUrl(repository: string): string {
@@ -1251,7 +1333,18 @@ export function createGitPublicationRemote(options: GitPublicationRemoteOptions)
     const access = changed.stdout.split('\0').some((path) => path.startsWith('.github/workflows/'))
       ? 'workflows_write'
       : 'contents_write'
-    const result = await options.tokens.getToken(command.repository, access, signal)
+    // The base repository's App installation cannot update workflow files in
+    // a contributor fork. Use the maintainer account for this exact approved
+    // conflict merge. GitHub and validateAuthority still require fork edits.
+    const forkWorkflowMerge =
+      access === 'workflows_write' &&
+      command._tag === 'UpdatePullRequest' &&
+      command.taskKind === 'resolve_conflict' &&
+      publicationTargetRepository(command).toLowerCase() !== command.repository.toLowerCase()
+    const source = forkWorkflowMerge ? options.forkWorkflowTokens : options.tokens
+    if (source === undefined)
+      return err('Maintainer authentication is required to merge workflow changes into this contributor branch.')
+    const result = await source.getToken(command.repository, access, signal)
     return result._tag === 'Ok' ? ok(result.value.token) : err(result.error.message)
   }
 
@@ -1269,6 +1362,11 @@ export function createGitPublicationRemote(options: GitPublicationRemoteOptions)
           return err('Repository policy no longer authorizes issue work.')
         if (command.taskKind === 'baseline_repair' && !canRepairBaseline(command.repositoryMapping))
           return err('Repository policy no longer authorizes Baseline repair.')
+        if (
+          command.taskKind === 'review_fix' &&
+          (!canRepairBaseline(command.repositoryMapping) || command.baseRef !== command.repositoryMapping.defaultBranch)
+        )
+          return err('Repair must open its pull request against the default branch.')
         // A Baseline repair exists to fix the default branch, so it always targets it.
         if (command.taskKind === 'baseline_repair' && command.baseRef !== command.repositoryMapping.defaultBranch)
           return err('A Baseline repair must target the default branch.')
@@ -1341,6 +1439,29 @@ export function createGitPublicationRemote(options: GitPublicationRemoteOptions)
       )
       if (base.exitCode !== 0) return err(`Could not read the remote base branch: ${base.stderr}`)
       const baseSha = base.stdout.split(/\s+/)[0]
+      // Independent Issue work keeps its verified patch when a sibling merges.
+      // Fresh Review and GitHub checks evaluate it against the current default branch.
+      if (
+        baseSha &&
+        command._tag === 'OpenPullRequest' &&
+        command.taskKind === 'issue_work' &&
+        command.baseRef === command.repositoryMapping.defaultBranch &&
+        baseSha !== command.baseSha
+      ) {
+        const repository = repositoryGitDirectory(options.root, command.repository)
+        const fetched = await runGit(
+          repository,
+          ['fetch', '--no-tags', remoteUrl(command.repository), baseSha],
+          signal,
+          credential.value,
+          options.remoteUrl !== undefined,
+        )
+        if (fetched.exitCode !== 0) return err(`Could not read the current default branch commit: ${fetched.stderr}`)
+        const ancestor = await runGit(repository, ['merge-base', '--is-ancestor', command.baseSha, baseSha], signal)
+        return ancestor.exitCode === 0
+          ? ok(undefined)
+          : err('The default branch no longer contains the issue work base commit.')
+      }
       return baseSha === command.baseSha ? ok(undefined) : err('The base branch changed before publication.')
     },
     async getHeadSha(command, signal) {
@@ -1403,7 +1524,7 @@ export function createGitPublicationRemote(options: GitPublicationRemoteOptions)
       return result.exitCode === 0 ? ok(undefined) : err(`Could not publish the prepared commit: ${result.stderr}`)
     },
     async finalize(command, signal) {
-      if (command._tag === 'UpdatePullRequest') return ok(`Published ${command.commitSha}.`)
+      if (command._tag === 'UpdatePullRequest') return ok({ evidence: `Published ${command.commitSha}.` })
       if (options.pullRequests === undefined) return err('Pull request publication is unavailable.')
       const pullRequest = await options.pullRequests.ensurePullRequest(
         {
@@ -1414,12 +1535,19 @@ export function createGitPublicationRemote(options: GitPublicationRemoteOptions)
           title: command.pullRequestTitle,
           body: command.pullRequestBody,
           ...(command.taskKind === 'baseline_repair' ? { labels: [BASELINE_REPAIR_LABEL_SPEC] } : {}),
+          ...(command.taskKind === 'issue_work' && command.diagram !== null ? { diagram: command.diagram } : {}),
         },
         signal,
       )
-      return pullRequest._tag === 'Err'
-        ? err(pullRequest.error.message)
-        : ok(`Opened pull request #${pullRequest.value.number}: ${pullRequest.value.url}`)
+      if (pullRequest._tag === 'Err') return err(pullRequest.error.message)
+      const diagram =
+        pullRequest.value.diagram._tag === 'Skipped'
+          ? ` The diagram was not attached: ${pullRequest.value.diagram.reason}`
+          : ''
+      return ok({
+        evidence: `Opened pull request #${pullRequest.value.number}: ${pullRequest.value.url}.${diagram}`,
+        pullRequestNumber: pullRequest.value.number,
+      })
     },
   }
 }

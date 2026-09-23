@@ -33,3 +33,9 @@ describe('delayed Eject recovery', () => {
     })
   })
 })
+
+it('resumes a desktop session on the desktop', () => {
+  expect(ejectSessionCommand('codex', 'desktop:abc', 'hogwild')).toBe(
+    "# Run on Desktop\n'/home/wolfstar/.local/bin/codex' 'resume' 'abc' '-c' 'tui.resume_cwd=\"session\"'",
+  )
+})

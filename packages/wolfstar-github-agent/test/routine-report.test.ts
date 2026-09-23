@@ -1,6 +1,8 @@
+import type { Octokit } from 'octokit'
 import type { GitHubIssuePublisher } from '../src/github.ts'
-import type { Candidate } from '../src/types.ts'
+import type { Candidate, RoutineName } from '../src/types.ts'
 import { describe, expect, it } from 'vitest'
+import { createGitHubIssuePublisher } from '../src/github.ts'
 import { ok } from '../src/result.ts'
 import {
   createRoutineReportController,
@@ -17,21 +19,53 @@ const now = () => new Date('2026-08-27T07:10:00.000Z')
 const routineId = 'wolfstar-project/example:pr-triage'
 const runId = `${routineId}:2026-08-27T07:00:00.000Z`
 
-function seed(store: ReturnType<typeof openJournalStore>): void {
+function seed(store: ReturnType<typeof openJournalStore>, name: RoutineName = 'pr-triage'): void {
   store.syncRepositories([repositoryMapping()], '2026-08-27T00:00:00.000Z')
   store.setRepositoryWritesEnabled('wolfstar-project/example', true)
   store.syncRoutines({
     repository: 'wolfstar-project/example',
     specSha: 'abc123',
-    entries: [{ name: 'pr-triage', crons: ['0 7 * * *'], timeZone: 'UTC', mode: 'propose', enabled: true }],
+    entries: [{ name, crons: ['0 7 * * *'], timeZone: 'UTC', mode: 'propose', enabled: true }],
     at: '2026-08-27T00:00:00.000Z',
   })
   store.openRoutineRun({
-    routineId,
+    routineId: `wolfstar-project/example:${name}`,
     scheduledFor: '2026-08-27T07:00:00.000Z',
     specSha: 'abc123',
     at: '2026-08-27T07:00:05.000Z',
   })
+}
+
+/** Settles a queued run the way the scheduler does, so its staged report may publish. */
+function settleRun(store: ReturnType<typeof openJournalStore>, runId: string): void {
+  const task = store.claimNextRoutineRun('scanner', now().toISOString(), 45 * 60_000)
+  if (task === null || task.id !== runId) throw new Error(`Expected the queued Routine run ${runId}.`)
+  store.completeRoutineRun({
+    taskId: task.id,
+    workerId: task.state.workerId,
+    fence: task.state.fence,
+    at: now().toISOString(),
+    evidence: 'settled for publication',
+  })
+}
+
+/** Fails a queued run on every attempt, the way a broken scan settles. */
+function failRun(store: ReturnType<typeof openJournalStore>, runId: string, reason: string): void {
+  for (;;) {
+    const task = store.claimNextRoutineRun('scanner', now().toISOString(), 45 * 60_000)
+    if (task === null || task.id !== runId) throw new Error(`Expected the queued Routine run ${runId}.`)
+    if (
+      store.failRoutineRun({
+        taskId: task.id,
+        workerId: task.state.workerId,
+        fence: task.state.fence,
+        at: now().toISOString(),
+        reason,
+      }) === 'Failed'
+    ) {
+      return
+    }
+  }
 }
 
 function stage(
@@ -99,6 +133,7 @@ describe('writing what one run did', () => {
         routineId,
         runId,
         fingerprint: 'src/store.ts#openRoutineRun',
+        title: 'Fixture title',
         target: 'src/store.ts',
         claim: 'The scheduler can open the same run twice.',
         verification: 'pnpm vitest run test/routine-controller.test.ts',
@@ -157,6 +192,7 @@ describe('publishing the run log', () => {
         candidates: [
           {
             fingerprint: 'src/store.ts#openRoutineRun',
+            title: 'Fixture title',
             target: 'src/store.ts',
             claim: 'The scheduler can open the same run twice.',
             verification: 'pnpm vitest run test/routine-controller.test.ts',
@@ -166,6 +202,7 @@ describe('publishing the run log', () => {
         at: now().toISOString(),
       })
       stage(store, { _tag: 'Completed', evidence: 'pr-triage | 2 found' })
+      settleRun(store, runId)
       const calls: Calls = { issues: [], comments: [] }
 
       const results = await createRoutineReportController({
@@ -189,6 +226,7 @@ describe('publishing the run log', () => {
     try {
       seed(store)
       stage(store, { _tag: 'Completed', evidence: 'first run' })
+      settleRun(store, runId)
       const calls: Calls = { issues: [], comments: [] }
       const controller = createRoutineReportController({ github: publisher(calls), now, store, workerId: 'reporter' })
       await controller.publishPending(new AbortController().signal)
@@ -209,6 +247,7 @@ describe('publishing the run log', () => {
         }),
         at: '2026-08-28T07:05:00.000Z',
       })
+      settleRun(store, `${routineId}:2026-08-28T07:00:00.000Z`)
       await controller.publishPending(new AbortController().signal)
 
       expect(calls.issues).toHaveLength(1)
@@ -236,6 +275,7 @@ describe('publishing the run log', () => {
     try {
       seed(store)
       stage(store, { _tag: 'Completed', evidence: 'first run' })
+      settleRun(store, runId)
       const refusing: GitHubIssuePublisher = {
         createIssue: async () => ok({ number: 42, url: 'https://github.com/wolfstar-project/example/issues/42' }),
         createComment: async () => ({
@@ -267,6 +307,7 @@ describe('publishing the run log', () => {
     try {
       seed(store)
       stage(store, { _tag: 'Completed', evidence: 'first run' })
+      settleRun(store, runId)
       let issue: { number: number; url: string } | null = null
       let comment: { id: number } | null = null
       let issueWrites = 0
@@ -337,6 +378,8 @@ describe('publishing the run log', () => {
         }),
         at: '2026-08-27T07:10:04.000Z',
       })
+      settleRun(store, runId)
+      settleRun(store, workingRun.id)
       const comments: Calls['comments'] = []
       const github: GitHubIssuePublisher = {
         createIssue: async (input) =>
@@ -371,6 +414,7 @@ describe('publishing the run log', () => {
     try {
       seed(store)
       stage(store, { _tag: 'Completed', evidence: 'first run' })
+      settleRun(store, runId)
       store.setRepositoryWritesEnabled('wolfstar-project/example', false)
       const calls: Calls = { issues: [], comments: [] }
 
@@ -393,6 +437,7 @@ describe('publishing the run log', () => {
     try {
       seed(store)
       stage(store, { _tag: 'Completed', evidence: 'first run' })
+      settleRun(store, runId)
       expect(store.claimNextRoutineReport('reporter', now().toISOString(), 60_000)).not.toBeNull()
       store.pauseAgents(now().toISOString())
 
@@ -401,4 +446,348 @@ describe('publishing the run log', () => {
       store.close()
     }
   })
+})
+
+describe('daily check-in issues', () => {
+  it.each([
+    [{ severity: 'GREEN', coverage: 'complete' }, 'CLEAR'],
+    [{ severity: 'AMBER', coverage: 'complete' }, 'ACTION NEEDED'],
+    [{ severity: 'RED', coverage: 'complete' }, 'ACTION NEEDED'],
+    [{ severity: 'GREEN', coverage: 'incomplete' }, 'BLOCKED'],
+    [{ severity: 'RED', coverage: 'incomplete' }, 'BLOCKED'],
+  ] as const)('publishes %o with status %s', async (verdict, status) => {
+    const detail = `# Daily check-in: example.com\n\n${verdict.severity}. Coverage ${verdict.coverage}.`
+    const store = openJournalStore(':memory:')
+    try {
+      seed(store, 'daily-checkin')
+      const dailyId = 'wolfstar-project/example:daily-checkin'
+      const calls: Calls = { issues: [], comments: [] }
+      const controller = createRoutineReportController({ github: publisher(calls), now, store, workerId: 'reporter' })
+      for (const scheduledFor of ['2026-08-27T07:00:00.000Z', '2026-08-27T08:00:00.000Z', '2026-08-28T07:00:00.000Z']) {
+        store.openRoutineRun({ routineId: dailyId, scheduledFor, specSha: 'abc123', at: scheduledFor })
+        store.stageRoutineReport({
+          command: routineReportCommand({
+            repository: 'wolfstar-project/example',
+            routineId: dailyId,
+            routineName: 'daily-checkin',
+            run: { id: `${dailyId}:${scheduledFor}`, scheduledFor },
+            report: { _tag: 'Completed', evidence: '0 new Candidates', detail, verdict },
+          }),
+          at: now().toISOString(),
+        })
+        settleRun(store, `${dailyId}:${scheduledFor}`)
+        await controller.publishPending(new AbortController().signal)
+      }
+      expect(calls.issues).toEqual([
+        `[${status}] Daily check-in: 2026-08-27`,
+        `[${status}] Daily check-in: 2026-08-27`,
+        `[${status}] Daily check-in: 2026-08-28`,
+      ])
+      expect(calls.comments[0]?.body).toContain(detail)
+    } finally {
+      store.close()
+    }
+  })
+
+  it.each([
+    ['a heading before the verdict', '# Daily Check-in: unhead.unjs.io\n\nVerdict: GREEN. Both external checks pass.'],
+    [
+      'a verdict line that denies incomplete coverage',
+      'Verdict: GREEN. All three required checks passed. No incomplete coverage.',
+    ],
+  ])('reads CLEAR from the stated verdict when the report prose has %s', async (_case, detail) => {
+    const store = openJournalStore(':memory:')
+    try {
+      seed(store, 'daily-checkin')
+      const dailyId = 'wolfstar-project/example:daily-checkin'
+      const scheduledFor = '2026-08-27T07:00:00.000Z'
+      const calls: Calls = { issues: [], comments: [] }
+      const controller = createRoutineReportController({ github: publisher(calls), now, store, workerId: 'reporter' })
+      store.stageRoutineReport({
+        command: routineReportCommand({
+          repository: 'wolfstar-project/example',
+          routineId: dailyId,
+          routineName: 'daily-checkin',
+          run: { id: `${dailyId}:${scheduledFor}`, scheduledFor },
+          report: {
+            _tag: 'Completed',
+            evidence: '0 new Candidates',
+            detail,
+            verdict: { severity: 'GREEN', coverage: 'complete' },
+          },
+        }),
+        at: now().toISOString(),
+      })
+      settleRun(store, `${dailyId}:${scheduledFor}`)
+      await controller.publishPending(new AbortController().signal)
+
+      expect(calls.issues).toEqual(['[CLEAR] Daily check-in: 2026-08-27'])
+    } finally {
+      store.close()
+    }
+  })
+
+  it('blocks the daily issue when the run states no verdict', async () => {
+    const store = openJournalStore(':memory:')
+    try {
+      seed(store, 'daily-checkin')
+      const dailyId = 'wolfstar-project/example:daily-checkin'
+      const scheduledFor = '2026-08-27T07:00:00.000Z'
+      const calls: Calls = { issues: [], comments: [] }
+      const controller = createRoutineReportController({ github: publisher(calls), now, store, workerId: 'reporter' })
+      store.stageRoutineReport({
+        command: routineReportCommand({
+          repository: 'wolfstar-project/example',
+          routineId: dailyId,
+          routineName: 'daily-checkin',
+          run: { id: `${dailyId}:${scheduledFor}`, scheduledFor },
+          report: { _tag: 'Completed', evidence: '0 new Candidates', detail: 'GREEN. Everything passed.' },
+        }),
+        at: now().toISOString(),
+      })
+      settleRun(store, `${dailyId}:${scheduledFor}`)
+      await controller.publishPending(new AbortController().signal)
+
+      expect(calls.issues).toEqual(['[BLOCKED] Daily check-in: 2026-08-27'])
+    } finally {
+      store.close()
+    }
+  })
+
+  it('titles the daily issue with the same status its comment heading carries', async () => {
+    const store = openJournalStore(':memory:')
+    try {
+      seed(store, 'daily-checkin')
+      const dailyId = 'wolfstar-project/example:daily-checkin'
+      const dailyRun = `${dailyId}:2026-08-27T07:00:00.000Z`
+      store.recordCandidates({
+        routineId: dailyId,
+        runId: dailyRun,
+        candidates: [
+          {
+            fingerprint: 'scripts/check.ts#probe',
+            title: 'Fixture title',
+            target: 'scripts/check.ts',
+            claim: 'The probe reports the wrong status.',
+            verification: 'pnpm vitest run test/routine-report.test.ts',
+            estimatedChangedFiles: 1,
+          },
+        ],
+        at: now().toISOString(),
+      })
+      store.stageRoutineReport({
+        command: routineReportCommand({
+          repository: 'wolfstar-project/example',
+          routineId: dailyId,
+          routineName: 'daily-checkin',
+          run: { id: dailyRun, scheduledFor: '2026-08-27T07:00:00.000Z' },
+          report: {
+            _tag: 'Completed',
+            evidence: '1 found',
+            detail: 'GREEN. All checks passed.',
+            verdict: { severity: 'GREEN', coverage: 'complete' },
+          },
+        }),
+        at: now().toISOString(),
+      })
+      settleRun(store, dailyRun)
+      const calls: Calls = { issues: [], comments: [] }
+      await createRoutineReportController({
+        github: publisher(calls),
+        now,
+        store,
+        workerId: 'reporter',
+      }).publishPending(new AbortController().signal)
+
+      const heading = calls.comments[0]?.body.match(/^# \[([^\]]+)\] Daily check-in/m)?.[1] ?? ''
+      expect(heading).toBe('ACTION NEEDED')
+      expect(calls.issues[0]).toBe(`[${heading}] Daily check-in: 2026-08-27`)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('reads ACTION NEEDED once a retried run with Candidates settles its earlier CLEAR stage', async () => {
+    const store = openJournalStore(':memory:')
+    try {
+      seed(store, 'daily-checkin')
+      const dailyId = 'wolfstar-project/example:daily-checkin'
+      const dailyRun = `${dailyId}:2026-08-27T07:00:00.000Z`
+      // Attempt one scans a clear morning, stages its report, and crashes
+      // before the run settles. The publication pass runs meanwhile.
+      store.stageRoutineReport({
+        command: routineReportCommand({
+          repository: 'wolfstar-project/example',
+          routineId: dailyId,
+          routineName: 'daily-checkin',
+          run: { id: dailyRun, scheduledFor: '2026-08-27T07:00:00.000Z' },
+          report: {
+            _tag: 'Completed',
+            evidence: '0 found',
+            detail: 'GREEN. All checks passed.',
+            verdict: { severity: 'GREEN', coverage: 'complete' },
+          },
+        }),
+        at: now().toISOString(),
+      })
+      const calls: Calls = { issues: [], comments: [] }
+      const controller = createRoutineReportController({ github: publisher(calls), now, store, workerId: 'reporter' })
+      await controller.publishPending(new AbortController().signal)
+      expect(calls.issues).toEqual([])
+
+      // The retry records a Candidate, and its re-stage keeps the report the
+      // first attempt staged, because the run's identity owns the command.
+      store.recordCandidates({
+        routineId: dailyId,
+        runId: dailyRun,
+        candidates: [
+          {
+            fingerprint: 'scripts/check.ts#probe',
+            title: 'Fixture title',
+            target: 'scripts/check.ts',
+            claim: 'The probe reports the wrong status.',
+            verification: 'pnpm vitest run test/routine-report.test.ts',
+            estimatedChangedFiles: 1,
+          },
+        ],
+        at: now().toISOString(),
+      })
+      expect(
+        store.stageRoutineReport({
+          command: routineReportCommand({
+            repository: 'wolfstar-project/example',
+            routineId: dailyId,
+            routineName: 'daily-checkin',
+            run: { id: dailyRun, scheduledFor: '2026-08-27T07:00:00.000Z' },
+            report: {
+              _tag: 'Completed',
+              evidence: '1 found',
+              detail: 'GREEN. All checks passed.',
+              verdict: { severity: 'GREEN', coverage: 'complete' },
+            },
+          }),
+          at: now().toISOString(),
+        }),
+      ).toBe(false)
+      const task = store.claimNextRoutineRun('scanner', now().toISOString(), 45 * 60_000)
+      if (task === null) throw new Error('Expected a queued Routine run.')
+      expect(
+        store.completeRoutineRun({
+          taskId: task.id,
+          workerId: task.state.workerId,
+          fence: task.state.fence,
+          at: now().toISOString(),
+          evidence: '1 found',
+        }),
+      ).toBe(true)
+
+      await controller.publishPending(new AbortController().signal)
+
+      const heading = calls.comments[0]?.body.match(/^# \[([^\]]+)\] Daily check-in/m)?.[1] ?? ''
+      expect(heading).toBe('ACTION NEEDED')
+      expect(calls.issues[0]).toBe(`[${heading}] Daily check-in: 2026-08-27`)
+      expect(calls.comments[0]?.body).toContain('The probe reports the wrong status.')
+    } finally {
+      store.close()
+    }
+  })
+})
+
+it('recovers a closed daily issue after a lost response and ignores older runs', async () => {
+  const store = openJournalStore(':memory:')
+  try {
+    seed(store, 'daily-checkin')
+    const dailyId = 'wolfstar-project/example:daily-checkin'
+    const dailyRun = `${dailyId}:2026-08-27T07:00:00.000Z`
+    store.stageRoutineReport({
+      command: routineReportCommand({
+        repository: 'wolfstar-project/example',
+        routineId: dailyId,
+        routineName: 'daily-checkin',
+        run: { id: dailyRun, scheduledFor: '2026-08-27T07:00:00.000Z' },
+        report: { _tag: 'Failed', reason: 'Credentials expired.' },
+      }),
+      at: now().toISOString(),
+    })
+    failRun(store, dailyRun, 'Credentials expired.')
+    const issues = [
+      {
+        number: 12,
+        html_url: 'https://github.com/wolfstar-project/example/issues/12',
+        title: trackingIssueTitle('daily-checkin', 'wolfstar-project/example'),
+        body: trackingIssueBody('daily-checkin'),
+        labels: ['routine:daily-checkin'],
+      },
+    ]
+    const comments: Array<{ id: number; body: string }> = []
+    const requests: Array<{ state: string }> = []
+    const client = {
+      paginate: (_method: unknown, input: { state?: string }) => {
+        if (input.state) {
+          requests.push({ state: input.state })
+          return Promise.resolve(issues)
+        }
+        return Promise.resolve(comments)
+      },
+      rest: {
+        issues: {
+          listForRepo: () => undefined,
+          listComments: () => undefined,
+          create: async (input: { title: string; body: string; labels: string[] }) => {
+            issues.push({ ...input, number: 42, html_url: 'https://github.com/wolfstar-project/example/issues/42' })
+            throw new Error('The issue response was lost.')
+          },
+          createComment: async (input: { issue_number: number; body: string }) => {
+            expect(input.issue_number).toBe(42)
+            comments.push({ id: 900, body: input.body })
+            throw new Error('The comment response was lost.')
+          },
+        },
+      },
+    } as unknown as Octokit
+    const github = createGitHubIssuePublisher({
+      createClient: () => client,
+      tokens: {
+        getToken: async () => ok({ token: 'fixture', expiresAt: '2026-08-28T00:00:00.000Z' }),
+        invalidate: () => undefined,
+      },
+    })
+    const controller = createRoutineReportController({ github, now, store, workerId: 'reporter' })
+    await controller.publishPending(new AbortController().signal)
+    await controller.publishPending(new AbortController().signal)
+    expect(await controller.publishPending(new AbortController().signal)).toEqual([
+      ok({ repository: 'wolfstar-project/example', issueNumber: 42 }),
+    ])
+    expect(issues.map((issue) => issue.title)).toEqual([
+      trackingIssueTitle('daily-checkin', 'wolfstar-project/example'),
+      '[BLOCKED] Daily check-in: 2026-08-27',
+    ])
+    expect(comments).toHaveLength(1)
+    expect(requests.every((request) => request.state === 'all')).toBe(true)
+    expect(isRoutineTrackingIssue({ repository: 'wolfstar-project/example', ...issues[1]! })).toBe(true)
+    expect(
+      await github.findRoutineTrackingIssue({
+        repository: repositoryMapping(),
+        routineName: 'daily-checkin',
+        runId: `${dailyId}:2026-08-28T07:00:00.000Z`,
+      }),
+    ).toEqual(ok(null))
+  } finally {
+    store.close()
+  }
+})
+
+it('marks a skipped daily run as blocked', () => {
+  const command = routineReportCommand({
+    repository: 'wolfstar-project/example',
+    routineId: 'wolfstar-project/example:daily-checkin',
+    routineName: 'daily-checkin',
+    run: {
+      id: 'wolfstar-project/example:daily-checkin:2026-08-27T07:00:00.000Z',
+      scheduledFor: '2026-08-27T07:00:00.000Z',
+    },
+    report: { _tag: 'Skipped', reason: 'The scheduled run expired.' },
+  })
+  expect(command.body).toContain('[BLOCKED] Daily check-in: 2026-08-27')
+  expect(command.body).toContain('The scheduled run expired.')
 })

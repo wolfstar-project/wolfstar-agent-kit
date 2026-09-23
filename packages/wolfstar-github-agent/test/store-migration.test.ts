@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { CODEX_AGENT_PROFILE } from '../src/agent-profile.ts'
+import { repositoryQuarantineReason } from '../src/github-write-gate.ts'
 import { openJournalStore } from '../src/store.ts'
 import { issueItem, pullRequestItem, repositoryMapping } from './fixtures.ts'
 
@@ -17,7 +18,102 @@ afterEach(() => {
   rmSync(directory, { recursive: true, force: true })
 })
 
+it('backfills an issue Approval from every issue work Task an older journal queued', () => {
+  const path = join(directory, 'state.sqlite')
+  const before = openJournalStore(path)
+  before.syncRepositories([repositoryMapping()], '2026-08-13T00:00:00.000Z')
+  const observed = before.recordObservation({
+    externalId: 'approved-before-the-table-existed',
+    observedAt: '2026-08-13T01:00:00.000Z',
+    source: 'poll',
+    subject: issueItem({ author: 'contributor' }),
+  })
+  if (observed._tag !== 'Inserted') throw new Error('Expected a new issue Revision.')
+  expect(
+    before.approveIssue({
+      repository: 'wolfstar-project/example',
+      issueNumber: 12,
+      revisionId: observed.revisionId,
+      at: '2026-08-13T01:00:01.000Z',
+    })._tag,
+  ).toBe('Approved')
+  const triage = before.claimNextIssueTriageTask('triage', '2026-08-13T01:00:02.000Z', 60_000)
+  if (triage === null) throw new Error('Expected Issue triage.')
+  before.completeWorkerTask({
+    taskId: triage.id,
+    workerId: triage.state.workerId,
+    fence: triage.state.fence,
+    at: '2026-08-13T01:00:03.000Z',
+    evidence: JSON.stringify({ _tag: 'READY_TO_IMPLEMENT' }),
+  })
+  before.close()
+  // An older journal proved the Approval only through the work Task it queued.
+  const legacy = new DatabaseSync(path)
+  legacy.exec('DROP TABLE issue_approvals; PRAGMA user_version = 70;')
+  legacy.close()
+
+  const migrated = openJournalStore(path)
+  try {
+    expect(migrated.isIssueApprovalPending('wolfstar-project/example', 12, observed.revisionId)).toBe(false)
+    expect(
+      migrated.approveIssue({
+        repository: 'wolfstar-project/example',
+        issueNumber: 12,
+        revisionId: observed.revisionId,
+        at: '2026-08-13T02:00:00.000Z',
+      }),
+    ).toEqual({ _tag: 'Duplicate', work: 'issue_work', taskId: expect.any(String) })
+    expect(migrated.getDashboardSnapshot('2026-08-13T02:00:00.000Z').queue).toContainEqual(
+      expect.objectContaining({ number: 12, state: { _tag: 'Queued', work: 'issue_work' } }),
+    )
+  } finally {
+    migrated.close()
+  }
+})
+
+it('retires legacy Service Review refresh incidents when repository ownership starts', () => {
+  const path = join(directory, 'state.sqlite')
+  const before = openJournalStore(path)
+  const at = '2026-08-18T00:00:00.000Z'
+  const incident = {
+    kind: 'unknown' as const,
+    severity: 'error' as const,
+    message: 'GitHub could not read the Review gates.',
+    recovery: { _tag: 'ActionRequired' as const },
+    at,
+  }
+  const legacyRefresh = before.recordIncident({
+    ...incident,
+    scope: { _tag: 'Service' },
+    operation: 'review_gate_refresh',
+  })
+  const unrelatedService = before.recordIncident({
+    ...incident,
+    scope: { _tag: 'Service' },
+    operation: 'review_status_publication',
+  })
+  const repositoryRefresh = before.recordIncident({
+    ...incident,
+    scope: { _tag: 'Repository', repository: 'wolfstar-project/example' },
+    operation: 'review_gate_refresh',
+  })
+  before.close()
+  const legacy = new DatabaseSync(path)
+  legacy.exec('ALTER TABLE review_gate_projections DROP COLUMN command_id; PRAGMA user_version = 69;')
+  legacy.close()
+
+  const migrated = openJournalStore(path)
+  try {
+    const incidents = migrated.listIncidents()
+    expect(incidents).not.toContainEqual(expect.objectContaining({ id: legacyRefresh.id }))
+    expect(incidents).toEqual(expect.arrayContaining([unrelatedService, repositoryRefresh]))
+  } finally {
+    migrated.close()
+  }
+})
+
 function dropReviewResolutionAdditions(database: DatabaseSync): void {
+  dropRestartOperationAdditions(database)
   database.exec('DROP TABLE IF EXISTS review_gate_projections')
   database.exec('DROP INDEX IF EXISTS routines_active')
   const routineRunColumns = database.prepare('PRAGMA table_info(routine_runs)').all() as unknown as Array<{
@@ -37,6 +133,20 @@ function dropReviewResolutionAdditions(database: DatabaseSync): void {
     database.exec('ALTER TABLE review_status_commands DROP COLUMN desired_outcome')
   if (reviewStatusColumns.some((column) => column.name === 'review_run_id'))
     database.exec('ALTER TABLE review_status_commands DROP COLUMN review_run_id')
+}
+
+/** Rewinds past the Repair report table, which every version below 60 predates. */
+function dropRepairReports(database: DatabaseSync): void {
+  database.exec('DROP TABLE IF EXISTS repair_reports')
+}
+
+function dropRestartOperationAdditions(database: DatabaseSync): void {
+  dropRepairReports(database)
+  const columns = database.prepare('PRAGMA table_info(restart_requests)').all() as unknown as Array<{ name: string }>
+  if (columns.some((column) => column.name === 'target_commit'))
+    database.exec('ALTER TABLE restart_requests DROP COLUMN target_commit')
+  if (columns.some((column) => column.name === 'operation_tag'))
+    database.exec('ALTER TABLE restart_requests DROP COLUMN operation_tag')
 }
 
 /** Rewinds past the Routine tables, which every version below 38 predates. */
@@ -79,6 +189,7 @@ function restoreExpectedUpdatedAt(database: DatabaseSync): void {
 function journalAtVersion22(path: string): void {
   const store = openJournalStore(path, true, CODEX_AGENT_PROFILE)
   store.syncRepositories([repositoryMapping()], '2026-08-18T00:00:00.000Z')
+  store.setRepositoryWritesEnabled('wolfstar-project/example', true)
   store.recordObservation({
     externalId: 'legacy-pr',
     observedAt: '2026-08-18T00:00:00.000Z',
@@ -140,6 +251,7 @@ function journalAtVersion22(path: string): void {
 function journalAtVersion25(path: string): void {
   const store = openJournalStore(path, true, CODEX_AGENT_PROFILE)
   store.syncRepositories([repositoryMapping()], '2026-08-18T00:00:00.000Z')
+  store.setRepositoryWritesEnabled('wolfstar-project/example', true)
   store.recordObservation({
     externalId: 'migrated-pr',
     observedAt: '2026-08-18T00:00:00.000Z',
@@ -222,6 +334,7 @@ function journalAtVersion25(path: string): void {
 function journalAtVersion30(path: string): void {
   const store = openJournalStore(path, true, CODEX_AGENT_PROFILE)
   store.syncRepositories([repositoryMapping()], '2026-08-18T00:00:00.000Z')
+  store.setRepositoryWritesEnabled('wolfstar-project/example', true)
   const observed = store.recordObservation({
     externalId: 'review-usage-migration',
     observedAt: '2026-08-18T00:00:00.000Z',
@@ -300,6 +413,7 @@ describe('pull request closure verification migration', () => {
     const repository = repositoryMapping()
     const pullRequest = pullRequestItem({ mergeState: 'clean' })
     store.syncRepositories([repository], '2026-08-18T00:00:00.000Z')
+    store.setRepositoryWritesEnabled(repository.github, true)
     const observed = store.recordObservation({
       externalId: 'review-before-legacy-closure',
       observedAt: '2026-08-18T00:00:00.000Z',
@@ -401,6 +515,7 @@ describe('installation permission recovery migration', () => {
     const path = join(directory, 'state.sqlite')
     const store = openJournalStore(path, true, CODEX_AGENT_PROFILE)
     store.syncRepositories([repositoryMapping()], '2026-08-18T00:00:00.000Z')
+    store.setRepositoryWritesEnabled('wolfstar-project/example', true)
     store.recordObservation({
       externalId: 'old-workflow-permission',
       observedAt: '2026-08-18T00:00:00.000Z',
@@ -452,11 +567,12 @@ describe('provider session recovery migration', () => {
     const path = join(directory, 'state.sqlite')
     const store = openJournalStore(path, true, CODEX_AGENT_PROFILE)
     store.syncRepositories([repositoryMapping()], '2026-08-18T00:00:00.000Z')
+    store.setRepositoryWritesEnabled('wolfstar-project/example', true)
     store.recordObservation({
       externalId: 'stalled-issue',
       observedAt: '2026-08-18T00:00:00.000Z',
       source: 'poll',
-      subject: issueItem(),
+      subject: issueItem({ author: 'wolfstar-project' }),
     })
     const reason = 'The opencode session stopped sending output.'
     let elapsedMilliseconds = 0
@@ -523,6 +639,7 @@ describe('review status Incident recovery migration', () => {
     store.close()
 
     const oldJournal = new DatabaseSync(path)
+    dropRestartOperationAdditions(oldJournal)
     oldJournal.exec('PRAGMA user_version = 56')
     oldJournal.close()
 
@@ -532,6 +649,69 @@ describe('review status Incident recovery migration', () => {
         {
           operation: 'review_rerun',
           message: 'GitHub timed out.',
+        },
+      ])
+    } finally {
+      migrated.close()
+    }
+  })
+})
+
+describe('write quarantine Incident recovery migration', () => {
+  it('clears every legacy quarantine scope and preserves genuine policy Incidents', () => {
+    const path = join(directory, 'state.sqlite')
+    const store = openJournalStore(path, true, CODEX_AGENT_PROFILE)
+    const repository = 'wolfstar-project/example'
+    const message = repositoryQuarantineReason(repository)
+    store.recordIncident({
+      scope: { _tag: 'Repository', repository },
+      kind: 'policy',
+      severity: 'warning',
+      operation: 'write',
+      message,
+      recovery: { _tag: 'ActionRequired' },
+      at: '2026-09-02T00:00:00.000Z',
+    })
+    store.recordIncident({
+      scope: { _tag: 'Task', taskId: 'legacy-task', repository, itemNumber: 24 },
+      kind: 'policy',
+      severity: 'error',
+      operation: 'adversarial_review',
+      message,
+      recovery: { _tag: 'ActionRequired' },
+      at: '2026-09-02T00:00:01.000Z',
+    })
+    store.recordIncident({
+      scope: { _tag: 'Service' },
+      kind: 'policy',
+      severity: 'warning',
+      operation: 'running_label',
+      message: `${repository}: ${message}`,
+      recovery: { _tag: 'ActionRequired' },
+      at: '2026-09-02T00:00:02.000Z',
+    })
+    store.recordIncident({
+      scope: { _tag: 'Repository', repository },
+      kind: 'policy',
+      severity: 'error',
+      operation: 'configuration',
+      message: 'The repository mapping is invalid.',
+      recovery: { _tag: 'ActionRequired' },
+      at: '2026-09-02T00:00:03.000Z',
+    })
+    store.close()
+
+    const oldJournal = new DatabaseSync(path)
+    dropRepairReports(oldJournal)
+    oldJournal.exec('PRAGMA user_version = 58')
+    oldJournal.close()
+
+    const migrated = openJournalStore(path, true, CODEX_AGENT_PROFILE)
+    try {
+      expect(migrated.listIncidents()).toMatchObject([
+        {
+          operation: 'configuration',
+          message: 'The repository mapping is invalid.',
         },
       ])
     } finally {
@@ -556,7 +736,6 @@ describe('gitHub vocabulary migration', () => {
 
     const database = new DatabaseSync(path)
     try {
-      expect((database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(58)
       // The old words must be gone from the rows and from the constraints.
       expect(
         database.prepare(`SELECT count(*) AS total FROM worker_tasks WHERE state_tag = 'NeedsAttention'`).get(),
@@ -642,4 +821,143 @@ describe('agent selection migration', () => {
       store.close()
     }
   })
+})
+
+describe('candidate title migration', () => {
+  it('reads the claim as the title for a Candidate recorded before titles existed', () => {
+    const path = join(directory, 'state.sqlite')
+    const seeded = openJournalStore(path, true, CODEX_AGENT_PROFILE)
+    seeded.syncRepositories([repositoryMapping()], '2026-09-05T00:00:00.000Z')
+    seeded.syncRoutines({
+      repository: 'wolfstar-project/example',
+      specSha: 'abc123',
+      entries: [{ name: 'daily-checkin', crons: ['0 7 * * *'], timeZone: 'UTC', mode: 'propose', enabled: true }],
+      at: '2026-09-05T00:00:00.000Z',
+    })
+    seeded.openRoutineRun({
+      routineId: 'wolfstar-project/example:daily-checkin',
+      scheduledFor: '2026-09-05T07:00:00.000Z',
+      specSha: 'abc123',
+      at: '2026-09-05T07:00:05.000Z',
+    })
+    seeded.recordCandidates({
+      routineId: 'wolfstar-project/example:daily-checkin',
+      runId: 'wolfstar-project/example:daily-checkin:2026-09-05T07:00:00.000Z',
+      candidates: [
+        {
+          fingerprint: 'server/utils/cache.ts#cached',
+          title: 'Written after the column existed',
+          target: 'server/utils/cache.ts',
+          claim: 'The deploy gate cannot run the published binary.',
+          verification: 'pnpm test',
+          estimatedChangedFiles: 1,
+        },
+      ],
+      at: '2026-09-05T07:05:00.000Z',
+    })
+    seeded.close()
+
+    // Rewind the journal to the shape a service running version 62 wrote.
+    const database = new DatabaseSync(path)
+    database.exec('ALTER TABLE candidates DROP COLUMN title')
+    database.exec('PRAGMA user_version = 62')
+    database.close()
+
+    const store = openJournalStore(path, true, CODEX_AGENT_PROFILE)
+    try {
+      const [candidate] = store.listCandidates('wolfstar-project/example:daily-checkin')
+      expect(candidate?.title).toBe('The deploy gate cannot run the published binary.')
+    } finally {
+      store.close()
+    }
+  })
+})
+
+it('converges a sibling journal that skipped the settled column', () => {
+  const path = join(directory, 'state.sqlite')
+  const before = openJournalStore(path)
+  before.syncRepositories([repositoryMapping()], '2026-09-18T00:00:00.000Z')
+  const subject = pullRequestItem({ mergeState: 'clean' })
+  const observed = before.recordObservation({
+    externalId: 'sibling-settled',
+    observedAt: '2026-09-18T00:01:00.000Z',
+    source: 'poll',
+    subject,
+    pullRequestTriage: {
+      _tag: 'Skipped',
+      reason: 'model: classification chose skip with confidence 0.93.',
+      source: 'model',
+    },
+  })
+  if (observed._tag !== 'Inserted') throw new Error('Expected a pull request Revision.')
+  before.close()
+  // A stacked sibling branch carried this journal past the settled column's
+  // own step, so its version number outruns its schema.
+  const sibling = new DatabaseSync(path)
+  sibling.exec('ALTER TABLE pull_request_triage_runs DROP COLUMN settled_at; PRAGMA user_version = 76;')
+  sibling.close()
+
+  const migrated = openJournalStore(path)
+  try {
+    expect(
+      migrated.getLatestPullRequestTriageRun('wolfstar-project/example', subject.number, subject.headSha),
+    ).toMatchObject({ outcome: 'ReviewSkipped' })
+    expect(
+      migrated.markPullRequestTriageSettled(
+        'wolfstar-project/example',
+        subject.number,
+        subject.headSha,
+        '2026-09-18T00:02:00.000Z',
+      ),
+    ).toBe(true)
+  } finally {
+    migrated.close()
+  }
+})
+
+it('converges a sibling journal that carries no issue triage runs', () => {
+  const path = join(directory, 'state.sqlite')
+  const before = openJournalStore(path)
+  before.syncRepositories([repositoryMapping({ issueWork: true })], '2026-09-18T00:00:00.000Z')
+  before.close()
+  // A stacked sibling branch carried this journal past the issue triage
+  // table's own step, so its version number outruns its schema.
+  const sibling = new DatabaseSync(path)
+  sibling.exec('DROP TABLE issue_triage_runs; PRAGMA user_version = 77;')
+  sibling.close()
+
+  const migrated = openJournalStore(path)
+  try {
+    const issue = issueItem({ author: 'wolfstar-project' })
+    const observed = migrated.recordObservation({
+      externalId: 'sibling-converged-route',
+      observedAt: '2026-09-18T00:01:00.000Z',
+      source: 'poll',
+      subject: issue,
+      issueTriage: {
+        _tag: 'Routed',
+        confidence: 0.95,
+        title: 'Button does nothing',
+        body: 'Steps: open the app.',
+        result: {
+          _tag: 'NEEDS_INFO',
+          difficulty: 2,
+          impact: 3,
+          hasReproduction: true,
+          needsCodebaseReview: false,
+          summary:
+            'The classification service routed this from the report alone: information is missing before work can start.',
+          nextAction: 'Add what is missing. The next comment after an edit re-runs triage.',
+          relatedIssues: [],
+        },
+      },
+    })
+    if (observed._tag !== 'Inserted') throw new Error('Expected one inserted Revision.')
+    expect(migrated.getLatestIssueTriageRun(issue.repository, issue.number, observed.revisionId)).toMatchObject({
+      _tag: 'Routed',
+      confidence: 0.95,
+    })
+  } finally {
+    migrated.close()
+  }
 })

@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { createApprovalController } from '../src/approval-controller.ts'
-import { ok } from '../src/result.ts'
+import { err, ok } from '../src/result.ts'
 import { issueItem, pullRequestItem, repositoryMapping } from './fixtures.ts'
 
 const unusedIssueApproval = {
-  approveIssueWork: () => {
+  approveIssue: () => {
     throw new Error('Unexpected issue Approval.')
   },
-  isIssueWorkApprovalReady: () => false,
+  isIssueApprovalPending: () => false,
 }
 
 describe('approval controller', () => {
@@ -15,6 +15,7 @@ describe('approval controller', () => {
     const calls: string[] = []
     const controller = createApprovalController({
       github: {
+        clearAgentLabels: () => Promise.resolve(ok(undefined)),
         consumeApprovalLabel: () => {
           calls.push('consume')
           return Promise.resolve(ok(undefined))
@@ -31,6 +32,7 @@ describe('approval controller', () => {
       now: () => new Date('2026-08-13T01:00:00.000Z'),
       store: {
         ...unusedIssueApproval,
+        hasApprovalPromptComment: () => false,
         recordApprovalPromptComment: () => true,
         getSelectionMode: () => 'auto' as const,
         hasPullRequestApproval: () => false,
@@ -56,6 +58,7 @@ describe('approval controller', () => {
     let body = ''
     const controller = createApprovalController({
       github: {
+        clearAgentLabels: () => Promise.resolve(ok(undefined)),
         consumeApprovalLabel: () => Promise.reject(new Error('Unexpected label consumption.')),
         ensureApprovalLabel: () => Promise.resolve(ok(undefined)),
         upsertReviewStatus: (_repository, _number, _commentId, value) => {
@@ -66,6 +69,7 @@ describe('approval controller', () => {
       now: () => new Date('2026-08-13T01:00:00.000Z'),
       store: {
         ...unusedIssueApproval,
+        hasApprovalPromptComment: () => false,
         recordApprovalPromptComment: () => true,
         getSelectionMode: () => 'auto' as const,
         hasPullRequestApproval: () => false,
@@ -91,11 +95,126 @@ describe('approval controller', () => {
     expect(body).toContain('head commit `abc123`')
   })
 
+  it('clears the verdict label of the head this prompt replaces', async () => {
+    const calls: string[] = []
+    const controller = createApprovalController({
+      github: {
+        clearAgentLabels: (_repository, pullRequestNumber) => {
+          calls.push(`clear:${pullRequestNumber}`)
+          return Promise.resolve(ok(undefined))
+        },
+        consumeApprovalLabel: () => Promise.reject(new Error('Unexpected label consumption.')),
+        ensureApprovalLabel: () => Promise.resolve(ok(undefined)),
+        upsertReviewStatus: () => {
+          calls.push('comment')
+          return Promise.resolve(ok({ commentId: 1, url: 'url' }))
+        },
+      },
+      now: () => new Date('2026-08-13T01:00:00.000Z'),
+      store: {
+        ...unusedIssueApproval,
+        hasApprovalPromptComment: () => false,
+        recordApprovalPromptComment: () => true,
+        getSelectionMode: () => 'auto' as const,
+        hasPullRequestApproval: () => false,
+        approvePullRequest: () => {
+          throw new Error('Unexpected Approval.')
+        },
+      },
+    })
+
+    expect(
+      await controller.reconcile(
+        repositoryMapping(),
+        pullRequestItem({ author: 'contributor', number: 237 }),
+        'a'.repeat(64),
+        new AbortController().signal,
+      ),
+    ).toEqual(ok(undefined))
+    expect(calls).toEqual(['clear:237', 'comment'])
+  })
+
+  it('clears the verdict label once per head commit', async () => {
+    const calls: string[] = []
+    const controller = createApprovalController({
+      github: {
+        clearAgentLabels: () => {
+          calls.push('clear')
+          return Promise.resolve(ok(undefined))
+        },
+        consumeApprovalLabel: () => Promise.reject(new Error('Unexpected label consumption.')),
+        ensureApprovalLabel: () => Promise.resolve(ok(undefined)),
+        upsertReviewStatus: () => {
+          calls.push('comment')
+          return Promise.resolve(ok({ commentId: 1, url: 'url' }))
+        },
+      },
+      now: () => new Date('2026-08-13T01:00:00.000Z'),
+      store: {
+        ...unusedIssueApproval,
+        hasApprovalPromptComment: () => true,
+        recordApprovalPromptComment: () => true,
+        getSelectionMode: () => 'auto' as const,
+        hasPullRequestApproval: () => false,
+        approvePullRequest: () => {
+          throw new Error('Unexpected Approval.')
+        },
+      },
+    })
+
+    expect(
+      await controller.reconcile(
+        repositoryMapping(),
+        pullRequestItem({ author: 'contributor' }),
+        'a'.repeat(64),
+        new AbortController().signal,
+      ),
+    ).toEqual(ok(undefined))
+    expect(calls).toEqual(['comment'])
+  })
+
+  it('reports a refused label clear and posts no prompt', async () => {
+    const calls: string[] = []
+    const controller = createApprovalController({
+      github: {
+        clearAgentLabels: () => Promise.resolve(err('GitHub did not clear the labels.')),
+        consumeApprovalLabel: () => Promise.reject(new Error('Unexpected label consumption.')),
+        ensureApprovalLabel: () => Promise.resolve(ok(undefined)),
+        upsertReviewStatus: () => {
+          calls.push('comment')
+          return Promise.resolve(ok({ commentId: 1, url: 'url' }))
+        },
+      },
+      now: () => new Date('2026-08-13T01:00:00.000Z'),
+      store: {
+        ...unusedIssueApproval,
+        hasApprovalPromptComment: () => false,
+        recordApprovalPromptComment: () => true,
+        getSelectionMode: () => 'auto' as const,
+        hasPullRequestApproval: () => false,
+        approvePullRequest: () => {
+          throw new Error('Unexpected Approval.')
+        },
+      },
+    })
+
+    expect(
+      await controller.reconcile(
+        repositoryMapping(),
+        pullRequestItem({ author: 'contributor' }),
+        'a'.repeat(64),
+        new AbortController().signal,
+      ),
+    ).toEqual(err('GitHub did not clear the labels.'))
+    expect(calls).toEqual([])
+  })
+
   it('keeps the label and approves the exact head commit', async () => {
     const calls: string[] = []
     const revisionId = 'a'.repeat(64)
     const controller = createApprovalController({
       github: {
+        clearAgentLabels: () => Promise.resolve(ok(undefined)),
         consumeApprovalLabel: () => {
           calls.push('consume')
           return Promise.resolve(ok(undefined))
@@ -106,6 +225,7 @@ describe('approval controller', () => {
       now: () => new Date('2026-08-13T01:00:00.000Z'),
       store: {
         ...unusedIssueApproval,
+        hasApprovalPromptComment: () => false,
         recordApprovalPromptComment: () => true,
         getSelectionMode: () => 'auto' as const,
         hasPullRequestApproval: () => false,
@@ -135,6 +255,7 @@ describe('approval controller', () => {
     const approvals = new Set<string>()
     const controller = createApprovalController({
       github: {
+        clearAgentLabels: () => Promise.resolve(ok(undefined)),
         consumeApprovalLabel: () => {
           calls.push('consume')
           return Promise.resolve(ok(undefined))
@@ -145,6 +266,7 @@ describe('approval controller', () => {
       now: () => new Date('2026-08-14T01:00:00.000Z'),
       store: {
         ...unusedIssueApproval,
+        hasApprovalPromptComment: () => false,
         recordApprovalPromptComment: () => true,
         getSelectionMode: () => 'auto' as const,
         hasPullRequestApproval: (_repository, _number, revisionId) => approvals.has(revisionId),
@@ -172,6 +294,7 @@ describe('approval controller', () => {
     let approved = false
     const controller = createApprovalController({
       github: {
+        clearAgentLabels: () => Promise.resolve(ok(undefined)),
         consumeApprovalLabel: () => Promise.reject(new Error('Unexpected label consumption.')),
         ensureApprovalLabel: () => Promise.resolve(ok(undefined)),
         upsertReviewStatus: () => Promise.resolve(ok({ commentId: 1, url: 'url' })),
@@ -179,6 +302,7 @@ describe('approval controller', () => {
       now: () => new Date('2026-08-13T01:00:00.000Z'),
       store: {
         ...unusedIssueApproval,
+        hasApprovalPromptComment: () => false,
         recordApprovalPromptComment: () => true,
         getSelectionMode: () => 'auto' as const,
         hasPullRequestApproval: () => false,
@@ -203,6 +327,7 @@ describe('approval controller', () => {
   it('keeps an existing head commit Approval without posting again', async () => {
     const controller = createApprovalController({
       github: {
+        clearAgentLabels: () => Promise.resolve(ok(undefined)),
         consumeApprovalLabel: () => Promise.reject(new Error('Unexpected label consumption.')),
         ensureApprovalLabel: () => Promise.reject(new Error('Unexpected label creation.')),
         upsertReviewStatus: () => Promise.reject(new Error('Unexpected comment.')),
@@ -210,6 +335,7 @@ describe('approval controller', () => {
       now: () => new Date('2026-08-14T01:00:00.000Z'),
       store: {
         ...unusedIssueApproval,
+        hasApprovalPromptComment: () => false,
         recordApprovalPromptComment: () => true,
         getSelectionMode: () => 'auto' as const,
         hasPullRequestApproval: () => true,
@@ -233,6 +359,7 @@ describe('approval controller', () => {
     const calls: string[] = []
     const controller = createApprovalController({
       github: {
+        clearAgentLabels: () => Promise.resolve(ok(undefined)),
         consumeApprovalLabel: () => {
           calls.push('consume')
           return Promise.resolve(ok(undefined))
@@ -245,11 +372,12 @@ describe('approval controller', () => {
       },
       now: () => new Date('2026-08-14T01:00:00.000Z'),
       store: {
+        hasApprovalPromptComment: () => false,
         recordApprovalPromptComment: () => true,
         getSelectionMode: () => 'auto' as const,
         hasPullRequestApproval: () => false,
-        isIssueWorkApprovalReady: () => false,
-        approveIssueWork: () => {
+        isIssueApprovalPending: () => false,
+        approveIssue: () => {
           throw new Error('Unexpected Approval.')
         },
         approvePullRequest: () => {
@@ -265,10 +393,11 @@ describe('approval controller', () => {
     expect(calls).toEqual([])
   })
 
-  it('makes the shared Approval label available after valid issue triage', async () => {
+  it('makes the shared Approval label available before outside issue triage', async () => {
     const calls: string[] = []
     const controller = createApprovalController({
       github: {
+        clearAgentLabels: () => Promise.resolve(ok(undefined)),
         consumeApprovalLabel: () => Promise.reject(new Error('Unexpected label consumption.')),
         ensureApprovalLabel: () => {
           calls.push('ensure')
@@ -278,11 +407,12 @@ describe('approval controller', () => {
       },
       now: () => new Date('2026-08-14T01:00:00.000Z'),
       store: {
+        hasApprovalPromptComment: () => false,
         recordApprovalPromptComment: () => true,
         getSelectionMode: () => 'auto' as const,
         hasPullRequestApproval: () => false,
-        isIssueWorkApprovalReady: () => true,
-        approveIssueWork: () => {
+        isIssueApprovalPending: () => true,
+        approveIssue: () => {
           throw new Error('Unexpected Approval.')
         },
         approvePullRequest: () => {
@@ -305,6 +435,7 @@ describe('approval controller', () => {
   it('fails when the prompt comment cannot be recorded', async () => {
     const controller = createApprovalController({
       github: {
+        clearAgentLabels: () => Promise.resolve(ok(undefined)),
         consumeApprovalLabel: () => Promise.reject(new Error('Unexpected label consumption.')),
         ensureApprovalLabel: () => Promise.resolve(ok(undefined)),
         upsertReviewStatus: () => Promise.resolve(ok({ commentId: 1, url: 'url' })),
@@ -312,6 +443,7 @@ describe('approval controller', () => {
       now: () => new Date('2026-08-13T01:00:00.000Z'),
       store: {
         ...unusedIssueApproval,
+        hasApprovalPromptComment: () => false,
         recordApprovalPromptComment: () => false,
         getSelectionMode: () => 'auto' as const,
         hasPullRequestApproval: () => false,
@@ -336,6 +468,7 @@ describe('approval controller', () => {
     const revisionId = 'a'.repeat(64)
     const controller = createApprovalController({
       github: {
+        clearAgentLabels: () => Promise.resolve(ok(undefined)),
         consumeApprovalLabel: (...args: unknown[]) => {
           consumedItemKind = args[1]
           calls.push('consume')
@@ -346,14 +479,15 @@ describe('approval controller', () => {
       },
       now: () => new Date('2026-08-14T01:00:00.000Z'),
       store: {
+        hasApprovalPromptComment: () => false,
         recordApprovalPromptComment: () => true,
         getSelectionMode: () => 'auto' as const,
         hasPullRequestApproval: () => false,
-        isIssueWorkApprovalReady: () => true,
-        approveIssueWork(input) {
+        isIssueApprovalPending: () => true,
+        approveIssue(input) {
           calls.push('approve')
           expect(input.revisionId).toBe(revisionId)
-          return { _tag: 'Approved', taskId: 'task' }
+          return { _tag: 'Approved', work: 'issue_work', taskId: 'task' }
         },
         approvePullRequest: () => {
           throw new Error('Unexpected pull request Approval.')

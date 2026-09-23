@@ -29,6 +29,7 @@ export function repositoryMapping(overrides: Partial<RepositoryMapping> = {}): R
     pullRequestReview: true,
     conflictResolution: true,
     takeOwnership: { _tag: 'Disabled' },
+    autoMerge: { _tag: 'Labelled' },
     ...overrides,
   }
 }
@@ -88,9 +89,17 @@ export function dashboardSnapshot(overrides: Partial<DashboardSnapshot> = {}): D
     mutationsEnabled: false,
     agentControl: { _tag: 'Running' },
     restartRequest: null,
+    serviceUpdate: {
+      _tag: 'Current',
+      deployedCommit: 'a'.repeat(40),
+      latestCommit: 'a'.repeat(40),
+      checkedAt: '2026-08-13T01:00:00.000Z',
+    },
     selectionMode: 'auto',
     openPullRequests: 0,
     maxOpenPullRequests: 8,
+    triageDecisions: { reviewRequired: 0, reviewSkipped: 0, couldNotDecide: 0 },
+    triageSkips: [],
     agentProfile: CODEX_AGENT_PROFILE,
     agentSelection: { _tag: 'FollowsConfiguration' },
     agentStart: { _tag: 'WritesDisabled' },
@@ -111,6 +120,7 @@ export function dashboardSnapshot(overrides: Partial<DashboardSnapshot> = {}): D
     tasks: [],
     routines: [],
     routineRuns: [],
+    batches: [],
     ...overrides,
   }
 }

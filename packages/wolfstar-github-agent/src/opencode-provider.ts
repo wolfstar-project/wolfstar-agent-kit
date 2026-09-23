@@ -4,6 +4,7 @@ import type { AgentEvent, AgentProvider, AgentTokenUsage, AgentTurnRequest } fro
 import { spawn } from 'node:child_process'
 import process from 'node:process'
 import { createInterface } from 'node:readline'
+import { opencodeTurnEnvironment } from './agent-context.ts'
 import {
   agentProviderFailureReason,
   agentTextEvent,
@@ -11,6 +12,7 @@ import {
   extractJsonObject,
   jsonOutputInstruction,
 } from './agent-provider.ts'
+import { workspaceEnvironment } from './workspace-environment.ts'
 
 /** Tools that write files, so activity shows a file change instead of a command. */
 const fileTools = new Set(['edit', 'write', 'patch', 'multiedit'])
@@ -194,7 +196,18 @@ export function createOpencodeProvider(options: OpencodeProviderOptions = {}): A
       }))
 
   async function* runOnce(request: AgentTurnRequest, prompt: string): AsyncGenerator<AgentEvent> {
-    const child = spawnOpencode(opencodeArguments(request, prompt), request.workspace, environment)
+    // The worktree's seeded .env carries the tokens its own scripts read.
+    // This turn's own instruction files, such as the repository memory index,
+    // merge on top of the shared OpenCode configuration.
+    const turnEnvironment = opencodeTurnEnvironment({
+      environment: workspaceEnvironment(environment, request.workspace, request.taskId),
+      instructionPaths: request.instructionPaths ?? [],
+    })
+    if (turnEnvironment._tag === 'Err') {
+      yield { _tag: 'Failed', reason: turnEnvironment.error }
+      return
+    }
+    const child = spawnOpencode(opencodeArguments(request, prompt), request.workspace, turnEnvironment.value)
     const abort = () => child.kill('SIGTERM')
     request.signal.addEventListener('abort', abort, { once: true })
     let standardError = ''

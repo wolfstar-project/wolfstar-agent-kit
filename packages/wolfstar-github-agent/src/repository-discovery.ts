@@ -10,6 +10,7 @@ export interface InstalledRepository {
   github: string
   defaultBranch: string
   archived: boolean
+  fork: boolean
   topics: string[]
   /** How the controller reached this repository: the App, or Wolfstar's own token. */
   authentication: RepositoryAuthentication
@@ -100,10 +101,12 @@ export async function discoverGitHubAppRepositories(
     const ownerType = repository.owner.type
     if (ownerType !== 'User' && ownerType !== 'Organization') continue
     if (!isAllowedRepository(repository.full_name, options.allowedOwners)) continue
+    if (repository.fork) continue
     repositories.push({
       github: repository.full_name,
       defaultBranch: repository.default_branch,
       archived: repository.archived,
+      fork: false,
       topics: repository.topics ?? [],
       authentication: 'app',
       owner: { login: repository.owner.login, type: ownerType },
@@ -128,6 +131,7 @@ function defaultMapping(repository: InstalledRepository, checkout: string): Repo
     pullRequestReview: true,
     conflictResolution: ownership === 'owned',
     takeOwnership: { _tag: 'Disabled' },
+    autoMerge: { _tag: 'Labelled' },
   }
 }
 
@@ -193,7 +197,9 @@ export async function discoverUserRepositories(
         }),
     ),
   )
-  return repositories.flatMap((repository) => (repository === undefined || repository.archived ? [] : [repository]))
+  return repositories.flatMap((repository) =>
+    repository === undefined || repository.archived || repository.fork ? [] : [repository],
+  )
 }
 
 /**
@@ -212,6 +218,7 @@ export function installedWithoutCheckout(
     .filter(
       (repository) =>
         !repository.archived &&
+        !repository.fork &&
         isAllowedRepository(repository.github, allowedOwners) &&
         !checkoutByRepository.has(repository.github.toLowerCase()),
     )
@@ -230,6 +237,7 @@ export function buildRepositoryMappings(
 
   return repositories
     .flatMap((repository) => {
+      if (repository.fork) return []
       if (!isAllowedRepository(repository.github, allowedOwners)) return []
       const checkout = checkoutByRepository.get(repository.github.toLowerCase())
       if (checkout === undefined) return []

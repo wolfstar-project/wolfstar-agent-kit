@@ -4,6 +4,7 @@
 #   service.sh update [REF]   move to REF (default origin/main), rebuild, restart
 #   service.sh prepare-update [REF]   move to REF and rebuild without restarting
 #   service.sh restart        restart the revision already deployed
+#   service.sh revision       print the deployed commit
 #   service.sh status         report what is deployed and whether it answers
 #
 # The service runs from its own checkout, never from this one, so switching a
@@ -15,6 +16,9 @@ SERVICE_CHECKOUT="${WOLFSTAR_GITHUB_AGENT_CHECKOUT:-$HOME/.local/share/wolfstar-
 SERVICE_UNIT=wolfstar-github-agent
 HEALTH_URL=http://127.0.0.1:3210/health
 CONFIG_FILE="$HOME/.config/wolfstar-github-agent/config.yml"
+# The unit runs the service with this Node. The check below must use the same
+# one, because a different version can accept source this one rejects.
+SERVICE_NODE="${WOLFSTAR_GITHUB_AGENT_NODE:-$HOME/.local/lib/wolfstar-github-agent/node}"
 PASSWORD_FILE="$HOME/.config/wolfstar-github-agent/dashboard-password"
 
 HEALTH_HOST=$(node --input-type=commonjs - "$CONFIG_FILE" <<'NODE'
@@ -96,6 +100,32 @@ restart_and_verify() {
   report
 }
 
+# Reads the live configuration with the revision that is about to run, while the
+# running process keeps serving. A key that revision rejects, such as one naming
+# an Agent role it retired, fails here. Starting instead leaves systemd retrying
+# a process that can never start, which takes the service down until a person
+# edits the configuration.
+#
+# Both paths that start a process run this: a deploy, where the revision is new,
+# and a restart, where the configuration is what moved.
+check_config() {
+  local node_bin="$SERVICE_NODE"
+  if [ ! -x "$node_bin" ]; then
+    node_bin=$(command -v node)
+  fi
+  if [ -z "$node_bin" ]; then
+    echo "No Node to check the configuration with." >&2
+    exit 1
+  fi
+  if ! (cd "$SERVICE_CHECKOUT" \
+    && "$node_bin" --experimental-strip-types packages/wolfstar-github-agent/src/cli.ts \
+      check-config --config "$CONFIG_FILE"); then
+    echo "The new revision rejects $CONFIG_FILE, so the running revision keeps serving." >&2
+    echo "Fix the configuration, then deploy again." >&2
+    exit 1
+  fi
+}
+
 prepare_update() {
   require_checkout
   local pnpm_bin ref before
@@ -119,8 +149,14 @@ prepare_update() {
   fi
   echo "Installing dependencies"
   (cd "$SERVICE_CHECKOUT" && "$pnpm_bin" install --frozen-lockfile >/dev/null)
+  echo "Syncing Agent instructions"
+  bash "$SERVICE_CHECKOUT/scripts/sync-agent-context.sh" local >/dev/null
+  echo "Installing Worktrunk settings"
+  bash "$SERVICE_CHECKOUT/scripts/worktrunk-config.sh" update >/dev/null
   echo "Building the dashboard"
   (cd "$SERVICE_CHECKOUT/packages/wolfstar-github-agent" && "$pnpm_bin" dashboard:build >/dev/null 2>&1)
+  echo "Checking the configuration"
+  check_config
 }
 
 command="${1:-update}"
@@ -134,7 +170,14 @@ case "$command" in
     ;;
   restart)
     require_checkout
+    # The configuration moves on its own, so the revision already deployed can
+    # stop accepting it between one start and the next.
+    check_config
     restart_and_verify
+    ;;
+  revision)
+    require_checkout
+    git -C "$SERVICE_CHECKOUT" rev-parse HEAD
     ;;
   status)
     require_checkout
@@ -148,7 +191,7 @@ case "$command" in
     ;;
   *)
     echo "Unknown command: $command" >&2
-    echo "Use update, prepare-update, restart, or status." >&2
+    echo "Use update, prepare-update, restart, revision, or status." >&2
     exit 1
     ;;
 esac

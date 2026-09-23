@@ -9,16 +9,18 @@ const installed: InstalledRepository = {
   github: 'wolfstar-project/example',
   defaultBranch: 'main',
   archived: false,
+  fork: false,
   topics: [],
   authentication: 'app',
   owner: { login: 'wolfstar-project', type: 'User' },
 }
 
-function organizationRepository(github: string, archived = false) {
+function organizationRepository(github: string, archived = false, fork = false) {
   return {
     github,
     defaultBranch: 'main',
     archived,
+    fork,
     topics: [],
     owner: { login: github.split('/')[0] as string, type: 'Organization' as const },
   }
@@ -99,6 +101,17 @@ describe('discoverUserRepositories', () => {
         checkouts,
         installed: [],
         readRepository: (github) => Promise.resolve(organizationRepository(github, true)),
+      }),
+    ).toEqual([])
+  })
+
+  it('leaves out a fork', async () => {
+    expect(
+      await discoverUserRepositories({
+        allowedOwners: ['nuxt-modules'],
+        checkouts,
+        installed: [],
+        readRepository: (github) => Promise.resolve(organizationRepository(github, false, true)),
       }),
     ).toEqual([])
   })
@@ -200,6 +213,7 @@ describe('createGitHubUserAccess', () => {
             github: 'nuxt-modules/sitemap',
             defaultBranch: 'main',
             archived: false,
+            fork: false,
             topics: [],
             owner: { login: 'nuxt-modules', type: 'Organization' },
           }),
@@ -211,6 +225,7 @@ describe('createGitHubUserAccess', () => {
       expect.objectContaining({
         github: 'nuxt-modules/sitemap',
         defaultBranch: 'main',
+        fork: false,
       }),
     )
     expect(commands[0]?.slice(0, 2)).toEqual(['api', 'repos/nuxt-modules/sitemap'])

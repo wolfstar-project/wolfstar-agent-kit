@@ -51,6 +51,25 @@ Not every tell applies everywhere. Weight by genre:
 - **Blog posts / essays:** all of Pass 2 applies. This is where structure shows the most.
 - **Email:** direct address and dropping hedging filler matter most.
 
+## Evidence-backed articles
+
+Follow the article brief and local article voice before applying structural suggestions.
+Keep the common case first. Do not add digressions that obscure instructions.
+Preserve claim scope, uncertainty, dates, units, source attribution, and prerequisites.
+Never invent experience or turn an observation into a guarantee.
+After rewriting, compare material claims and examples with their verified evidence.
+For a collection refresh, use [content-refresh](../content-refresh/SKILL.md) for source and review coordination.
+
+## Product copy
+
+For a user-visible string in a product, this skill is the second pass, not the first.
+[`copywriting`](../copywriting/SKILL.md) decides what the sentence has to say: which register the
+surface writes in, which canonical asset already exists, and which words the product bans. Draft
+against that, humanize the draft, then re-check the result against `COPY.md`.
+
+That last step is not optional. This skill rewrites structure and knows nothing about a project's
+canonical assets, so it will sometimes paraphrase a tagline while genuinely improving the sentence.
+
 ## Output
 
 1. List the tells you found, grouped by pass, quoting the offending phrase.

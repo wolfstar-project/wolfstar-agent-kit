@@ -3,6 +3,7 @@ import type { Result } from './result.ts'
 import type { JournalStore } from './store.ts'
 import type { Candidate, CandidateIssueCommand, ClaimedRoutineRun } from './types.ts'
 import { err, ok } from './result.ts'
+import { getRoutine } from './routines/index.ts'
 
 type CandidateIssueContext = Pick<ClaimedRoutineRun, 'repository' | 'name' | 'scheduledFor'>
 
@@ -35,6 +36,23 @@ function displayableClaim(claim: string): string {
   return claim.length <= maximumClaimLength ? claim : `${claim.slice(0, maximumClaimLength)}…`
 }
 
+// GitHub refuses a title longer than 256 characters.
+const maximumTitleLength = 256
+
+/**
+ * The issue title one Candidate gets.
+ *
+ * The title used to be the routine name joined to the whole claim, so every
+ * issue list read as truncated prose, and the name repeated the
+ * `routine:<name>` label. The Agent now writes the title, and a title that
+ * arrives blank falls back to the claim rather than filing an untitled issue.
+ */
+export function candidateIssueTitle(candidate: Pick<Candidate, 'title' | 'claim'>): string {
+  const written = candidate.title.replace(/\s+/g, ' ').trim()
+  const title = written.length > 0 ? written : candidate.claim.replace(/\s+/g, ' ').trim()
+  return title.slice(0, maximumTitleLength)
+}
+
 /**
  * Writes the issue one Candidate proposes.
  *
@@ -54,6 +72,11 @@ Estimated to change ${candidate.estimatedChangedFiles} ${candidate.estimatedChan
 
 <!-- wolfstar-agent-kit:routine ${routine.name} -->
 ${candidateFingerprintMarker(candidate.fingerprint)}
+${
+  getRoutine(routine.name).issueFingerprint(candidate.fingerprint) !== candidate.fingerprint
+    ? candidateFingerprintMarker(getRoutine(routine.name).issueFingerprint(candidate.fingerprint))
+    : ''
+}
 
 > The ${routine.name} routine opened this issue automatically on its ${routine.scheduledFor} run. It is not Wolfstar's own report. Close it to reject the proposal, and the reason you give stops it being offered again.`
 }
@@ -70,7 +93,7 @@ export function candidateIssueCommands(
       candidateId: candidate.id,
       repository: routine.repository,
       routineName: routine.name,
-      title: `${routine.name}: ${claim}`.slice(0, 256),
+      title: candidateIssueTitle(candidate),
       body: candidateIssueBody({ ...candidate, claim }, routine),
     }
   })
@@ -121,7 +144,7 @@ export function createCandidateIssueController(options: CandidateIssueController
         const existing = await options.github.findOpenIssueByFingerprint(
           {
             repository: command.repositoryMapping,
-            fingerprint: command.fingerprint,
+            fingerprint: getRoutine(command.routineName).issueFingerprint(command.fingerprint),
           },
           signal,
         )

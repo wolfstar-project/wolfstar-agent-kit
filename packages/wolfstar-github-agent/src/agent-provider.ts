@@ -65,6 +65,12 @@ export function agentTextEvent(text: string): Extract<AgentEvent, { _tag: 'Messa
 }
 
 export interface AgentTurnRequest {
+  /**
+   * Absolute instruction files this turn adds to the shared Agent context.
+   *
+   * Repository memory lives here, because it belongs to one repository.
+   */
+  instructionPaths?: readonly string[]
   /** Durable Task identity used to fence one provider health canary. */
   taskId?: string
   /** Provider-specific model identifier taken from the worker profile. */
@@ -114,9 +120,17 @@ ${JSON.stringify(schema)}`
  * Falls back to the raw text so the caller reports one parse failure.
  */
 export function extractJsonObject(text: string): string {
-  const fenced = /```(?:json)?\n?([\s\S]*?)```/i.exec(text)
-  const candidate = (fenced?.[1] ?? text).trim()
-  const start = candidate.indexOf('{')
-  const end = candidate.lastIndexOf('}')
-  return start === -1 || end <= start ? candidate : candidate.slice(start, end + 1)
+  // Code fences can belong to a JSON string, such as a pull request body.
+  // Extract the outer object before interpreting anything inside its strings.
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start === -1 || end <= start) return text
+  const candidate = text.slice(start, end + 1)
+  try {
+    JSON.parse(candidate)
+    return candidate
+  } catch {
+    // Braces in prose are not JSON. Keep the full answer for parsing or repair.
+    return text
+  }
 }

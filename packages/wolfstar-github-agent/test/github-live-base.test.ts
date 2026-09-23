@@ -111,11 +111,13 @@ describe('live pull request base', () => {
             checkedRefs.push(input.ref)
             return Promise.resolve({ data: { statuses: [] } })
           },
+          listCommits: () => Promise.resolve({ data: [{ sha: liveBaseSha }] }),
         },
       },
     } as unknown as Octokit
     const source = createGitHubAgentSource({
       actorLogin: () => 'wolfstar-github-agent[bot]',
+      ownAppId: 98114,
       createClient: () => client,
       tokens: tokens(),
     })
@@ -131,5 +133,601 @@ describe('live pull request base', () => {
     )
     expect(checkedRefs).toContain(liveBaseSha)
     expect(checkedRefs).not.toContain(historicBaseSha)
+  })
+
+  it.each([
+    ['queued', null, 'completed', 'failure', 'completed', 'failure'],
+    ['in_progress', null, 'completed', 'cancelled', 'completed', 'cancelled'],
+    ['queued', null, 'completed', 'success', 'completed', 'success'],
+    ['completed', 'success', 'completed', 'failure', 'completed', 'success'],
+    ['queued', null, 'in_progress', null, 'queued', null],
+  ])(
+    'resolves check %s/%s against workflow %s/%s',
+    async (status, conclusion, workflowStatus, workflowConclusion, expectedStatus, expectedConclusion) => {
+      const listForRef = () => undefined
+      const listWorkflowRunsForRepo = () => undefined
+      const client = {
+        paginate: (method: unknown, input: { ref?: string; head_sha?: string }) => {
+          if (method === listForRef && input.ref === liveBaseSha) {
+            return Promise.resolve([
+              {
+                id: 1,
+                name: 'build',
+                status,
+                conclusion,
+                app: { id: 15368, slug: 'github-actions' },
+                check_suite: { id: 7 },
+              },
+            ])
+          }
+          if (method === listWorkflowRunsForRepo && input.head_sha === liveBaseSha) {
+            return Promise.resolve([
+              { id: 70, event: 'push', status: workflowStatus, conclusion: workflowConclusion, check_suite_id: 7 },
+            ])
+          }
+          return Promise.resolve([])
+        },
+        rest: {
+          actions: {
+            getJobForWorkflowRun: () => Promise.reject(new Error('Unexpected job lookup.')),
+            listWorkflowRunsForRepo,
+          },
+          checks: { listForRef },
+          issues: { listComments: () => undefined },
+          pulls: {
+            get: () => Promise.resolve({ data: pullRequest() }),
+            listReviewComments: () => undefined,
+            listReviews: () => undefined,
+          },
+          repos: {
+            getBranch: () => Promise.resolve({ data: { commit: { sha: liveBaseSha } } }),
+            getBranchRules: () => Promise.resolve({ data: [] }),
+            getCombinedStatusForRef: () => Promise.resolve({ data: { statuses: [] } }),
+          },
+        },
+      } as unknown as Octokit
+      const source = createGitHubAgentSource({
+        actorLogin: () => 'wolfstar-github-agent[bot]',
+        ownAppId: 98114,
+        createClient: () => client,
+        tokens: tokens(),
+      })
+
+      const result = await source.getPullRequestReviewSnapshot(repositoryMapping(), 24, new AbortController().signal)
+
+      expect(result).toEqual(
+        ok(
+          expect.objectContaining({
+            baseChecks: {
+              _tag: 'Available',
+              checks: [
+                expect.objectContaining({ name: 'build', status: expectedStatus, conclusion: expectedConclusion }),
+              ],
+            },
+          }),
+        ),
+      )
+    },
+  )
+
+  it('drops base check runs that a workflow_run event attached to the base commit', async () => {
+    const listForRef = () => undefined
+    const listWorkflowRunsForRepo = () => undefined
+    const client = {
+      paginate: (method: unknown, input: { ref?: string; head_sha?: string }) => {
+        if (method === listForRef && input.ref === liveBaseSha) {
+          return Promise.resolve([
+            {
+              id: 1,
+              name: 'comment',
+              status: 'in_progress',
+              conclusion: null,
+              app: { id: 15368, slug: 'github-actions' },
+              check_suite: { id: 7 },
+            },
+            {
+              id: 2,
+              name: 'test',
+              status: 'completed',
+              conclusion: 'success',
+              app: { id: 15368, slug: 'github-actions' },
+              check_suite: { id: 8 },
+            },
+          ])
+        }
+        if (method === listWorkflowRunsForRepo && input.head_sha === liveBaseSha) {
+          return Promise.resolve([
+            { id: 70, event: 'workflow_run', check_suite_id: 7 },
+            { id: 80, event: 'push', check_suite_id: 8 },
+          ])
+        }
+        return Promise.resolve([])
+      },
+      rest: {
+        actions: {
+          getJobForWorkflowRun: () => Promise.reject(new Error('Unexpected job lookup.')),
+          listWorkflowRunsForRepo,
+        },
+        checks: { listForRef },
+        issues: { listComments: () => undefined },
+        pulls: {
+          get: () => Promise.resolve({ data: pullRequest() }),
+          listReviewComments: () => undefined,
+          listReviews: () => undefined,
+        },
+        repos: {
+          getBranch: () => Promise.resolve({ data: { commit: { sha: liveBaseSha } } }),
+          getBranchRules: () => Promise.resolve({ data: [] }),
+          getCombinedStatusForRef: () => Promise.resolve({ data: { statuses: [] } }),
+        },
+      },
+    } as unknown as Octokit
+    const source = createGitHubAgentSource({
+      actorLogin: () => 'wolfstar-github-agent[bot]',
+      ownAppId: 98114,
+      createClient: () => client,
+      tokens: tokens(),
+    })
+
+    const result = await source.getPullRequestReviewSnapshot(repositoryMapping(), 24, new AbortController().signal)
+
+    expect(result).toEqual(
+      ok(
+        expect.objectContaining({
+          baseChecks: {
+            _tag: 'Available',
+            checks: [expect.objectContaining({ name: 'test', status: 'completed', conclusion: 'success' })],
+          },
+        }),
+      ),
+    )
+  })
+
+  it('drops base check runs that a schedule event attached to the base commit', async () => {
+    const listForRef = () => undefined
+    const listWorkflowRunsForRepo = () => undefined
+    const client = {
+      paginate: (method: unknown, input: { ref?: string; head_sha?: string }) => {
+        if (method === listForRef && input.ref === liveBaseSha) {
+          return Promise.resolve([
+            {
+              id: 1,
+              name: 'cancel',
+              status: 'queued',
+              conclusion: null,
+              app: { id: 15368, slug: 'github-actions' },
+              check_suite: { id: 7 },
+            },
+            {
+              id: 2,
+              name: 'test',
+              status: 'completed',
+              conclusion: 'success',
+              app: { id: 15368, slug: 'github-actions' },
+              check_suite: { id: 8 },
+            },
+          ])
+        }
+        if (method === listWorkflowRunsForRepo && input.head_sha === liveBaseSha) {
+          return Promise.resolve([
+            { id: 70, event: 'schedule', status: 'queued', check_suite_id: 7 },
+            { id: 80, event: 'push', status: 'completed', check_suite_id: 8 },
+          ])
+        }
+        return Promise.resolve([])
+      },
+      rest: {
+        actions: {
+          getJobForWorkflowRun: () => Promise.reject(new Error('Unexpected job lookup.')),
+          listWorkflowRunsForRepo,
+        },
+        checks: { listForRef },
+        issues: { listComments: () => undefined },
+        pulls: {
+          get: () => Promise.resolve({ data: pullRequest() }),
+          listReviewComments: () => undefined,
+          listReviews: () => undefined,
+        },
+        repos: {
+          getBranch: () => Promise.resolve({ data: { commit: { sha: liveBaseSha } } }),
+          getBranchRules: () => Promise.resolve({ data: [] }),
+          getCombinedStatusForRef: () => Promise.resolve({ data: { statuses: [] } }),
+        },
+      },
+    } as unknown as Octokit
+    const source = createGitHubAgentSource({
+      actorLogin: () => 'wolfstar-github-agent[bot]',
+      ownAppId: 98114,
+      createClient: () => client,
+      tokens: tokens(),
+    })
+
+    const result = await source.getPullRequestReviewSnapshot(repositoryMapping(), 24, new AbortController().signal)
+
+    expect(result).toEqual(
+      ok(
+        expect.objectContaining({
+          baseChecks: {
+            _tag: 'Available',
+            checks: [expect.objectContaining({ name: 'test', status: 'completed', conclusion: 'success' })],
+          },
+        }),
+      ),
+    )
+  })
+
+  it('keeps a concluded failed scheduled run as base evidence', async () => {
+    const listForRef = () => undefined
+    const listWorkflowRunsForRepo = () => undefined
+    const client = {
+      paginate: (method: unknown, input: { ref?: string; head_sha?: string }) => {
+        if (method === listForRef && input.ref === liveBaseSha) {
+          return Promise.resolve([
+            {
+              id: 1,
+              name: 'Fuzz',
+              status: 'completed',
+              conclusion: 'failure',
+              app: { id: 15368, slug: 'github-actions' },
+              check_suite: { id: 7 },
+            },
+            {
+              id: 2,
+              name: 'test',
+              status: 'completed',
+              conclusion: 'success',
+              app: { id: 15368, slug: 'github-actions' },
+              check_suite: { id: 8 },
+            },
+          ])
+        }
+        if (method === listWorkflowRunsForRepo && input.head_sha === liveBaseSha) {
+          return Promise.resolve([
+            { id: 70, event: 'schedule', status: 'completed', check_suite_id: 7 },
+            { id: 80, event: 'push', status: 'completed', check_suite_id: 8 },
+          ])
+        }
+        return Promise.resolve([])
+      },
+      rest: {
+        actions: {
+          getJobForWorkflowRun: () => Promise.reject(new Error('Unexpected job lookup.')),
+          listWorkflowRunsForRepo,
+        },
+        checks: { listForRef },
+        issues: { listComments: () => undefined },
+        pulls: {
+          get: () => Promise.resolve({ data: pullRequest() }),
+          listReviewComments: () => undefined,
+          listReviews: () => undefined,
+        },
+        repos: {
+          getBranch: () => Promise.resolve({ data: { commit: { sha: liveBaseSha } } }),
+          getBranchRules: () => Promise.resolve({ data: [] }),
+          getCombinedStatusForRef: () => Promise.resolve({ data: { statuses: [] } }),
+        },
+      },
+    } as unknown as Octokit
+    const source = createGitHubAgentSource({
+      actorLogin: () => 'wolfstar-github-agent[bot]',
+      ownAppId: 98114,
+      createClient: () => client,
+      tokens: tokens(),
+    })
+
+    const result = await source.getPullRequestReviewSnapshot(repositoryMapping(), 24, new AbortController().signal)
+
+    expect(result).toEqual(
+      ok(
+        expect.objectContaining({
+          baseChecks: {
+            _tag: 'Available',
+            checks: expect.arrayContaining([
+              expect.objectContaining({ name: 'Fuzz', status: 'completed', conclusion: 'failure' }),
+            ]),
+          },
+        }),
+      ),
+    )
+  })
+
+  it('drops base check runs of a scheduled run that has not completed', async () => {
+    const listForRef = () => undefined
+    const listWorkflowRunsForRepo = () => undefined
+    const client = {
+      paginate: (method: unknown, input: { ref?: string; head_sha?: string }) => {
+        if (method === listForRef && input.ref === liveBaseSha) {
+          return Promise.resolve([
+            {
+              id: 1,
+              name: 'cancel',
+              status: 'queued',
+              conclusion: null,
+              app: { id: 15368, slug: 'github-actions' },
+              check_suite: { id: 7 },
+            },
+            {
+              id: 2,
+              name: 'test',
+              status: 'completed',
+              conclusion: 'success',
+              app: { id: 15368, slug: 'github-actions' },
+              check_suite: { id: 8 },
+            },
+          ])
+        }
+        if (method === listWorkflowRunsForRepo && input.head_sha === liveBaseSha) {
+          return Promise.resolve([
+            { id: 70, event: 'schedule', status: 'requested', check_suite_id: 7 },
+            { id: 80, event: 'push', status: 'completed', check_suite_id: 8 },
+          ])
+        }
+        return Promise.resolve([])
+      },
+      rest: {
+        actions: {
+          getJobForWorkflowRun: () => Promise.reject(new Error('Unexpected job lookup.')),
+          listWorkflowRunsForRepo,
+        },
+        checks: { listForRef },
+        issues: { listComments: () => undefined },
+        pulls: {
+          get: () => Promise.resolve({ data: pullRequest() }),
+          listReviewComments: () => undefined,
+          listReviews: () => undefined,
+        },
+        repos: {
+          getBranch: () => Promise.resolve({ data: { commit: { sha: liveBaseSha } } }),
+          getBranchRules: () => Promise.resolve({ data: [] }),
+          getCombinedStatusForRef: () => Promise.resolve({ data: { statuses: [] } }),
+        },
+      },
+    } as unknown as Octokit
+    const source = createGitHubAgentSource({
+      actorLogin: () => 'wolfstar-github-agent[bot]',
+      ownAppId: 98114,
+      createClient: () => client,
+      tokens: tokens(),
+    })
+
+    const result = await source.getPullRequestReviewSnapshot(repositoryMapping(), 24, new AbortController().signal)
+
+    expect(result).toEqual(
+      ok(
+        expect.objectContaining({
+          baseChecks: {
+            _tag: 'Available',
+            checks: [expect.objectContaining({ name: 'test', status: 'completed', conclusion: 'success' })],
+          },
+        }),
+      ),
+    )
+  })
+
+  it('drops base check runs that a dynamic Dependabot run attached to the base commit', async () => {
+    const listForRef = () => undefined
+    const listWorkflowRunsForRepo = () => undefined
+    const client = {
+      paginate: (method: unknown, input: { ref?: string; head_sha?: string }) => {
+        if (method === listForRef && input.ref === liveBaseSha) {
+          return Promise.resolve([
+            {
+              id: 1,
+              name: 'Dependabot',
+              status: 'completed',
+              conclusion: 'failure',
+              app: { id: 15368, slug: 'github-actions' },
+              check_suite: { id: 7 },
+            },
+            {
+              id: 2,
+              name: 'test',
+              status: 'completed',
+              conclusion: 'success',
+              app: { id: 15368, slug: 'github-actions' },
+              check_suite: { id: 8 },
+            },
+          ])
+        }
+        if (method === listWorkflowRunsForRepo && input.head_sha === liveBaseSha) {
+          return Promise.resolve([
+            { id: 70, event: 'dynamic', check_suite_id: 7 },
+            { id: 80, event: 'push', check_suite_id: 8 },
+          ])
+        }
+        return Promise.resolve([])
+      },
+      rest: {
+        actions: {
+          getJobForWorkflowRun: () => Promise.reject(new Error('Unexpected job lookup.')),
+          listWorkflowRunsForRepo,
+        },
+        checks: { listForRef },
+        issues: { listComments: () => undefined },
+        pulls: {
+          get: () => Promise.resolve({ data: pullRequest() }),
+          listReviewComments: () => undefined,
+          listReviews: () => undefined,
+        },
+        repos: {
+          getBranch: () => Promise.resolve({ data: { commit: { sha: liveBaseSha } } }),
+          getBranchRules: () => Promise.resolve({ data: [] }),
+          getCombinedStatusForRef: () => Promise.resolve({ data: { statuses: [] } }),
+        },
+      },
+    } as unknown as Octokit
+    const source = createGitHubAgentSource({
+      actorLogin: () => 'wolfstar-github-agent[bot]',
+      ownAppId: 98114,
+      createClient: () => client,
+      tokens: tokens(),
+    })
+
+    const result = await source.getPullRequestReviewSnapshot(repositoryMapping(), 24, new AbortController().signal)
+
+    expect(result).toEqual(
+      ok(
+        expect.objectContaining({
+          baseChecks: {
+            _tag: 'Available',
+            checks: [expect.objectContaining({ name: 'test', status: 'completed', conclusion: 'success' })],
+          },
+        }),
+      ),
+    )
+  })
+})
+
+describe('base checks behind a commit that ran no CI', () => {
+  const docsOnlyBaseSha = 'd'.repeat(40)
+  const lastCodeBaseSha = 'e'.repeat(40)
+
+  function clientReadingHistory(
+    checksBySha: Record<string, unknown[]>,
+    checkedRefs: string[],
+    history: string[] = [docsOnlyBaseSha, lastCodeBaseSha, historicBaseSha],
+  ) {
+    const listForRef = () => undefined
+    const listCommits = () => undefined
+    return {
+      paginate: (method: unknown, input: { ref?: string; sha?: string }) => {
+        if (method === listForRef && input.ref !== undefined) {
+          checkedRefs.push(input.ref)
+          return Promise.resolve(checksBySha[input.ref] ?? [])
+        }
+        if (method === listCommits) return Promise.reject(new Error('Unexpected paginated commit listing.'))
+        return Promise.resolve([])
+      },
+      rest: {
+        actions: {
+          getJobForWorkflowRun: () => Promise.reject(new Error('Unexpected job lookup.')),
+          listWorkflowRunsForRepo: () => undefined,
+        },
+        checks: { listForRef },
+        issues: { listComments: () => undefined },
+        pulls: {
+          get: () => Promise.resolve({ data: pullRequest() }),
+          listReviewComments: () => undefined,
+          listReviews: () => undefined,
+        },
+        repos: {
+          getBranch: () => Promise.resolve({ data: { commit: { sha: docsOnlyBaseSha } } }),
+          getBranchRules: () => Promise.resolve({ data: [] }),
+          getCombinedStatusForRef: () => Promise.resolve({ data: { statuses: [] } }),
+          listCommits: (input: { sha: string; per_page: number }) => {
+            expect(input.sha).toBe(docsOnlyBaseSha)
+            return Promise.resolve({ data: history.slice(0, input.per_page).map((sha) => ({ sha })) })
+          },
+        },
+      },
+    } as unknown as Octokit
+  }
+
+  it('reads the newest base commit that has a check run when the head ran none', async () => {
+    // gscdump#55 on 2026-09-10: a docs-only merge became the main head, the
+    // test workflow ignores Markdown, and the CI gate reported "Base branch CI
+    // is unavailable" with nothing left to wait for.
+    const checkedRefs: string[] = []
+    const client = clientReadingHistory(
+      {
+        [lastCodeBaseSha]: [
+          {
+            id: 2,
+            name: 'test',
+            status: 'completed',
+            conclusion: 'success',
+            app: { id: 15368, slug: 'github-actions' },
+            check_suite: { id: 8 },
+          },
+        ],
+      },
+      checkedRefs,
+    )
+    const source = createGitHubAgentSource({
+      actorLogin: () => 'wolfstar-github-agent[bot]',
+      ownAppId: 98114,
+      createClient: () => client,
+      tokens: tokens(),
+    })
+
+    const result = await source.getPullRequestReviewSnapshot(repositoryMapping(), 24, new AbortController().signal)
+
+    expect(result).toEqual(
+      ok(
+        expect.objectContaining({
+          baseChecks: {
+            _tag: 'Available',
+            checks: [expect.objectContaining({ name: 'test', conclusion: 'success' })],
+          },
+          pullRequest: expect.objectContaining({ baseSha: docsOnlyBaseSha }),
+        }),
+      ),
+    )
+    expect(checkedRefs).toEqual([headSha, docsOnlyBaseSha, lastCodeBaseSha])
+  })
+
+  it('keeps a red earlier base commit red', async () => {
+    const client = clientReadingHistory(
+      {
+        [lastCodeBaseSha]: [
+          {
+            id: 2,
+            name: 'test',
+            status: 'completed',
+            conclusion: 'failure',
+            app: { id: 15368, slug: 'github-actions' },
+            check_suite: { id: 8 },
+          },
+        ],
+      },
+      [],
+    )
+    const source = createGitHubAgentSource({
+      actorLogin: () => 'wolfstar-github-agent[bot]',
+      ownAppId: 98114,
+      createClient: () => client,
+      tokens: tokens(),
+    })
+
+    const result = await source.getPullRequestReviewSnapshot(repositoryMapping(), 24, new AbortController().signal)
+
+    expect(result).toEqual(
+      ok(
+        expect.objectContaining({
+          baseChecks: {
+            _tag: 'Available',
+            checks: [expect.objectContaining({ name: 'test', conclusion: 'failure' })],
+          },
+        }),
+      ),
+    )
+  })
+
+  it('reports no base check run when no listed commit has one', async () => {
+    const checkedRefs: string[] = []
+    const ancestors = Array.from({ length: 10 }, (_, index) =>
+      String(index + 1)
+        .padStart(2, '0')
+        .repeat(20),
+    )
+    const client = clientReadingHistory({}, checkedRefs, [docsOnlyBaseSha, ...ancestors])
+    const source = createGitHubAgentSource({
+      actorLogin: () => 'wolfstar-github-agent[bot]',
+      ownAppId: 98114,
+      createClient: () => client,
+      tokens: tokens(),
+    })
+
+    const result = await source.getPullRequestReviewSnapshot(repositoryMapping(), 24, new AbortController().signal)
+
+    expect(result).toEqual(
+      ok(
+        expect.objectContaining({
+          baseChecks: { _tag: 'Available', checks: [] },
+        }),
+      ),
+    )
+    expect(checkedRefs).toEqual([headSha, docsOnlyBaseSha, ...ancestors])
+    expect(checkedRefs).toContain(ancestors[9])
   })
 })

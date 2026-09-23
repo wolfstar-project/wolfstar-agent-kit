@@ -3,9 +3,14 @@ import type { AutoMergePolicy } from './auto-merge.ts'
 import type { Result } from './result.ts'
 import type {
   AgentConfig,
+  AgentRole,
+  ClassificationConfig,
+  CodexReasoningEffort,
   ExternalRepositoryWatch,
+  RepositoryAutoMergeScope,
   RepositoryMapping,
   RepositoryOwnership,
+  RoleReasoningEfforts,
   ServiceTrigger,
   TakeOwnershipConfig,
   ValidatedAgentConfig,
@@ -17,6 +22,8 @@ import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve } from 'node:path'
 import process from 'node:process'
 import { parse } from 'yaml'
+import { AGENT_ROLES, REASONING_EFFORTS } from './agent-profile.ts'
+import { parsePackageReleaseConfig } from './package-release-config.ts'
 import { err, ok } from './result.ts'
 
 export interface ConfigIssue {
@@ -57,6 +64,20 @@ function requiredRecord(
 
 function requiredString(source: UnknownRecord, key: string, path: string, issues: ConfigIssue[]): string | undefined {
   const value = source[key]
+  if (typeof value === 'string' && value.trim().length > 0) return value.trim()
+
+  issues.push({ path: `${path}.${key}`, message: 'Expected a non-empty string.' })
+}
+
+/** A string that may be absent. `null` means absent; `undefined` means invalid. */
+function optionalString(
+  source: UnknownRecord,
+  key: string,
+  path: string,
+  issues: ConfigIssue[],
+): string | null | undefined {
+  const value = source[key]
+  if (value === undefined) return null
   if (typeof value === 'string' && value.trim().length > 0) return value.trim()
 
   issues.push({ path: `${path}.${key}`, message: 'Expected a non-empty string.' })
@@ -114,6 +135,166 @@ function autoMergePolicy(source: UnknownRecord, issues: ConfigIssue[]): AutoMerg
 
   if (enabled === undefined || minimumConfidence === undefined || method === undefined) return undefined
   return enabled ? { _tag: 'Enabled', minimumConfidence, method } : { _tag: 'Disabled' }
+}
+
+/** Defaults a repository inherits when it names a Merge risk limit it does not set. */
+const DEFAULT_MERGE_RISK_FILES = 12
+const DEFAULT_MERGE_RISK_LINES = 300
+
+function globList(
+  source: UnknownRecord,
+  key: string,
+  path: string,
+  issues: ConfigIssue[],
+): readonly string[] | undefined {
+  const value = source[key]
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string' || entry === '')) {
+    issues.push({ path: `${path}.${key}`, message: 'Expected an array of path patterns.' })
+    return undefined
+  }
+  return value as string[]
+}
+
+function wholeNumber(
+  source: UnknownRecord,
+  key: string,
+  fallback: number,
+  path: string,
+  issues: ConfigIssue[],
+): number | undefined {
+  const value = source[key]
+  if (value === undefined) return fallback
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0) return value
+  issues.push({ path: `${path}.${key}`, message: 'Expected a whole number above zero.' })
+  return undefined
+}
+
+/**
+ * Auto merge covers what Merge risk calls Contained.
+ *
+ * Every limit has a default, so a repository that opts in without tuning gets
+ * the conservative one rather than an unbounded one.
+ */
+function containedAutoMergeScope(
+  value: UnknownRecord,
+  scopePath: string,
+  repositoryOwnership: RepositoryOwnership | undefined,
+  pullRequestReview: boolean | undefined,
+  issues: ConfigIssue[],
+): RepositoryAutoMergeScope | undefined {
+  const confidenceValue = value.minimum_confidence
+  const minimumConfidence =
+    typeof confidenceValue === 'number' &&
+    Number.isInteger(confidenceValue) &&
+    confidenceValue >= 0 &&
+    confidenceValue <= 100
+      ? confidenceValue
+      : undefined
+  if (minimumConfidence === undefined)
+    issues.push({ path: `${scopePath}.minimum_confidence`, message: 'Expected an integer from 0 to 100.' })
+  if (repositoryOwnership !== 'owned')
+    issues.push({
+      path: `${scopePath}.pull_requests`,
+      message: 'Auto merge for a Contained pull request requires an owned repository.',
+    })
+  if (pullRequestReview !== true)
+    issues.push({
+      path: `${scopePath}.pull_requests`,
+      message: 'Auto merge for a Contained pull request requires pull request review.',
+    })
+
+  const riskValue = value.merge_risk === undefined ? {} : value.merge_risk
+  if (!isRecord(riskValue)) {
+    issues.push({ path: `${scopePath}.merge_risk`, message: 'Expected an object.' })
+    return undefined
+  }
+  const riskPath = `${scopePath}.merge_risk`
+  const maximumChangedFiles = wholeNumber(riskValue, 'max_changed_files', DEFAULT_MERGE_RISK_FILES, riskPath, issues)
+  const maximumChangedLines = wholeNumber(riskValue, 'max_changed_lines', DEFAULT_MERGE_RISK_LINES, riskPath, issues)
+  const sensitivePaths = globList(riskValue, 'sensitive_paths', riskPath, issues)
+  const containedPaths = globList(riskValue, 'contained_paths', riskPath, issues)
+  const requireTestChangeValue = riskValue.require_test_change
+  const requireTestChange = requireTestChangeValue === undefined ? false : requireTestChangeValue
+  if (typeof requireTestChange !== 'boolean')
+    issues.push({ path: `${riskPath}.require_test_change`, message: 'Expected true or false.' })
+  const labelOverridesRiskValue = riskValue.label_overrides_risk
+  const labelOverridesRisk = labelOverridesRiskValue === undefined ? true : labelOverridesRiskValue
+  if (typeof labelOverridesRisk !== 'boolean')
+    issues.push({ path: `${riskPath}.label_overrides_risk`, message: 'Expected true or false.' })
+
+  if (minimumConfidence === undefined || repositoryOwnership !== 'owned' || pullRequestReview !== true) return undefined
+  if (
+    maximumChangedFiles === undefined ||
+    maximumChangedLines === undefined ||
+    sensitivePaths === undefined ||
+    containedPaths === undefined
+  )
+    return undefined
+  if (typeof requireTestChange !== 'boolean' || typeof labelOverridesRisk !== 'boolean') return undefined
+  return {
+    _tag: 'Contained',
+    labelOverridesRisk,
+    minimumConfidence,
+    policy: { containedPaths, maximumChangedFiles, maximumChangedLines, requireTestChange, sensitivePaths },
+  }
+}
+
+/** Auto merge takes labelled pull requests only, unless the repository widens it to every pull request. */
+function repositoryAutoMergeScope(
+  source: UnknownRecord,
+  path: string,
+  repositoryOwnership: RepositoryOwnership | undefined,
+  pullRequestReview: boolean | undefined,
+  issues: ConfigIssue[],
+): RepositoryAutoMergeScope | undefined {
+  const value = source.auto_merge
+  if (value === undefined) return { _tag: 'Labelled' }
+  const scopePath = `${path}.auto_merge`
+  if (!isRecord(value)) {
+    issues.push({ path: scopePath, message: 'Expected an object.' })
+    return undefined
+  }
+
+  const pullRequests = requiredString(value, 'pull_requests', scopePath, issues)
+  if (pullRequests === undefined) return undefined
+  if (pullRequests === 'labelled') {
+    if (value.minimum_confidence === undefined) return { _tag: 'Labelled' }
+    issues.push({
+      path: `${scopePath}.minimum_confidence`,
+      message: 'Labelled pull requests use $.auto_merge.minimum_confidence.',
+    })
+    return undefined
+  }
+  if (pullRequests === 'contained')
+    return containedAutoMergeScope(value, scopePath, repositoryOwnership, pullRequestReview, issues)
+  if (pullRequests !== 'every') {
+    issues.push({ path: `${scopePath}.pull_requests`, message: 'Expected labelled, contained, or every.' })
+    return undefined
+  }
+
+  const confidenceValue = value.minimum_confidence
+  const minimumConfidence =
+    typeof confidenceValue === 'number' &&
+    Number.isInteger(confidenceValue) &&
+    confidenceValue >= 0 &&
+    confidenceValue <= 100
+      ? confidenceValue
+      : undefined
+  if (minimumConfidence === undefined)
+    issues.push({ path: `${scopePath}.minimum_confidence`, message: 'Expected an integer from 0 to 100.' })
+  if (repositoryOwnership !== 'owned')
+    issues.push({
+      path: `${scopePath}.pull_requests`,
+      message: 'Auto merge for every pull request requires an owned repository.',
+    })
+  if (pullRequestReview !== true)
+    issues.push({
+      path: `${scopePath}.pull_requests`,
+      message: 'Auto merge for every pull request requires pull request review.',
+    })
+  if (minimumConfidence === undefined || repositoryOwnership !== 'owned' || pullRequestReview !== true) return undefined
+  return { _tag: 'Every', minimumConfidence }
 }
 
 function ownership(source: UnknownRecord, path: string, issues: ConfigIssue[]): RepositoryOwnership | undefined {
@@ -196,11 +377,63 @@ function reservePercent(value: unknown, issues: ConfigIssue[]): Record<AgentProv
   return reserve
 }
 
+/** Reads one Reasoning effort per Agent provider and role at either configuration scope. */
+function roleReasoningEfforts(value: unknown, path: string, issues: ConfigIssue[]): RoleReasoningEfforts | undefined {
+  if (value === undefined) return {}
+  if (!isRecord(value)) {
+    issues.push({ path, message: 'Expected a Reasoning effort per Agent provider and role.' })
+    return undefined
+  }
+  const efforts: RoleReasoningEfforts = {}
+  for (const [providerKey, roles] of Object.entries(value)) {
+    const provider = providerName(providerKey)
+    if (provider === undefined) {
+      issues.push({ path: `${path}.${providerKey}`, message: 'Expected codex or opencode.' })
+      return undefined
+    }
+    if (!isRecord(roles)) {
+      issues.push({ path: `${path}.${provider}`, message: 'Expected a Reasoning effort per Agent role.' })
+      return undefined
+    }
+    const providerEfforts: Partial<Record<AgentRole, CodexReasoningEffort>> = {}
+    for (const [roleKey, effort] of Object.entries(roles)) {
+      const role = AGENT_ROLES.find((candidate) => candidate === roleKey)
+      if (role === undefined) {
+        issues.push({
+          path: `${path}.${provider}.${roleKey}`,
+          message: `Expected one Agent role: ${AGENT_ROLES.join(', ')}.`,
+        })
+        return undefined
+      }
+      const known = REASONING_EFFORTS.find((candidate) => candidate === effort)
+      if (known === undefined) {
+        issues.push({
+          path: `${path}.${provider}.${role}`,
+          message: `Expected one Reasoning effort: ${REASONING_EFFORTS.join(', ')}.`,
+        })
+        return undefined
+      }
+      providerEfforts[role] = known
+    }
+    efforts[provider] = providerEfforts
+  }
+  return efforts
+}
+
 function providerName(value: unknown): AgentProviderName | undefined {
   return value === 'claude' || value === 'codex' || value === 'opencode' ? value : undefined
 }
 
 /** Keeps the control UI on the local proxy or one private Tailscale HTTPS name. */
+/** A frame ancestor is an HTTPS origin, or a loopback HTTP origin for a deck served from this machine. */
+function isFrameAncestorOrigin(value: string): boolean {
+  if (!URL.canParse(value)) return false
+  const origin = new URL(value)
+  if (origin.origin !== value) return false
+  if (origin.protocol === 'https:') return true
+  return origin.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname)
+}
+
 function isDashboardOrigin(value: string): boolean {
   if (!URL.canParse(value)) return false
   const origin = new URL(value)
@@ -208,6 +441,24 @@ function isDashboardOrigin(value: string): boolean {
     origin.hostname === 'wolfstar-github-agent.localhost' ||
     (origin.hostname.endsWith('.ts.net') && origin.hostname.length > '.ts.net'.length)
   return origin.protocol === 'https:' && origin.port === '' && origin.origin === value && allowedHost
+}
+
+/** Memory one Agent is assumed to need, and memory the host keeps for itself. */
+const DEFAULT_MEMORY_PER_AGENT_GIB = 8
+const DEFAULT_HOST_RESERVE_GIB = 8
+
+/** Parses a whole GiB count, keeping the default when the key is absent. */
+function wholeGiB(
+  value: unknown,
+  fallback: number,
+  minimum: number,
+  path: string,
+  issues: ConfigIssue[],
+): number | undefined {
+  if (value === undefined) return fallback
+  if (typeof value === 'number' && Number.isInteger(value) && value >= minimum && value <= 512) return value
+  issues.push({ path, message: `Expected a whole number of GiB from ${minimum} to 512.` })
+  return undefined
 }
 
 /** Defaults to Codex, so an existing configuration keeps its current agent. */
@@ -219,6 +470,9 @@ function agentSettings(source: UnknownRecord, issues: ConfigIssue[]): AgentConfi
       reservePercent: DEFAULT_RESERVE_PERCENT,
       order: DEFAULT_PROVIDER_ORDER,
       maximumActiveAgents: null,
+      memoryPerAgentGiB: DEFAULT_MEMORY_PER_AGENT_GIB,
+      hostReserveGiB: DEFAULT_HOST_RESERVE_GIB,
+      reasoningEffort: {},
     }
   if (!isRecord(agent)) {
     issues.push({ path: '$.agent', message: 'Expected an object.' })
@@ -255,9 +509,43 @@ function agentSettings(source: UnknownRecord, issues: ConfigIssue[]): AgentConfi
   if (maximumActiveAgents === undefined)
     issues.push({ path: '$.agent.maximum_active_agents', message: 'Expected a whole number from 1 to 16.' })
 
-  if (provider === undefined || reserve === undefined || order === undefined || maximumActiveAgents === undefined)
+  // Host memory decides the real Agent count. These two keys move that limit,
+  // so a host with room can run what maximum_active_agents asks for.
+  const memoryPerAgentGiB = wholeGiB(
+    agent.memory_per_agent_gib,
+    DEFAULT_MEMORY_PER_AGENT_GIB,
+    1,
+    '$.agent.memory_per_agent_gib',
+    issues,
+  )
+  const hostReserveGiB = wholeGiB(
+    agent.host_reserve_gib,
+    DEFAULT_HOST_RESERVE_GIB,
+    0,
+    '$.agent.host_reserve_gib',
+    issues,
+  )
+
+  const reasoningEffort = roleReasoningEfforts(agent.reasoning_effort, '$.agent.reasoning_effort', issues)
+
+  if (
+    provider === undefined ||
+    reserve === undefined ||
+    order === undefined ||
+    maximumActiveAgents === undefined ||
+    reasoningEffort === undefined
+  )
     return undefined
-  return { provider, reservePercent: reserve, order, maximumActiveAgents }
+  if (memoryPerAgentGiB === undefined || hostReserveGiB === undefined) return undefined
+  return {
+    provider,
+    reservePercent: reserve,
+    order,
+    maximumActiveAgents,
+    memoryPerAgentGiB,
+    hostReserveGiB,
+    reasoningEffort,
+  }
 }
 
 /** The webhook listener is off unless the configuration turns it on. */
@@ -322,6 +610,71 @@ export async function loadWebhookSecret(path: string): Promise<Result<string, Co
     )
 }
 
+/** The classification service is off unless the configuration turns it on. */
+function classificationConfig(source: UnknownRecord, issues: ConfigIssue[]): ClassificationConfig | undefined {
+  const value = source.classification
+  if (value === undefined) return { _tag: 'Disabled' }
+  if (!isRecord(value)) {
+    issues.push({ path: '$.classification', message: 'Expected an object.' })
+    return undefined
+  }
+  const accountId = requiredString(value, 'account_id', '$.classification', issues)
+  const tokenPath = requiredString(value, 'token_path', '$.classification', issues)
+  if (tokenPath !== undefined && !isAbsolute(tokenPath))
+    issues.push({ path: '$.classification.token_path', message: 'Expected an absolute path.' })
+  const gatewayId = optionalString(value, 'gateway_id', '$.classification', issues)
+  const model = requiredString(value, 'model', '$.classification', issues)
+  const bandValue = value.issue_triage_band
+  const issueTriageBand =
+    bandValue === undefined
+      ? null
+      : typeof bandValue === 'number' && bandValue >= 0.5 && bandValue <= 0.99
+        ? bandValue
+        : undefined
+  if (issueTriageBand === undefined)
+    issues.push({ path: '$.classification.issue_triage_band', message: 'Expected a number from 0.5 to 0.99.' })
+  if (
+    accountId === undefined ||
+    tokenPath === undefined ||
+    model === undefined ||
+    gatewayId === undefined ||
+    issueTriageBand === undefined
+  )
+    return undefined
+  return { _tag: 'Enabled', accountId, tokenPath, ...(gatewayId === null ? {} : { gatewayId }), model, issueTriageBand }
+}
+
+/**
+ * Reads the Cloudflare API token for the classification service, with the same
+ * file checks as the webhook secret.
+ */
+export async function loadClassificationToken(path: string): Promise<Result<string, ConfigIssue[]>> {
+  const issuePath = '$.classification.token_path'
+  return lstat(path)
+    .then(async (linkMetadata) => {
+      if (linkMetadata.isSymbolicLink())
+        return err([{ path: issuePath, message: 'Classification token path must not be a symbolic link.' }])
+      const metadata = await stat(path)
+      if (!metadata.isFile()) return err([{ path: issuePath, message: 'Classification token path is not a file.' }])
+      if (process.getuid !== undefined && metadata.uid !== process.getuid())
+        return err([{ path: issuePath, message: 'Classification token has the wrong owner.' }])
+      if ((metadata.mode & 0o077) !== 0)
+        return err([{ path: issuePath, message: 'Classification token must use mode 0600.' }])
+      const token = (await readFile(path, 'utf8')).trim()
+      if (token.length < 32)
+        return err([{ path: issuePath, message: 'Classification token must be at least 32 characters.' }])
+      return ok(token)
+    })
+    .catch((error: unknown) =>
+      err([
+        {
+          path: issuePath,
+          message: error instanceof Error ? error.message : 'Classification token could not be read.',
+        },
+      ]),
+    )
+}
+
 const SERVICE_TRIGGERS: readonly ServiceTrigger[] = ['github', 'routine']
 
 /**
@@ -360,10 +713,27 @@ function repositoryMapping(value: unknown, index: number, issues: ConfigIssue[])
     return undefined
   }
 
+  const release = value.release === undefined ? undefined : parsePackageReleaseConfig(value.release)
+  if (release?._tag === 'Err') issues.push({ path: `${path}.release`, message: release.error })
   const github = requiredString(value, 'github', path, issues)
   const checkout = requiredString(value, 'checkout', path, issues)
   const enabled = requiredBoolean(value, 'enabled', path, issues)
+  const priority = value.priority ?? 0
+  if (typeof priority !== 'number' || !Number.isInteger(priority) || priority < 0 || priority > 100)
+    issues.push({ path: `${path}.priority`, message: 'Expected an integer from 0 to 100.' })
+  const pollIntervalSeconds = value.poll_interval_seconds
+  if (
+    pollIntervalSeconds !== undefined &&
+    (typeof pollIntervalSeconds !== 'number' ||
+      !Number.isInteger(pollIntervalSeconds) ||
+      pollIntervalSeconds < 10 ||
+      pollIntervalSeconds > 3600)
+  )
+    issues.push({ path: `${path}.poll_interval_seconds`, message: 'Expected an integer from 10 to 3600.' })
   const repositoryOwnership = ownership(value, path, issues)
+  if (release?._tag === 'Ok' && repositoryOwnership !== 'owned')
+    issues.push({ path: `${path}.release`, message: 'Package releases require an owned repository.' })
+  const reasoningEffort = roleReasoningEfforts(value.reasoning_effort, `${path}.reasoning_effort`, issues)
   const defaultBranch = requiredString(value, 'default_branch', path, issues)
   const writablePullRequestAuthors = stringArray(value, 'writable_pr_authors', path, issues)
   const writablePullRequestHeadPrefixes = stringArray(value, 'writable_pr_head_prefixes', path, issues)
@@ -379,8 +749,11 @@ function repositoryMapping(value: unknown, index: number, issues: ConfigIssue[])
         ? openPullRequestsValue
         : undefined
   const pullRequestReview = requiredBoolean(value, 'pr_review', path, issues)
+  if (release?._tag === 'Ok' && pullRequestReview !== true)
+    issues.push({ path: `${path}.release`, message: 'Package releases require pull request Review.' })
   const conflictResolution = requiredBoolean(value, 'conflict_resolution', path, issues)
   const ownershipConfig = takeOwnership(value, path, repositoryOwnership, issues)
+  const autoMerge = repositoryAutoMergeScope(value, path, repositoryOwnership, pullRequestReview, issues)
 
   if (github !== undefined && !/^[\w.-]+\/[\w.-]+$/.test(github))
     issues.push({ path: `${path}.github`, message: 'Expected owner/repository.' })
@@ -399,8 +772,11 @@ function repositoryMapping(value: unknown, index: number, issues: ConfigIssue[])
       path: `${path}.writable_pr_head_prefixes`,
       message: 'Every branch prefix must be safe and end with /.',
     })
-  if (conflictResolution === true && repositoryOwnership !== 'owned')
-    issues.push({ path: `${path}.conflict_resolution`, message: 'Conflict resolution requires an owned repository.' })
+  if (conflictResolution === true && repositoryOwnership === 'external')
+    issues.push({
+      path: `${path}.conflict_resolution`,
+      message: 'Conflict resolution requires an owned or maintained repository.',
+    })
   if (conflictResolution === true && pullRequestReview !== true)
     issues.push({ path: `${path}.conflict_resolution`, message: 'Conflict resolution requires pull request review.' })
   if (maxOpenPullRequests === undefined)
@@ -411,6 +787,7 @@ function repositoryMapping(value: unknown, index: number, issues: ConfigIssue[])
     checkout === undefined ||
     enabled === undefined ||
     repositoryOwnership === undefined ||
+    reasoningEffort === undefined ||
     defaultBranch === undefined ||
     writablePullRequestAuthors === undefined ||
     writablePullRequestHeadPrefixes === undefined ||
@@ -418,15 +795,20 @@ function repositoryMapping(value: unknown, index: number, issues: ConfigIssue[])
     maxOpenPullRequests === undefined ||
     pullRequestReview === undefined ||
     conflictResolution === undefined ||
-    ownershipConfig === undefined
+    ownershipConfig === undefined ||
+    autoMerge === undefined
   ) {
     return undefined
   }
 
   return {
     github,
+    ...(release?._tag === 'Ok' ? { release: release.value } : {}),
     checkout,
     enabled,
+    ...(typeof priority === 'number' ? { priority } : {}),
+    ...(typeof pollIntervalSeconds === 'number' ? { pollIntervalSeconds } : {}),
+    ...(value.reasoning_effort === undefined ? {} : { reasoningEffort }),
     authentication: 'app',
     ownership: repositoryOwnership,
     defaultBranch,
@@ -437,6 +819,7 @@ function repositoryMapping(value: unknown, index: number, issues: ConfigIssue[])
     pullRequestReview,
     conflictResolution,
     takeOwnership: ownershipConfig,
+    autoMerge,
   }
 }
 
@@ -477,6 +860,7 @@ export function parseConfigText(text: string): Result<AgentConfig, ConfigIssue[]
   const issues: ConfigIssue[] = []
   const agent = agentSettings(document.value, issues)
   const webhook = webhookConfig(document.value, issues)
+  const classification = classificationConfig(document.value, issues)
   const triggers = serviceTriggers(document.value, issues)
   const github = requiredRecord(document.value, 'github', '$', issues)
   const server = requiredRecord(document.value, 'server', '$', issues)
@@ -517,6 +901,12 @@ export function parseConfigText(text: string): Result<AgentConfig, ConfigIssue[]
       : undefined
   if (port === undefined) issues.push({ path: '$.server.port', message: 'Expected an integer from 1 to 65535.' })
   const allowedOrigin = server === undefined ? undefined : requiredString(server, 'allowed_origin', '$.server', issues)
+  const frameAncestors =
+    server === undefined
+      ? undefined
+      : server.frame_ancestors === undefined
+        ? []
+        : stringArray(server, 'frame_ancestors', '$.server', issues)
   const storagePath = storage === undefined ? undefined : requiredString(storage, 'path', '$.storage', issues)
 
   const pollValue = document.value.poll_interval_seconds
@@ -541,6 +931,9 @@ export function parseConfigText(text: string): Result<AgentConfig, ConfigIssue[]
   if (maxOpenPullRequests === undefined)
     issues.push({ path: '$.max_open_pull_requests', message: 'Expected an integer from 1 to 100.' })
   const issueCutoff = fixedDate(document.value, 'issue_cutoff', '$', issues)
+  const issueBatchesValue = document.value.issue_batches ?? true
+  const issueBatches = typeof issueBatchesValue === 'boolean' ? issueBatchesValue : undefined
+  if (issueBatches === undefined) issues.push({ path: '$.issue_batches', message: 'Expected a boolean.' })
 
   const externalRepositoriesValue = document.value.external_repositories
   const externalRepositories = Array.isArray(externalRepositoriesValue)
@@ -584,6 +977,11 @@ export function parseConfigText(text: string): Result<AgentConfig, ConfigIssue[]
       path: '$.server.allowed_origin',
       message: 'Expected the local dashboard or an HTTPS Tailscale origin.',
     })
+  if (frameAncestors?.some((origin) => !isFrameAncestorOrigin(origin)))
+    issues.push({
+      path: '$.server.frame_ancestors',
+      message: 'Expected HTTPS or loopback HTTP origins without a path.',
+    })
   if (storagePath !== undefined && storagePath !== ':memory:' && !isAbsolute(storagePath))
     issues.push({ path: '$.storage.path', message: 'Expected an absolute path or :memory:.' })
   if (mutationsEnabled === true && storagePath === ':memory:')
@@ -596,6 +994,7 @@ export function parseConfigText(text: string): Result<AgentConfig, ConfigIssue[]
     issues.length > 0 ||
     agent === undefined ||
     webhook === undefined ||
+    classification === undefined ||
     triggers === undefined ||
     host === undefined ||
     appId === undefined ||
@@ -603,12 +1002,14 @@ export function parseConfigText(text: string): Result<AgentConfig, ConfigIssue[]
     allowedOwners === undefined ||
     port === undefined ||
     allowedOrigin === undefined ||
+    frameAncestors === undefined ||
     storagePath === undefined ||
     pollIntervalSeconds === undefined ||
     mutationsEnabled === undefined ||
     autoMerge === undefined ||
     maxOpenPullRequests === undefined ||
     issueCutoff === undefined ||
+    issueBatches === undefined ||
     externalRepositories === undefined ||
     repositories === undefined
   ) {
@@ -618,14 +1019,16 @@ export function parseConfigText(text: string): Result<AgentConfig, ConfigIssue[]
   return ok({
     agent,
     github: { appId, privateKeyPath, allowedOwners },
-    server: { host, port, allowedOrigin },
+    server: { host, port, allowedOrigin, frameAncestors },
     webhook,
+    classification,
     triggers,
     storage: { path: storagePath },
     trustedCheckoutRoots,
     mutationsEnabled,
     autoMerge,
     maxOpenPullRequests,
+    issueBatches,
     pollIntervalSeconds,
     issueCutoff,
     externalRepositories,

@@ -1,6 +1,7 @@
+import type { GitHubResponseCache } from './github-response-cache.ts'
 import type { Result } from './result.ts'
 import type { GitHubRepositoryAccess, GitHubRepositoryToken } from './types.ts'
-import { App, Octokit } from 'octokit'
+import { App, Octokit, RequestError } from 'octokit'
 import { err, ok } from './result.ts'
 
 export interface GitHubTokenError {
@@ -67,11 +68,23 @@ function repositoryName(repository: string): string {
  * and label call goes through GitHub's Issues API, whatever the Item is. GitHub
  * states the same requirement in its `X-Accepted-GitHub-Permissions` header for
  * those routes.
+ *
+ * `pull_request_merge` carries Contents write for the REST merge endpoint and
+ * Pull requests write for GitHub's auto-merge mutation.
+ *
+ * `checks_read` carries `actions` because the base gate lists workflow runs
+ * to drop the suites a `workflow_run` event attached to the default branch
+ * tip. Without it GitHub answers 403 and every CI gate reads PENDING.
+ *
+ * `check_write` carries Checks write alone, because the Review check run is
+ * the only write it serves and a narrower token cannot touch comments.
  */
 function permissions(access: GitHubRepositoryAccess): Record<string, PermissionLevel> {
   if (access === 'read') return { contents: 'read', issues: 'read', metadata: 'read', pull_requests: 'read' }
-  if (access === 'checks_read') return { checks: 'read', metadata: 'read', statuses: 'read' }
+  if (access === 'checks_read') return { actions: 'read', checks: 'read', metadata: 'read', statuses: 'read' }
+  if (access === 'check_write') return { checks: 'write', metadata: 'read' }
   if (access === 'item_write') return { contents: 'read', issues: 'write', metadata: 'read', pull_requests: 'write' }
+  if (access === 'pull_request_merge') return { contents: 'write', metadata: 'read', pull_requests: 'write' }
   if (access === 'workflows_write') return { contents: 'write', metadata: 'read', workflows: 'write' }
   return { contents: 'write', metadata: 'read' }
 }
@@ -305,7 +318,21 @@ export function isAuthenticationRejection(status: number | undefined): boolean {
   return status === 401 || status === 403
 }
 
+/** Rate limits reject valid credentials. Refreshing them spends more requests. */
+function isRateLimitRejection(error: unknown): boolean {
+  if (!(error instanceof RequestError) || error.status !== 403) return false
+  const headers = error.response?.headers
+  return (
+    headers?.['x-ratelimit-remaining'] === '0' ||
+    headers?.['retry-after'] !== undefined ||
+    /\b(?:rate limits?|abuse detection)\b/i.test(error.message)
+  )
+}
+
 export interface AuthenticatedClientOptions {
+  /** Optional observation cache. Every reuse is revalidated with GitHub. */
+  responseCache?: GitHubResponseCache
+
   tokens: GitHubTokenProvider
   repository: string
   access: GitHubRepositoryAccess
@@ -359,16 +386,33 @@ export function createAuthenticatedClient(options: AuthenticatedClientOptions): 
   let retried = false
 
   octokit.hook.wrap('request', async (request, requestOptions) => {
+    const read = () =>
+      options.access === 'read' && options.responseCache !== undefined
+        ? options.responseCache.request(
+            async (endpoint) => {
+              // Octokit's inner hooks bind the original options object.
+              const headers = requestOptions.headers
+              requestOptions.headers = { ...headers, ...endpoint.headers }
+              try {
+                return await request(requestOptions)
+              } finally {
+                requestOptions.headers = headers
+              }
+            },
+            octokit.request.endpoint(requestOptions),
+            credential.token,
+          )
+        : request(requestOptions)
     try {
-      return await request(requestOptions)
+      return await read()
     } catch (error) {
-      if (retried || !isAuthenticationRejection(errorStatus(error))) throw error
+      if (retried || !isAuthenticationRejection(errorStatus(error)) || isRateLimitRejection(error)) throw error
       retried = true
       options.tokens.invalidate(options.repository, options.access)
       const refreshed = await options.tokens.getToken(options.repository, options.access, options.signal)
       if (refreshed._tag === 'Err') throw error
       credential.token = refreshed.value.token
-      return await request(requestOptions)
+      return await read()
     }
   })
   return octokit

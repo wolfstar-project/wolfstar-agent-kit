@@ -18,8 +18,10 @@ import type {
   Routine,
   RoutineRun,
   SelectionMode,
+  TriageSkip,
 } from '../../../src/types.ts'
 import { hasSpendableCapacity } from '../../../src/capacity.ts'
+import { queueAttention } from './attention.ts'
 
 /** A progress label older than this means the agent may be wedged, not working. */
 export const stalledProgressSeconds = 120
@@ -167,8 +169,11 @@ export function activeProviderCircuits(circuits: ProviderCircuit[]): ProviderCir
   return circuits.filter((circuit) => circuit.state._tag !== 'Closed')
 }
 
-/** One label per Agent role. The Record makes a missing role a type error, not a fallthrough. */
-const workLabels: Record<AgentRole, string> = {
+/** What a Stats or History row can stand for: an Agent role, or Pull request triage which no Agent answers. */
+export type WorkKey = AgentRole | 'pull_request_triage'
+
+/** One label per work kind. The Record makes a missing kind a type error, not a fallthrough. */
+const workLabels: Record<WorkKey, string> = {
   adversarial_review: 'Review',
   pull_request_triage: 'Pull request triage',
   review_fix: 'Repair',
@@ -176,13 +181,14 @@ const workLabels: Record<AgentRole, string> = {
   baseline_repair: 'Baseline repair',
   issue_triage: 'Issue triage',
   issue_work: 'Issue work',
+  batch_plan: 'Batch planning',
   routine_scan: 'Routine scan',
   routine_fix: 'Routine fix',
 }
 
 export const agentRoleLabels: Array<[AgentRole, string]> = Object.entries(workLabels) as Array<[AgentRole, string]>
 
-export function workLabel(work: AgentRole): string {
+export function workLabel(work: WorkKey): string {
   return workLabels[work]
 }
 
@@ -378,6 +384,8 @@ export interface CardStateLine {
 export function cardStateLine(entry: QueueEntry, snapshot: DashboardSnapshot, now: Date): CardStateLine {
   switch (entry.state._tag) {
     case 'AwaitingApproval':
+      if (entry.state.kind === 'issue_triage')
+        return { text: 'Outside contributor. Approval starts Issue triage.', tone: 'warning' }
       if (entry.state.kind === 'issue_work')
         return { text: 'Outside contributor. Approval starts Issue work.', tone: 'warning' }
       return snapshot.selectionMode === 'manual'
@@ -386,7 +394,7 @@ export function cardStateLine(entry: QueueEntry, snapshot: DashboardSnapshot, no
     case 'ActionRequired':
       return { text: entry.state.reason, tone: 'error' }
     case 'Pending':
-      return { text: entry.state.reason, tone: 'muted' }
+      return { text: entry.state.reason.length > 0 ? entry.state.reason : 'Waiting on GitHub.', tone: 'muted' }
     case 'Queued': {
       if (isIssueWorkThrottled(entry, queueContextOf(snapshot))) return { text: throttledLine(snapshot), tone: 'muted' }
       const blocked = startBlockedLine(snapshot)
@@ -418,10 +426,10 @@ export function runningPhaseLine(agent: ActiveAgent): string | undefined {
   return text
 }
 
-/** The one primary action a Needs you card can carry. Absent when the card only reports. */
+/** The Approval action. Other decisions do not grant permission to start work. */
 export function approvalActionLabel(entry: QueueEntry): 'Review and repair' | 'Approve' | undefined {
   if (entry.state._tag !== 'AwaitingApproval') return undefined
-  return entry.state.kind === 'issue_work' ? 'Approve' : 'Review and repair'
+  return entry.state.kind === 'review' ? 'Review and repair' : 'Approve'
 }
 
 /** Consequence first, in one sentence, as the Dismiss modal states it. */
@@ -438,9 +446,14 @@ export function cancelConsequence(work: AgentRole | undefined): string {
 /** What follows the start the state line already named, which the button label alone cannot say. */
 export function approvalConsequence(entry: QueueEntry): string {
   if (entry.state._tag !== 'AwaitingApproval') return ''
-  return entry.state.kind === 'issue_work'
-    ? 'The agent implements the change, then the controller opens a draft pull request.'
-    : 'The controller may then push verified repair commits to this branch.'
+  switch (entry.state.kind) {
+    case 'issue_triage':
+      return 'The agent reads the issue. If it is ready to implement, the agent implements it and the controller opens a draft pull request.'
+    case 'issue_work':
+      return 'The agent implements the change, then the controller opens a draft pull request.'
+    case 'review':
+      return 'The controller may then push verified repair commits to this branch.'
+  }
 }
 
 export function decisionKey(entry: QueueEntry): string {
@@ -484,6 +497,7 @@ export function reviewOutcomeDetail(agent: ReviewAgent): string {
 const incidentKindLabels: Record<IncidentKind, string> = {
   agent_provider: 'Agent provider',
   agent_result: 'Agent result',
+  ci_gate_pending: 'CI gate PENDING',
   context_budget: 'Context budget',
   controller: 'Controller',
   github_access: 'GitHub access',
@@ -590,7 +604,42 @@ export function taskStateDetail(task: AgentTask): string | undefined {
   return undefined
 }
 
-export type HistoryCategory = 'ready' | 'issues' | 'pending' | 'failed' | 'superseded'
+/** Forty characters name nothing at a glance. Seven name a commit. */
+function shortenShas(text: string): string {
+  return text.replace(/\b[0-9a-f]{40}\b/g, (sha) => sha.slice(0, 7))
+}
+
+/**
+ * The one line a History row shows for a Task. Structured evidence gets a
+ * sentence or nothing; the raw record stays in the Evidence slideover.
+ */
+export function taskRowSummary(task: AgentTask): string | undefined {
+  const detail = taskStateDetail(task)
+  if (detail === undefined) return undefined
+  const trimmed = detail.trim()
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return shortenShas(trimmed)
+  const merge = cleanMergeEvidence(parseJson(trimmed))
+  return merge === undefined ? undefined : `Merged ${merge.baseRef} cleanly at ${merge.baseSha.slice(0, 7)}.`
+}
+
+function cleanMergeEvidence(value: unknown): { baseRef: string; baseSha: string } | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const record = value as Record<string, unknown>
+  return record._tag === 'CleanMerge' && typeof record.baseRef === 'string' && typeof record.baseSha === 'string'
+    ? { baseRef: record.baseRef, baseSha: record.baseSha }
+    : undefined
+}
+
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    /* Evidence is free text the row cannot summarise; the slideover shows it whole. */
+    return undefined
+  }
+}
+
+export type HistoryCategory = 'ready' | 'issues' | 'pending' | 'failed' | 'superseded' | 'skipped'
 
 export function taskHistoryCategory(task: AgentTask): HistoryCategory {
   if (task.state._tag === 'Completed') return 'ready'
@@ -609,8 +658,10 @@ export type HistoryRecord =
   | { _tag: 'Review'; key: string; at: string; agent: ReviewAgent }
   | { _tag: 'Task'; key: string; at: string; task: DashboardTask }
   | { _tag: 'Routine'; key: string; at: string; run: DashboardRoutineRun }
+  | { _tag: 'TriageSkip'; key: string; at: string; skip: TriageSkip }
 
 export function historyCategory(record: HistoryRecord): HistoryCategory {
+  if (record._tag === 'TriageSkip') return 'skipped'
   if (record._tag === 'Task') return taskHistoryCategory(record.task)
   if (record._tag === 'Routine') {
     if (record.run.state._tag === 'Completed') return 'ready'
@@ -625,6 +676,7 @@ export function historyCategory(record: HistoryRecord): HistoryCategory {
 export function historyOutcomeDetail(record: HistoryRecord): string | undefined {
   if (record._tag === 'Review') return reviewOutcomeDetail(record.agent)
   if (record._tag === 'Routine') return routineRunPresentation(record.run).detail
+  if (record._tag === 'TriageSkip') return record.skip.reason
   if (record.task.state._tag === 'Completed') return 'Completed successfully.'
   return taskStateDetail(record.task)
 }
@@ -638,6 +690,7 @@ export function buildHistory(
   reviewAgents: ReviewAgent[],
   tasks: DashboardTask[],
   routineRuns: DashboardRoutineRun[] = [],
+  triageSkips: TriageSkip[] = [],
 ): HistoryRecord[] {
   const reviewed = new Set(
     reviewAgents.map((agent) => `${agent.repository}#${agent.pullRequestNumber}@${agent.revisionId}`),
@@ -661,7 +714,15 @@ export function buildHistory(
   const routines = routineRuns
     .filter((run) => run.state._tag !== 'Queued' && run.state._tag !== 'Running')
     .map((run): HistoryRecord => ({ _tag: 'Routine', key: run.id, at: run.updatedAt, run }))
-  return [...reviews, ...settled, ...routines].sort(
+  // A skipped pull request queues no Task, so it would finish and vanish
+  // without this row. Its Review never ran, so nothing else can record it.
+  const skips = triageSkips.map((skip): HistoryRecord => ({
+    _tag: 'TriageSkip',
+    key: skip.key,
+    at: skip.decidedAt,
+    skip,
+  }))
+  return [...reviews, ...settled, ...routines, ...skips].sort(
     (left, right) => new Date(right.at).getTime() - new Date(left.at).getTime(),
   )
 }
@@ -678,7 +739,7 @@ export interface WorkChip {
   icon: string
 }
 
-const workChips: Record<AgentRole, WorkChip> = {
+const workChips: Record<WorkKey, WorkChip> = {
   adversarial_review: { label: 'Review', icon: 'i-octicon-code-review-16' },
   pull_request_triage: { label: 'Pull request triage', icon: 'i-octicon-checklist-16' },
   review_fix: { label: 'Repair', icon: 'i-octicon-tools-16' },
@@ -686,13 +747,14 @@ const workChips: Record<AgentRole, WorkChip> = {
   baseline_repair: { label: 'Baseline', icon: 'i-octicon-pulse-16' },
   issue_triage: { label: 'Triage', icon: 'i-octicon-inbox-16' },
   issue_work: { label: 'Issue work', icon: 'i-octicon-code-16' },
+  batch_plan: { label: 'Batch planning', icon: 'i-octicon-stack-16' },
   routine_scan: { label: 'Routine scan', icon: 'i-octicon-telescope-16' },
   routine_fix: { label: 'Routine fix', icon: 'i-octicon-workflow-16' },
 }
 
 export const workChipEntries: Array<[AgentRole, WorkChip]> = Object.entries(workChips) as Array<[AgentRole, WorkChip]>
 
-export function workChip(work: AgentRole): WorkChip {
+export function workChip(work: WorkKey): WorkChip {
   return workChips[work]
 }
 
@@ -709,7 +771,7 @@ export function taskWork(task: AgentTask): AgentRole {
 export function queueWork(entry: QueueEntry): AgentRole | undefined {
   if (entry.state._tag === 'Active' || entry.state._tag === 'Queued') return entry.state.work
   if (entry.state._tag === 'AwaitingApproval')
-    return entry.state.kind === 'issue_work' ? 'issue_work' : 'adversarial_review'
+    return entry.state.kind === 'review' ? 'adversarial_review' : entry.state.kind
   return undefined
 }
 
@@ -749,8 +811,14 @@ export function activeEntries(queue: QueueEntry[], activeAgents: ActiveAgent[]):
  * One card on the board. The variant is the column, decided once from state,
  * so an entry can never render in two places or in none.
  */
+/** Only human actions contribute to the board, document, and notification counts. */
+export function humanDecisionEntries(snapshot: DashboardSnapshot): QueueEntry[] {
+  return decisionEntries(snapshot.queue).filter((entry) => queueAttention(entry, snapshot)?.owner === 'You')
+}
+
 export type BoardCard =
   | { _tag: 'NeedsYou'; key: string; entry: QueueEntry }
+  | { _tag: 'AgentTask'; key: string; entry: QueueEntry; work: AgentRole }
   | { _tag: 'Queued'; key: string; entry: QueueEntry }
   | { _tag: 'Waiting'; key: string; entry: QueueEntry }
   | { _tag: 'Running'; key: string; agent: ActiveAgent }
@@ -759,6 +827,7 @@ export type BoardCard =
 
 export interface BoardColumns {
   needsYou: BoardCard[]
+  agentTasks: BoardCard[]
   queued: BoardCard[]
   waiting: BoardCard[]
   running: BoardCard[]
@@ -777,6 +846,8 @@ function entryKey(entry: QueueEntry): string {
 /** The work a card is for, or undefined for a condition that names none. */
 export function boardCardWork(card: BoardCard): AgentRole | undefined {
   switch (card._tag) {
+    case 'AgentTask':
+      return card.work
     case 'Running':
       return card.agent.role
     case 'Done':
@@ -807,8 +878,22 @@ export function boardColumns(snapshot: DashboardSnapshot, filter: AgentRole | 'a
   const finished = finishedRecords(snapshot)
   const done = finished.map((record): BoardCard => ({ _tag: 'Done', key: record.key, record })).filter(keep)
   return {
-    needsYou: decisionEntries(snapshot.queue)
+    needsYou: humanDecisionEntries(snapshot)
       .map((entry): BoardCard => ({ _tag: 'NeedsYou', key: entryKey(entry), entry }))
+      .filter(keep),
+    agentTasks: decisionEntries(snapshot.queue)
+      .flatMap((entry): BoardCard[] => {
+        const attention = queueAttention(entry, snapshot)
+        if (attention?.owner !== 'Agent') return []
+        const roles = {
+          Spec: 'issue_triage',
+          Evidence: 'issue_triage',
+          Repair: 'review_fix',
+          Checks: 'adversarial_review',
+          Recovery: 'issue_work',
+        } as const
+        return [{ _tag: 'AgentTask', key: entryKey(entry), entry, work: roles[attention._tag] }]
+      })
       .filter(keep),
     queued: queued
       .filter((entry) => !isIssueWorkThrottled(entry, context))
@@ -839,6 +924,7 @@ export function presentWorkKinds(columns: BoardColumns): Array<[AgentRole, WorkC
       if (work !== undefined) present.add(work)
     })
   collect(columns.needsYou)
+  collect(columns.agentTasks)
   collect(columns.queued)
   collect(columns.waiting)
   collect(columns.running)
@@ -918,7 +1004,7 @@ export function boardCardIdentity(card: BoardCard, snapshot: DashboardSnapshot):
       number: agent.pullRequestNumber,
     }
   }
-  if (card.record._tag === 'Routine') return undefined
+  if (card.record._tag === 'Routine' || card.record._tag === 'TriageSkip') return undefined
   const { task } = card.record
   const number = taskNumber(task)
   const item = snapshot.items.find(
@@ -926,6 +1012,21 @@ export function boardCardIdentity(card: BoardCard, snapshot: DashboardSnapshot):
   )
   if (item === undefined) return undefined
   return { author: item.author, title: item.title, url: item.url, repository: task.repository, kind: item.kind, number }
+}
+
+/** `6m`, `3h`, `2d`: the age a dense row can afford. Under a minute reads as `now`. */
+export function shortAge(iso: string, now: Date): string {
+  const seconds = Math.max(0, secondsSince(iso, now))
+  if (seconds < 60) return 'now'
+  if (seconds < 3_600) return `${Math.floor(seconds / 60)}m`
+  if (seconds < 86_400) return `${Math.floor(seconds / 3_600)}h`
+  return `${Math.floor(seconds / 86_400)}d`
+}
+
+/** `owner/repo` reads as `repo` where the owner is noise, such as a Done row. */
+export function repositoryName(repository: string): string {
+  const slash = repository.lastIndexOf('/')
+  return slash === -1 ? repository : repository.slice(slash + 1)
 }
 
 export interface CardBadge {
@@ -942,6 +1043,8 @@ export function boardCardBadge(card: BoardCard): CardBadge {
       return card.entry.state._tag === 'ActionRequired'
         ? { label: 'Action required', tone: 'error', uppercase: false }
         : { label: 'Approval required', tone: 'warning', uppercase: false }
+    case 'AgentTask':
+      return { label: 'Not queued', tone: 'neutral', uppercase: false }
     case 'Queued':
       return { label: 'Queued', tone: 'neutral', uppercase: false }
     case 'Waiting':
@@ -968,6 +1071,13 @@ export function boardCardBadge(card: BoardCard): CardBadge {
           uppercase: false,
         }
       }
+      if (card.record._tag === 'TriageSkip')
+        return {
+          label: 'Skipped',
+          tone: 'neutral',
+          confidence: card.record.skip.confidence ?? undefined,
+          uppercase: false,
+        }
       return { label: card.record.task.state._tag, tone: taskStateTone(card.record.task), uppercase: false }
   }
 }

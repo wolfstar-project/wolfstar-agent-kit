@@ -20,6 +20,7 @@ const tabs = [
   { label: 'Board', to: '/' },
   { label: 'History', to: '/history' },
   { label: 'Watching', to: '/watching' },
+  { label: 'Routines', to: '/routines' },
   { label: 'Stats', to: '/stats' },
 ]
 
@@ -78,7 +79,7 @@ onMounted(start)
 
         <div class="ms-auto flex items-center gap-1.5">
           <SystemChip />
-          <div class="hidden items-center gap-1.5 md:flex">
+          <div class="hidden items-center gap-1.5 lg:flex">
             <AgentSelectionMenu />
             <UButton
               :color="paused ? 'primary' : 'neutral'"

@@ -77,13 +77,22 @@ function reviewWith(input: { headChecks: GitHubCheck[]; baseChecks?: GitHubCheck
     github: {
       consumeApprovalLabel: () => Promise.reject(new Error('Unexpected label mutation.')),
       editReviewStatus: () => Promise.reject(new Error('Unexpected comment edit.')),
+      upsertReviewCheckRun: () => Promise.reject(new Error('Unexpected Review check run write.')),
       ensureApprovalLabel: () => Promise.reject(new Error('Unexpected label mutation.')),
       clearAgentLabels: () => Promise.reject(new Error('Unexpected label clear.')),
       clearRunningLabel: () => Promise.reject(new Error('Unexpected Running label clear.')),
       listRunningLabelledItems: () => Promise.reject(new Error('Unexpected Running label read.')),
       stampAgentLabel: () => Promise.resolve(ok(undefined)),
+      findOpenPullRequestForBranch: () => Promise.reject(new Error('Unexpected pull request lookup.')),
+      getFailedJobContext: () => Promise.reject(new Error('Unexpected job log read.')),
       getIssueTriageSnapshot: () => Promise.reject(new Error('Unexpected issue request.')),
-      listPullRequestFiles: () => Promise.reject(new Error('Unexpected file listing.')),
+      // Every Review reads the changed files: the Reasoning effort band needs them.
+      listPullRequestFiles: () =>
+        Promise.resolve(
+          ok([
+            { path: 'src/parser.ts', status: 'modified' as const, additions: 4, deletions: 2, previousFilename: null },
+          ]),
+        ),
       getPullRequestTemplate: () => Promise.resolve(ok({ _tag: 'Missing' })),
       getPullRequestReviewSnapshot: () => Promise.resolve(ok(snapshot)),
       upsertIssueTriageComment: () => Promise.reject(new Error('Review must not post issue triage.')),
@@ -92,12 +101,17 @@ function reviewWith(input: { headChecks: GitHubCheck[]; baseChecks?: GitHubCheck
     now: () => new Date('2026-08-19T01:00:00.000Z'),
     preflightRepair: () => Promise.resolve(ok(undefined)),
     store: {
+      recordExactPullRequestObservation: () => {
+        throw new Error('Unexpected merge observation.')
+      },
       queueReviewFixTaskForReview: () => {
         throw new Error('Unexpected Repair queue.')
       },
       getRepairedHeadFindings: () => [],
       getWorkerSession: () => null,
       listReviewRuns: () => [],
+      storedReviewForHead: () => ({ _tag: 'None' }),
+      getRevisionFiles: () => null,
       supersedeReviewRun: (input) => ({ _tag: 'Inserted', reviewRunId: input.id }),
       recordIncident: (incident) => {
         incidents.push(incident)
@@ -108,9 +122,6 @@ function reviewWith(input: { headChecks: GitHubCheck[]; baseChecks?: GitHubCheck
           firstSeenAt: incident.at,
           lastSeenAt: incident.at,
         } satisfies Incident
-      },
-      recordPullRequestTriageRun: () => {
-        throw new Error('Unexpected pull request triage record.')
       },
       queueBaselineRepairForReview: () => {
         baselineRepairs += 1

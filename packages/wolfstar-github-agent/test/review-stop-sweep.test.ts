@@ -6,6 +6,7 @@ import { pullRequestItem, repositoryMapping } from './fixtures.ts'
 
 const githubStatus = {
   clearAgentLabels: () => Promise.resolve(ok(undefined)),
+  upsertReviewCheckRun: () => Promise.resolve(ok(undefined)),
 }
 
 const reviewClosureStore = {
@@ -159,11 +160,48 @@ describe('publishStoppedReviews', () => {
     expect(recorded).toBe(1)
   })
 
+  it('retires the publication once the comment belongs to another actor', async () => {
+    const retired: Array<{ commentId: number; reason: string }> = []
+    let recorded = 0
+    const reason = 'The stored automated review comment belongs to another GitHub actor.' as const
+    const { results } = await publishStoppedReviews(
+      {
+        github: {
+          ...githubStatus,
+          getPullRequestReviewSnapshot: () => Promise.resolve(snapshot()),
+          editReviewStatus: () => Promise.resolve(ok({ _tag: 'Foreign', reason })),
+        },
+        now: () => new Date('2026-08-15T04:00:00.000Z'),
+        repositories: [repositoryMapping()],
+        store: {
+          ...reviewClosureStore,
+          recordDeletedReviewComment: (input) => {
+            retired.push({ commentId: input.commentId, reason: input.reason })
+            return true
+          },
+          listStoppedReviews: () => [stopped],
+          recordStoppedReviewStatus: () => {
+            recorded += 1
+            return true
+          },
+        },
+      },
+      new AbortController().signal,
+    )
+
+    expect(results).toEqual([
+      ok({ _tag: 'Retired', repository: 'wolfstar-project/example', pullRequestNumber: 24, reason }),
+    ])
+    expect(recorded).toBe(0)
+    expect(retired).toEqual([{ commentId: 42, reason }])
+  })
+
   it('does not finish while stale Agent labels remain', async () => {
     let recorded = 0
     const { results } = await publishStoppedReviews(
       {
         github: {
+          upsertReviewCheckRun: () => Promise.resolve(ok(undefined)),
           clearAgentLabels: () => Promise.resolve(err('GitHub did not clear the labels.')),
           getPullRequestReviewSnapshot: () => Promise.resolve(snapshot()),
           editReviewStatus: () =>
@@ -200,6 +238,7 @@ describe('publishStoppedReviews', () => {
     const { results } = await publishStoppedReviews(
       {
         github: {
+          upsertReviewCheckRun: () => Promise.resolve(ok(undefined)),
           clearAgentLabels: () => {
             labelsCleared += 1
             return Promise.resolve(ok(undefined))
@@ -297,6 +336,7 @@ describe('publishStoppedReviews', () => {
     const { results } = await publishStoppedReviews(
       {
         github: {
+          upsertReviewCheckRun: () => Promise.resolve(ok(undefined)),
           clearAgentLabels: () => Promise.resolve(err('GitHub did not clear the labels.')),
           getPullRequestReviewSnapshot: () => Promise.reject(new Error('A merged pull request needs no snapshot.')),
           editReviewStatus: () => Promise.resolve(ok({ _tag: 'Missing' })),
@@ -428,6 +468,114 @@ describe('publishStoppedReviews', () => {
     ])
     expect(recorded).toBe(0)
     expect(retired).toEqual([42])
+  })
+
+  it('completes the Review check run when it closes a stopped review', async () => {
+    const checkRuns: Array<{ headSha: string; conclusion: string; title: string }> = []
+    const { results } = await publishStoppedReviews(
+      {
+        github: {
+          ...githubStatus,
+          getPullRequestReviewSnapshot: () => Promise.resolve(snapshot()),
+          editReviewStatus: () =>
+            Promise.resolve(
+              ok({
+                _tag: 'Edited',
+                commentId: 42,
+                url: 'https://github.com/wolfstar-project/example/pull/24#issuecomment-42',
+              }),
+            ),
+          upsertReviewCheckRun: (_repository, headSha, update) => {
+            checkRuns.push(
+              update._tag === 'Completed'
+                ? { headSha, conclusion: update.conclusion, title: update.title }
+                : { headSha, conclusion: 'running', title: update.title },
+            )
+            return Promise.resolve(ok(undefined))
+          },
+        },
+        now: () => new Date('2026-08-15T04:00:00.000Z'),
+        repositories: [repositoryMapping()],
+        store: {
+          ...reviewClosureStore,
+          recordDeletedReviewComment: () => true,
+          listStoppedReviews: () => [stopped],
+          recordStoppedReviewStatus: () => true,
+        },
+      },
+      new AbortController().signal,
+    )
+
+    expect(results).toEqual([ok({ _tag: 'Published', repository: 'wolfstar-project/example', pullRequestNumber: 24 })])
+    expect(checkRuns).toEqual([{ headSha: 'abc123', conclusion: 'neutral', title: '🤖 STOPPED' }])
+  })
+
+  it('completes the Review check run even when a person deleted the comment', async () => {
+    const checkRuns: Array<{ headSha: string; conclusion: string }> = []
+    await publishStoppedReviews(
+      {
+        github: {
+          ...githubStatus,
+          getPullRequestReviewSnapshot: () => Promise.resolve(snapshot()),
+          editReviewStatus: () => Promise.resolve(ok({ _tag: 'Missing' })),
+          upsertReviewCheckRun: (_repository, headSha, update) => {
+            checkRuns.push(
+              update._tag === 'Completed'
+                ? { headSha, conclusion: update.conclusion }
+                : { headSha, conclusion: 'running' },
+            )
+            return Promise.resolve(ok(undefined))
+          },
+        },
+        now: () => new Date('2026-08-15T04:00:00.000Z'),
+        repositories: [repositoryMapping()],
+        store: {
+          ...reviewClosureStore,
+          recordDeletedReviewComment: () => true,
+          listStoppedReviews: () => [stopped],
+          recordStoppedReviewStatus: () => true,
+        },
+      },
+      new AbortController().signal,
+    )
+
+    expect(checkRuns).toEqual([{ headSha: 'abc123', conclusion: 'neutral' }])
+  })
+
+  it('keeps a stopped review eligible when the check run write fails', async () => {
+    let recorded = 0
+    const { results } = await publishStoppedReviews(
+      {
+        github: {
+          ...githubStatus,
+          getPullRequestReviewSnapshot: () => Promise.resolve(snapshot()),
+          editReviewStatus: () =>
+            Promise.resolve(
+              ok({
+                _tag: 'Edited',
+                commentId: 42,
+                url: 'https://github.com/wolfstar-project/example/pull/24#issuecomment-42',
+              }),
+            ),
+          upsertReviewCheckRun: () => Promise.resolve(err('GitHub refused the check run write.')),
+        },
+        now: () => new Date('2026-08-15T04:00:00.000Z'),
+        repositories: [repositoryMapping()],
+        store: {
+          ...reviewClosureStore,
+          recordDeletedReviewComment: () => true,
+          listStoppedReviews: () => [stopped],
+          recordStoppedReviewStatus: () => {
+            recorded += 1
+            return true
+          },
+        },
+      },
+      new AbortController().signal,
+    )
+
+    expect(results[0]?._tag).toBe('Err')
+    expect(recorded).toBe(0)
   })
 
   it('retires a stale publication after another Task replaces its comment', async () => {

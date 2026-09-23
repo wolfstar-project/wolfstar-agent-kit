@@ -1,17 +1,26 @@
 #!/usr/bin/env node
+import type { ControlClient } from './control-client.ts'
+import type { Result } from './result.ts'
 import { dirname, join, resolve } from 'node:path'
 import process from 'node:process'
+import { jev } from 'advocaat'
 import { defineCommand, runMain } from 'citty'
 import { consola } from 'consola'
+import { createClassificationSource } from './classification.ts'
+import { forwardLeadingOptions } from './cli-leading-options.ts'
 import { invokesSubCommand } from './cli-subcommand.ts'
-import { loadConfig, loadGitHubAppPrivateKey, loadWebhookSecret, validateRepositoryMappings } from './config.ts'
+import { loadClassificationToken, loadConfig } from './config.ts'
+import { createControlClient } from './control-client.ts'
 import { loadDashboardPassword } from './dashboard-password.ts'
-import { loadGitIdentity } from './git-identity.ts'
 import { discoverLocalCheckouts } from './repository-discovery.ts'
+import { err } from './result.ts'
+import { describePreflightIssues, loadServiceInputs } from './service-preflight.ts'
 import { combineServiceState } from './service-state.ts'
+import { createGitServiceUpdateSource } from './service-update.ts'
 import { startAgentService } from './service.ts'
 import { stopWithin } from './shutdown.ts'
 import { openJournalStore } from './store.ts'
+import { replayStoredIssueTriage, replayStoredTriage } from './triage-evaluation.ts'
 import { agentWorktreeLeaseKey, listSweepableAgentWorktrees, sweepAgentWorktrees } from './worktree.ts'
 
 function waitForShutdown(): Promise<void> {
@@ -28,6 +37,261 @@ const configArgument = {
   description: 'Configuration file path.',
   default: 'wolfstar-github-agent.yml',
 } as const
+
+const controlConnectionArguments = {
+  config: configArgument,
+  url: {
+    type: 'string',
+    description: 'Service URL. Defaults to server.allowed_origin in the configuration file.',
+  },
+  'password-file': {
+    type: 'string',
+    description: 'Password file. Defaults to dashboard-password beside the configuration file.',
+  },
+} as const
+
+interface ControlConnectionArguments {
+  config: string
+  url: string | undefined
+  'password-file': string | undefined
+}
+
+type ControlCommandError =
+  | { _tag: 'ConfigurationFailure'; message: string }
+  | { _tag: 'MissingTaskId'; message: string }
+  | { _tag: 'UnknownControlCommand'; message: string }
+  | { _tag: 'InvalidTaskId'; message: string }
+  | { _tag: 'InvalidEventLimit'; message: string }
+  | { _tag: 'InvalidStream'; message: string }
+  | { _tag: 'InvalidBaseUrl'; message: string }
+
+const workflowEventStreams = [
+  'task',
+  'worker_task',
+  'publication',
+  'review_run',
+  'review_gate',
+  'review_resolution',
+  'review_status',
+  'issue_triage_status',
+  'routine_run',
+  'candidate_issue',
+  'routine_report',
+  'provider_circuit',
+] as const
+
+async function loadControlClient(
+  args: ControlConnectionArguments,
+): Promise<Result<ControlClient, ControlCommandError>> {
+  const configPath = resolve(args.config)
+  let baseUrl = args.url
+  if (baseUrl === undefined) {
+    const configuration = await loadConfig(configPath).catch((error: unknown) =>
+      err([
+        { path: '$', message: error instanceof Error ? error.message : 'The configuration file could not be read.' },
+      ]),
+    )
+    if (configuration._tag === 'Err') {
+      return {
+        _tag: 'Err',
+        error: {
+          _tag: 'ConfigurationFailure',
+          message: configuration.error.map((issue) => `${issue.path}: ${issue.message}`).join('\n'),
+        },
+      }
+    }
+    baseUrl = configuration.value.server.allowedOrigin
+  }
+
+  const passwordPath = resolve(args['password-file'] ?? join(dirname(configPath), 'dashboard-password'))
+  const password = await loadDashboardPassword(passwordPath).catch((error: unknown) =>
+    err(error instanceof Error ? error.message : 'The dashboard password file could not be read.'),
+  )
+  if (password._tag === 'Err')
+    return { _tag: 'Err' as const, error: { _tag: 'ConfigurationFailure' as const, message: password.error } }
+
+  return createControlClient({
+    authentication: { _tag: 'Basic', password: password.value },
+    baseUrl,
+    fetch: globalThis.fetch,
+  })
+}
+
+function writeJson(value: unknown, stream: NodeJS.WriteStream): void {
+  stream.write(`${JSON.stringify(value)}\n`)
+}
+
+async function runControl<ErrorValue>(
+  args: ControlConnectionArguments,
+  action: (client: ControlClient) => Promise<Result<unknown, ErrorValue>>,
+): Promise<void> {
+  const client = await loadControlClient(args)
+  if (client._tag === 'Err') {
+    writeJson(client.error, process.stderr)
+    process.exitCode = 1
+    return
+  }
+  const result = await action(client.value)
+  if (result._tag === 'Err') {
+    writeJson(result.error, process.stderr)
+    process.exitCode = 1
+    return
+  }
+  writeJson(result.value, process.stdout)
+}
+
+function taskId(value: string): { _tag: 'Ok'; value: string } | { _tag: 'Err'; error: ControlCommandError } {
+  return /^[a-f\d]{64}$/.test(value)
+    ? { _tag: 'Ok', value }
+    : {
+        _tag: 'Err',
+        error: { _tag: 'InvalidTaskId', message: 'The Task ID must contain 64 lowercase hexadecimal characters.' },
+      }
+}
+
+function controlTaskCommand(input: { name: 'activity' | 'cancel'; description: string }) {
+  return defineCommand({
+    meta: { name: input.name, description: input.description },
+    args: {
+      ...controlConnectionArguments,
+      task: {
+        type: 'string',
+        description: 'Task ID.',
+        required: true,
+      },
+    },
+    async run({ args }) {
+      const parsedTaskId = taskId(args.task)
+      if (parsedTaskId._tag === 'Err') {
+        writeJson(parsedTaskId.error, process.stderr)
+        process.exitCode = 1
+        return
+      }
+      await runControl(args, (client) =>
+        input.name === 'activity'
+          ? client
+              .activity(parsedTaskId.value)
+              .then((result) =>
+                result._tag === 'Err'
+                  ? result
+                  : { _tag: 'Ok', value: { taskId: parsedTaskId.value, activity: result.value } },
+              )
+          : client.cancelTask(parsedTaskId.value),
+      )
+    },
+  })
+}
+
+const controlCommand = defineCommand({
+  meta: {
+    name: 'control',
+    description: 'Read and control one running Wolfstar GitHub Agent service.',
+  },
+  subCommands: {
+    status: defineCommand({
+      meta: { name: 'status', description: 'Read service health and the shared dashboard state.' },
+      args: controlConnectionArguments,
+      run: ({ args }) => runControl(args, (client) => client.status()),
+    }),
+    tasks: defineCommand({
+      meta: { name: 'tasks', description: 'List current Tasks.' },
+      args: controlConnectionArguments,
+      run: ({ args }) =>
+        runControl(args, (client) =>
+          client
+            .tasks()
+            .then((result) => (result._tag === 'Err' ? result : { _tag: 'Ok', value: { tasks: result.value } })),
+        ),
+    }),
+    incidents: defineCommand({
+      meta: { name: 'incidents', description: 'List unresolved Incidents.' },
+      args: controlConnectionArguments,
+      run: ({ args }) =>
+        runControl(args, (client) =>
+          client
+            .incidents()
+            .then((result) => (result._tag === 'Err' ? result : { _tag: 'Ok', value: { incidents: result.value } })),
+        ),
+    }),
+    activity: controlTaskCommand({ name: 'activity', description: 'Read the redacted activity for one active Task.' }),
+    events: defineCommand({
+      meta: { name: 'events', description: 'List durable workflow events.' },
+      args: {
+        ...controlConnectionArguments,
+        stream: {
+          type: 'string',
+          description: `One workflow event stream: ${workflowEventStreams.join(', ')}.`,
+        },
+        limit: {
+          type: 'string',
+          description: 'Maximum events from 1 to 1000.',
+          default: '200',
+        },
+      },
+      async run({ args }) {
+        const stream = workflowEventStreams.find((candidate) => candidate === args.stream)
+        if (args.stream !== undefined && stream === undefined) {
+          writeJson(
+            { _tag: 'InvalidStream', message: 'Select a valid workflow event stream.' } satisfies ControlCommandError,
+            process.stderr,
+          )
+          process.exitCode = 1
+          return
+        }
+        const limit = Number(args.limit)
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
+          writeJson(
+            { _tag: 'InvalidEventLimit', message: 'Set the event limit from 1 to 1000.' } satisfies ControlCommandError,
+            process.stderr,
+          )
+          process.exitCode = 1
+          return
+        }
+        await runControl(args as unknown as ControlConnectionArguments, (client) =>
+          client
+            .workflowEvents({
+              limit,
+              ...(stream === undefined ? {} : { stream }),
+            })
+            .then((result) => (result._tag === 'Err' ? result : { _tag: 'Ok', value: { events: result.value } })),
+        )
+      },
+    }),
+    pause: defineCommand({
+      meta: { name: 'pause', description: 'Pause new agent Tasks.' },
+      args: controlConnectionArguments,
+      run: ({ args }) => runControl(args, (client) => client.pause()),
+    }),
+    resume: defineCommand({
+      meta: { name: 'resume', description: 'Resume new agent Tasks.' },
+      args: controlConnectionArguments,
+      run: ({ args }) => runControl(args, (client) => client.resume()),
+    }),
+    restart: defineCommand({
+      meta: { name: 'restart', description: 'Request Restart after current work.' },
+      args: controlConnectionArguments,
+      run: ({ args }) => runControl(args, (client) => client.restart()),
+    }),
+    update: defineCommand({
+      meta: { name: 'update', description: 'Request Update after current work.' },
+      args: controlConnectionArguments,
+      run: ({ args }) => runControl(args, (client) => client.update()),
+    }),
+    cancel: controlTaskCommand({ name: 'cancel', description: 'Cancel one active or queued Task.' }),
+    'routine-run': defineCommand({
+      meta: { name: 'routine-run', description: 'Open one Routine run now, ahead of its schedule.' },
+      args: {
+        ...controlConnectionArguments,
+        routine: {
+          type: 'string',
+          description: 'Routine ID, as OWNER/REPOSITORY:NAME.',
+          required: true,
+        },
+      },
+      run: ({ args }) => runControl(args, (client) => client.runRoutine(args.routine)),
+    }),
+  },
+})
 
 const sweepWorktrees = defineCommand({
   meta: {
@@ -131,56 +395,186 @@ const combineState = defineCommand({
   },
 })
 
+const rootArguments = {
+  config: configArgument,
+}
+
+const evaluateTriage = defineCommand({
+  meta: {
+    name: 'evaluate-triage',
+    description:
+      'Replay recorded Pull request triage decisions through the classification service and suggest a skip band.',
+  },
+  args: {
+    ...rootArguments,
+    limit: {
+      type: 'string',
+      alias: 'l',
+      description: 'Newest decisions to replay.',
+      default: '100',
+    },
+  },
+  async run({ args }) {
+    const parsed = await loadConfig(resolve(args.config))
+    if (parsed._tag === 'Err')
+      throw new Error(parsed.error.map((issue) => `${issue.path}: ${issue.message}`).join('\n'))
+    const classification = parsed.value.classification
+    if (classification._tag !== 'Enabled')
+      throw new Error('The configuration has no classification block, so there is nothing to evaluate with.')
+    const token = await loadClassificationToken(classification.tokenPath)
+    if (token._tag === 'Err') throw new Error(token.error.map((issue) => `${issue.path}: ${issue.message}`).join('\n'))
+    const limit = Number.parseInt(args.limit ?? '100', 10)
+    if (!Number.isInteger(limit) || limit < 1) throw new Error('--limit needs a whole number above zero.')
+    const summary = await replayStoredTriage({
+      journalPath: parsed.value.storage.path,
+      limit,
+      classification: createClassificationSource({
+        client: jev({
+          accountId: classification.accountId,
+          apiToken: token.value,
+          ...(classification.gatewayId === undefined ? {} : { gatewayId: classification.gatewayId }),
+          model: classification.model,
+        }),
+      }),
+      log: (line) => consola.info(line),
+    })
+    consola.success(
+      `Replayed ${summary.replayed} decisions, of which ${summary.classified} reached the classification. ${summary.skippedWithoutFiles} recorded decisions carry no changed-file list and are excluded from every replay; only decisions recorded after this change replay.`,
+    )
+    consola.info(
+      `Suggested skip band: ${summary.suggestion.band}, ${summary.suggestion.agreed}/${summary.classified} agreed, ${summary.suggestion.skipsAdded} would skip what Review read.`,
+    )
+  },
+})
+
+const evaluateIssueTriage = defineCommand({
+  meta: {
+    name: 'evaluate-issue-triage',
+    description: 'Replay recorded Issue triage decisions through the classification service and suggest a route band.',
+  },
+  args: {
+    ...rootArguments,
+    limit: {
+      type: 'string',
+      alias: 'l',
+      description: 'Newest decisions to replay.',
+      default: '100',
+    },
+  },
+  async run({ args }) {
+    const parsed = await loadConfig(resolve(args.config))
+    if (parsed._tag === 'Err')
+      throw new Error(parsed.error.map((issue) => `${issue.path}: ${issue.message}`).join('\n'))
+    const classification = parsed.value.classification
+    if (classification._tag !== 'Enabled')
+      throw new Error('The configuration has no classification block, so there is nothing to evaluate with.')
+    const token = await loadClassificationToken(classification.tokenPath)
+    if (token._tag === 'Err') throw new Error(token.error.map((issue) => `${issue.path}: ${issue.message}`).join('\n'))
+    const limit = Number.parseInt(args.limit ?? '100', 10)
+    if (!Number.isInteger(limit) || limit < 1) throw new Error('--limit needs a whole number above zero.')
+    const source = createClassificationSource({
+      client: jev({
+        accountId: classification.accountId,
+        apiToken: token.value,
+        ...(classification.gatewayId === undefined ? {} : { gatewayId: classification.gatewayId }),
+        model: classification.model,
+      }),
+    })
+    const summary = await replayStoredIssueTriage({
+      journalPath: parsed.value.storage.path,
+      limit,
+      classification: source,
+      log: (line) => consola.info(line),
+    })
+    consola.success(
+      `Replayed ${summary.replayed} Agent triage decisions from titles alone; bodies are not in the journal. ${summary.answered} reached the classification.`,
+    )
+    consola.info(
+      `Suggested issue_triage_band: ${summary.suggestion.band}, ${summary.suggestion.routedAsStored}/${summary.answered} routed as stored, ${summary.suggestion.readyStalled} ready issues would stall.`,
+    )
+  },
+})
+
+const checkConfig = defineCommand({
+  meta: {
+    name: 'check-config',
+    description: 'Read the configuration and every secret it names, without starting the service.',
+  },
+  args: rootArguments,
+  async run({ args }) {
+    const configPath = resolve(args.config)
+    const inputs = await loadServiceInputs(configPath)
+    if (inputs._tag === 'Err') {
+      consola.error(`This revision rejects ${configPath}:\n${describePreflightIssues(inputs.error)}`)
+      process.exitCode = 1
+      return
+    }
+    consola.success(`This revision accepts ${configPath}.`)
+  },
+})
+
+const rootSubCommandNames = [
+  'check-config',
+  'combine-service-state',
+  'sweep-worktrees',
+  'control',
+  'evaluate-triage',
+  'evaluate-issue-triage',
+]
+
 const command = defineCommand({
   meta: {
     name: 'wolfstar-github-agent',
     version: '0.0.0',
     description: 'Run the local GitHub maintenance control plane.',
   },
-  args: {
-    config: configArgument,
-  },
+  args: rootArguments,
   subCommands: {
+    'check-config': checkConfig,
     'combine-service-state': combineState,
     'sweep-worktrees': sweepWorktrees,
+    control: controlCommand,
+    'evaluate-triage': evaluateTriage,
+    'evaluate-issue-triage': evaluateIssueTriage,
   },
   async run({ args, rawArgs }) {
-    // citty runs this after it ran the subcommand, so stop before the service
-    // starts and binds the dashboard port.
-    if (invokesSubCommand(rawArgs, ['combine-service-state', 'sweep-worktrees'])) return
+    // starts and binds the dashboard port. citty dispatches on the first
+    // positional argument, so look there, even when options precede the name.
+    if (invokesSubCommand(rawArgs, rootSubCommandNames, rootArguments)) return
     const configPath = resolve(args.config)
-    const parsed = await loadConfig(configPath)
-    if (parsed._tag === 'Err')
-      throw new Error(parsed.error.map((issue) => `${issue.path}: ${issue.message}`).join('\n'))
+    const inputs = await loadServiceInputs(configPath)
+    if (inputs._tag === 'Err') throw new Error(describePreflightIssues(inputs.error))
 
-    const validated = await validateRepositoryMappings(parsed.value)
-    if (validated._tag === 'Err')
-      throw new Error(validated.error.map((issue) => `${issue.path}: ${issue.message}`).join('\n'))
+    const { classificationToken, config, dashboardPassword, gitIdentity, githubPrivateKey, webhookSecret } =
+      inputs.value
+    const classification = config.classification
+    const webhook = config.webhook
 
-    const privateKey = await loadGitHubAppPrivateKey(validated.value.github.privateKeyPath)
-    if (privateKey._tag === 'Err')
-      throw new Error(privateKey.error.map((issue) => `${issue.path}: ${issue.message}`).join('\n'))
-
-    const dashboardPassword = await loadDashboardPassword(join(dirname(configPath), 'dashboard-password'))
-    if (dashboardPassword._tag === 'Err') throw new Error(dashboardPassword.error)
-
-    const webhook = validated.value.webhook
-    const webhookSecret = webhook._tag === 'Enabled' ? await loadWebhookSecret(webhook.secretPath) : null
-    if (webhookSecret?._tag === 'Err')
-      throw new Error(webhookSecret.error.map((issue) => `${issue.path}: ${issue.message}`).join('\n'))
-
-    const gitIdentity = await loadGitIdentity()
-    if (gitIdentity._tag === 'Err') throw new Error(gitIdentity.error)
-
-    const service = await startAgentService({
-      config: validated.value,
-      dashboardPassword: dashboardPassword.value,
-      gitIdentity: gitIdentity.value,
-      githubPrivateKey: privateKey.value,
-      ...(webhookSecret === null ? {} : { webhookSecret: webhookSecret.value }),
-      logger: consola,
+    const serviceUpdate = createGitServiceUpdateSource({
+      repositoryRoot: process.cwd(),
+      now: () => new Date(),
+      onError: (error) => consola.error(error),
     })
-    consola.success(`Dashboard: ${validated.value.server.allowedOrigin}`)
+    const service = await startAgentService({
+      ...(classification._tag === 'Enabled' && classificationToken !== null
+        ? {
+            classification: {
+              accountId: classification.accountId,
+              apiToken: classificationToken,
+              ...(classification.gatewayId === undefined ? {} : { gatewayId: classification.gatewayId }),
+              model: classification.model,
+            },
+          }
+        : {}),
+      config,
+      dashboardPassword,
+      gitIdentity,
+      githubPrivateKey,
+      ...(webhookSecret === null ? {} : { webhookSecret }),
+      logger: consola,
+      serviceUpdate,
+    })
+    consola.success(`Dashboard: ${config.server.allowedOrigin}`)
     if (webhook._tag === 'Enabled') consola.success(`Webhooks: http://${webhook.host}:${webhook.port}/webhook`)
     await Promise.race([waitForShutdown(), service.waitForRestart()])
     const stopped = await stopWithin(service.stop, 10_000)
@@ -191,4 +585,72 @@ const command = defineCommand({
   },
 })
 
-void runMain(command)
+type ControlCliInvocation = { _tag: 'Run'; rawArgs: string[] } | { _tag: 'Fail'; error: ControlCommandError }
+
+const controlValueOptionFlags = ['--config', '-c', '--url', '--password-file']
+
+function hasTaskArgument(rawArgs: readonly string[]): boolean {
+  return rawArgs.some((argument, index) => {
+    const nextArgument = rawArgs[index + 1]
+    return (
+      argument.startsWith('--task=') ||
+      (argument === '--task' && nextArgument !== undefined && !nextArgument.startsWith('-'))
+    )
+  })
+}
+
+function parseControlCliInvocation(rawArgs: readonly string[]): ControlCliInvocation {
+  if (rawArgs[0] !== 'control' || rawArgs.some((argument) => argument === '--help' || argument === '-h'))
+    return { _tag: 'Run', rawArgs: [...rawArgs] }
+
+  const subCommands = controlCommand.subCommands
+  if (typeof subCommands !== 'object' || subCommands === null) return { _tag: 'Run', rawArgs: [...rawArgs] }
+
+  // citty dispatches on the first positional argument, so connection options
+  // between `control` and the nested command name must not hide the name.
+  // Skip value-taking option tokens, then forward those options to the end,
+  // where the subcommand parses them.
+  const leading: string[] = []
+  let index = 1
+  let argument = rawArgs[index]
+  while (argument !== undefined && argument.startsWith('-') && argument !== '--') {
+    const nextArgument = rawArgs[index + 1]
+    const takesValue =
+      !argument.includes('=') &&
+      controlValueOptionFlags.includes(argument) &&
+      nextArgument !== undefined &&
+      !nextArgument.startsWith('-')
+    leading.push(...(takesValue ? [argument, nextArgument] : [argument]))
+    index += takesValue ? 2 : 1
+    argument = rawArgs[index]
+  }
+  const commandName = rawArgs[index]
+  if (commandName === undefined || !Object.hasOwn(subCommands, commandName)) {
+    return {
+      _tag: 'Fail',
+      error: { _tag: 'UnknownControlCommand', message: 'Select a valid control command.' },
+    }
+  }
+
+  const nestedRawArgs = leading.length === 0 ? [...rawArgs] : ['control', ...rawArgs.slice(index), ...leading]
+  if ((commandName === 'activity' || commandName === 'cancel') && !hasTaskArgument(nestedRawArgs.slice(2))) {
+    return {
+      _tag: 'Fail',
+      error: { _tag: 'MissingTaskId', message: 'Set --task to one Task ID.' },
+    }
+  }
+
+  return { _tag: 'Run', rawArgs: nestedRawArgs }
+}
+
+const cliArguments = process.argv.slice(2)
+// A leading `--config` binds to the root command in citty, so forward the
+// connection options behind every subcommand name, where they parse them.
+const normalizedCliArguments = forwardLeadingOptions(cliArguments, controlValueOptionFlags, rootSubCommandNames)
+const controlCliInvocation = parseControlCliInvocation(normalizedCliArguments)
+if (controlCliInvocation._tag === 'Fail') {
+  writeJson(controlCliInvocation.error, process.stderr)
+  process.exitCode = 1
+} else {
+  void runMain(command, { rawArgs: controlCliInvocation.rawArgs })
+}

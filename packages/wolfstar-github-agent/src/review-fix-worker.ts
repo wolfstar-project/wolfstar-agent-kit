@@ -1,20 +1,28 @@
 import type { AgentActivityLog } from './agent-activity.ts'
+import type { RepositoryMemory } from './agent-context.ts'
 import type { AgentRuntimeSource } from './agent-profile.ts'
+import type { AgentPhase } from './agent-progress.ts'
 import type { GitHubAgentSource } from './github-agent-source.ts'
 import type { Result } from './result.ts'
 import type { ReviewStatusController } from './review-status-controller.ts'
 import type { JournalStore } from './store.ts'
-import type {
-  AgentProgress,
-  ClaimedReviewFixTask,
-  MutationWorkerOutcome,
-  RepositoryMapping,
-  ReviewFinding,
-} from './types.ts'
+import type { ClaimedReviewFixTask, MutationWorkerOutcome, RepositoryMapping, ReviewFinding } from './types.ts'
 import type { ReviewFixWorktreeManager } from './worktree.ts'
 import { createHash } from 'node:crypto'
+import {
+  CHECK_SCOPES,
+  checkBudgetLines,
+  findRepositoryMemory,
+  instructionFilesLine,
+  listInstructionFiles,
+  repositoryMemoryLine,
+  TOOLCHAIN_LINES,
+  UNIT_TEST_LINES,
+} from './agent-context.ts'
+import { agentPhase } from './agent-progress.ts'
 import { runParsedAgentTurn } from './agent-turn.ts'
-import { canRepairPullRequestHead } from './repository-policy.ts'
+import { repairRoundHistory } from './repair-rounds.ts'
+import { canRepairBaseline, canRepairPullRequestHead } from './repository-policy.ts'
 import { err, ok } from './result.ts'
 import { cleanLine } from './text.ts'
 
@@ -48,14 +56,25 @@ interface AgentResponsePayload {
 
 export interface ReviewFixWorkerOptions {
   activityLog?: Pick<AgentActivityLog, 'record'>
-  github: Pick<GitHubAgentSource, 'getPullRequestReviewSnapshot'>
+  /**
+   * Wolfstar's Claude Code home, which holds the per-repository memory.
+   *
+   * Absent means no memory reaches the turn, which is how a test runs.
+   */
+  claudeHome?: string
+  github: Pick<GitHubAgentSource, 'getPullRequestReviewSnapshot' | 'findOpenPullRequestForBranch'>
   now: () => Date
   onProgressPublishFailure?: (task: ClaimedReviewFixTask, reason: string) => void
   runtime: AgentRuntimeSource
   status: Pick<ReviewStatusController, 'publishRepair'>
   store: Pick<
     JournalStore,
-    'getReviewFixFindings' | 'getWorkerSession' | 'requestReviewRerun' | 'saveWorkerSession' | 'updateAgentProgress'
+    | 'getReviewFixFindings'
+    | 'getWorkerSession'
+    | 'recordRepairReport'
+    | 'requestReviewRerun'
+    | 'saveWorkerSession'
+    | 'updateAgentProgress'
   >
   validateMapping: (mapping: RepositoryMapping) => Promise<Result<RepositoryMapping, string>>
   worktrees: ReviewFixWorktreeManager
@@ -104,22 +123,47 @@ function parseResponse(text: string): Promise<Result<AgentResponse, string>> {
     .catch(() => err('The Agent returned malformed Repair JSON.'))
 }
 
-function prompt(task: ClaimedReviewFixTask, findings: ReviewFinding[]): string {
+export interface ReviewFixPromptInput {
+  task: ClaimedReviewFixTask
+  findings: readonly ReviewFinding[]
+  /** Instruction file names that exist in the prepared worktree. */
+  instructionFiles: readonly string[]
+  /** The memory index this repository has, or null when it has none. */
+  memory?: RepositoryMemory | null
+}
+
+/** The Repair prompt. Exported so tests can assert its contract without an Agent. */
+export function reviewFixPrompt(input: ReviewFixPromptInput): string {
+  const { task, findings } = input
+  const merged = task.pullRequest.state === 'closed' && task.pullRequest.mergedAt !== null
+  const memory = repositoryMemoryLine(input.memory ?? null)
+  const memoryBlock = memory === '' ? '' : `${memory}\n`
   return `Repair the exact material Review findings for ${task.repository}#${task.pullRequestNumber}.
 
 Work as a fresh local Agent session inside this prepared Git worktree.
-Read repository AGENTS.md and trusted contributor instructions.
-Apply the unit-tests skill before every bug or validation fix.
-Treat the findings below as the complete Repair scope.
+${instructionFilesLine(input.instructionFiles)}
+${memoryBlock}Treat the findings below as the complete Repair scope.
+${repairRoundHistory(task.rounds)}
+${UNIT_TEST_LINES}
 For each finding, write the named failing regression test first. Confirm it fails for the stated reason.
-Fix every finding. Run focused checks that cover every changed behavior.
+${merged ? 'The original pull request merged. This worktree starts at the current default branch. Confirm each finding still exists here before editing. Ignore findings already fixed. Return disputed if none remain. Repair only confirmed bugs. Return blocked for unsafe scope. The controller opens one separate pull request linked to the original.' : 'Fix every finding.'}
+${checkBudgetLines(CHECK_SCOPES.changedFiles)}
+${TOOLCHAIN_LINES}
+For a visual finding, read the pull request image and reproduce the defect at the shown viewport.
+Download images only from GitHub-hosted media URLs (github.com/user-attachments, user-images.githubusercontent.com, private-user-images.githubusercontent.com, and other github.com-hosted media paths).
+If a private-user-images URL returns 404 or 401, refetch it with an Authorization header carrying the repository-scoped token from the authenticated GitHub CLI.
+Record any other image host in the summary without downloading it.
+Store verification media outside the worktree. Capture and inspect the repaired view before returning repaired.
+Do not mark a UI repair complete while a visible defect remains.
 Do not expand scope. Return disputed only when a regression test or exact source behavior proves the finding false at this head commit.
 Return blocked when the requested scope is unsafe or cannot be verified.
+If a finding needs only a title or description edit, return blocked with the exact replacement text.
+Do not edit GitHub metadata or invent a file change to satisfy the result schema.
 Do not stage, commit, push, approve, merge, or post comments. The controller owns those operations.
 Choose a concise commit message that describes the actual fix.
 Return an empty commitMessage with outcome blocked or disputed.
 Return every schema field.
-Return only the required JSON.
+Return only the required JSON. Do not wrap it in a code fence.
 
 Base SHA: ${task.pullRequest.baseSha}
 Head SHA: ${task.pullRequest.headSha}
@@ -142,17 +186,18 @@ function disputeRequestId(taskId: string, findings: ReviewFinding[]): string {
 export function createReviewFixWorker(options: ReviewFixWorkerOptions): ReviewFixWorker {
   return {
     async run(task, signal) {
-      const progress = async (value: AgentProgress): Promise<Result<void, string>> => {
+      const progress = async (phase: AgentPhase): Promise<Result<void, string>> => {
         const saved = options.store.updateAgentProgress({
           taskId: task.id,
           taskKind: task.kind,
           workerId: task.state.workerId,
           fence: task.state.fence,
-          progress: value,
+          progress: phase,
           at: options.now().toISOString(),
         })
         if (!saved) return err('This Agent is no longer assigned to the current pull request.')
-        const published = await options.status.publishRepair(task, value, signal)
+        if (task.pullRequest.state === 'closed' && task.pullRequest.mergedAt !== null) return ok(undefined)
+        const published = await options.status.publishRepair(task, phase, signal)
         if (published._tag === 'Err' && !signal.aborted) options.onProgressPublishFailure?.(task, published.error)
         return ok(undefined)
       }
@@ -166,18 +211,26 @@ export function createReviewFixWorker(options: ReviewFixWorkerOptions): ReviewFi
       )
       if (snapshot._tag === 'Err') return snapshot
       const current = snapshot.value.pullRequest
+      const merged = current.state === 'closed' && current.mergedAt !== null
       if (
-        current.state !== 'open' ||
+        (current.state !== 'open' && !merged) ||
         current.draft ||
-        current.mergeState !== 'clean' ||
+        (!merged && current.mergeState !== 'clean') ||
         current.headSha !== task.pullRequest.headSha ||
-        !canRepairPullRequestHead(validated.value, current)
+        (merged ? !canRepairBaseline(validated.value) : !canRepairPullRequestHead(validated.value, current))
       ) {
         return ok({
           _tag: 'ActionRequired',
           reason: 'The pull request no longer has safe Repair authority.',
           evidence: task.revisionId,
         })
+      }
+      const headRef = `${validated.value.writablePullRequestHeadPrefixes[0]}review-${task.pullRequestNumber}-${current.headSha.slice(0, 12)}`
+      if (merged) {
+        const existing = await options.github.findOpenPullRequestForBranch(validated.value, headRef, signal)
+        if (existing._tag === 'Err') return existing
+        if (existing.value !== null)
+          return ok({ _tag: 'Completed', evidence: `Repair pull request: ${existing.value.url}` })
       }
       const findings = options.store.getReviewFixFindings(task.repository, task.pullRequestNumber, task.revisionId)
       if (findings.length === 0) return ok({ _tag: 'Superseded', reason: 'The current Review has no open finding.' })
@@ -187,16 +240,23 @@ export function createReviewFixWorker(options: ReviewFixWorkerOptions): ReviewFi
         signal,
       )
       if (prepared._tag === 'Err') return prepared
-      const ready = await progress({ percent: 35, label: 'Repair worktree ready' })
+      const ready = await progress(agentPhase('WorktreeReady', 'Repair worktree ready'))
       if (ready._tag === 'Err') return ready
+      const instructionFiles = await listInstructionFiles(prepared.value.path)
+      // The slug comes from the primary checkout, never from this worktree.
+      const memory =
+        options.claudeHome === undefined
+          ? null
+          : await findRepositoryMemory({ claudeHome: options.claudeHome, checkoutPath: validated.value.checkout })
 
       const turn = await runParsedAgentTurn(
         { ...options, parse: parseResponse },
         {
           freshSession: true,
+          ...(memory === null ? {} : { instructionPaths: [memory.indexPath] }),
           number: task.pullRequestNumber,
-          progress: { current: { percent: 35, label: 'Repair worktree ready' }, report: progress, work: 'fix' },
-          prompt: prompt(task, findings),
+          progress: { current: agentPhase('WorktreeReady', 'Repair worktree ready'), report: progress, work: 'fix' },
+          prompt: reviewFixPrompt({ task, findings, instructionFiles, memory }),
           repository: task.repository,
           role: 'review_fix',
           schema: outputSchema,
@@ -215,6 +275,12 @@ export function createReviewFixWorker(options: ReviewFixWorkerOptions): ReviewFi
         })
       }
       if (turn.value.value.outcome === 'disputed') {
+        if (merged)
+          return ok({
+            _tag: 'Completed',
+            evidence: `No Repair remains on the default branch: ${turn.value.value.summary}`,
+            usage: turn.value.usage,
+          })
         const evidence = JSON.stringify({ findings, checks: turn.value.value.checks })
         const rerun = options.store.requestReviewRerun({
           repository: task.repository,
@@ -249,15 +315,41 @@ export function createReviewFixWorker(options: ReviewFixWorkerOptions): ReviewFi
         })
       }
 
+      // The report outlives this Task. A later Repair round reads it to avoid
+      // repeating an approach Review already rejected.
+      const reported = options.store.recordRepairReport({
+        taskId: task.id,
+        workerId: task.state.workerId,
+        fence: task.state.fence,
+        at: options.now().toISOString(),
+        summary: turn.value.value.summary,
+        checks: turn.value.value.checks,
+      })
+      if (!reported) return err('The Repair report lost its fenced lease before the commit was verified.')
       const verified = await options.worktrees.verify(task, prepared.value, signal)
       if (verified._tag === 'Err') return verified
-      const checked = await progress({ percent: 90, label: 'Repair checked' })
+      if (verified.value.changedFiles === 0) {
+        return ok({
+          _tag: 'ActionRequired',
+          reason: `Repair produced no file changes. ${turn.value.value.summary}`,
+          evidence: JSON.stringify({ findings, checks: turn.value.value.checks }),
+          usage: turn.value.usage,
+        })
+      }
+      const checked = await progress(agentPhase('Checked', 'Repair checked'))
       if (checked._tag === 'Err') return checked
 
       const frozen = await options.github.getPullRequestReviewSnapshot(validated.value, task.pullRequestNumber, signal)
       if (frozen._tag === 'Err') return frozen
-      if (frozen.value.pullRequest.state !== 'open' || frozen.value.pullRequest.headSha !== prepared.value.headSha)
+      if (
+        merged
+          ? frozen.value.pullRequest.mergedAt === null ||
+            frozen.value.pullRequest.headSha !== current.headSha ||
+            frozen.value.pullRequest.baseSha !== prepared.value.baseSha
+          : frozen.value.pullRequest.state !== 'open' || frozen.value.pullRequest.headSha !== prepared.value.headSha
+      ) {
         return err('The pull request changed before the controller committed the Repair.')
+      }
 
       const committed = await options.worktrees.commit(
         task,
@@ -267,8 +359,29 @@ export function createReviewFixWorker(options: ReviewFixWorkerOptions): ReviewFi
         signal,
       )
       if (committed._tag === 'Err') return committed
-      const committedProgress = await progress({ percent: 95, label: 'Repair ready to publish' })
+      const committedProgress = await progress(agentPhase('Committed', 'Repair ready to publish'))
       if (committedProgress._tag === 'Err') return committedProgress
+      if (merged) {
+        return ok({
+          _tag: 'Publish',
+          usage: turn.value.usage,
+          publication: {
+            _tag: 'OpenPullRequest',
+            taskKind: 'review_fix',
+            pullRequestNumber: task.pullRequestNumber,
+            pullRequestTitle: turn.value.value.commitMessage,
+            pullRequestBody: `Review of #${task.pullRequestNumber} finished after merge.\n\n${turn.value.value.summary}\n\n> 🤖 AI disclosure: [Wolfstar Agent Kit](https://github.com/wolfstar-project/wolfstar-agent-kit) modified this description. [AI open source policy](https://harlanzw.com/blog/ai-in-open-source).`,
+            commitSha: committed.value.commitSha,
+            baseSha: committed.value.baseSha,
+            baseRef: validated.value.defaultBranch,
+            expectedHeadSha: committed.value.baseSha,
+            headRef,
+            artifactRef: committed.value.artifactRef,
+            patchDigest: committed.value.digest,
+            changedFiles: committed.value.changedFiles,
+          },
+        })
+      }
       return ok({
         _tag: 'Publish',
         usage: turn.value.usage,

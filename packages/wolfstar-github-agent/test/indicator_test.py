@@ -727,6 +727,60 @@ class IndicatorDisplayTest(unittest.TestCase):
         host = next(item for item in menu.get_children() if item.get_label().startswith('⚪ Hogwild'))
         self.assertIn('Stop accepting new jobs…', menu_labels(host.get_submenu()))
 
+    def test_offers_every_agent_slot_count_the_controller_allows(self):
+        dashboard = {
+            'hostCapacity': {'localActive': 1, 'localMaximum': 2, 'desktopActive': 0, 'desktopMaximum': 1, 'desktopConnected': True},
+            'agentSlots': {'hogwildCeiling': 4, 'hogwildMemoryMaximum': 2, 'desktopCeiling': 2, 'memoryPerAgentGiB': 8},
+        }
+
+        hogwild = indicator.agent_slot_choices(dashboard, 'hogwild')
+        desktop = indicator.agent_slot_choices(dashboard, 'desktop')
+
+        self.assertEqual([entry['label'] for entry in hogwild if entry['_tag'] == 'Choice'], ['0', '1', '2', '3', '4'])
+        self.assertEqual([entry['label'] for entry in hogwild if entry.get('selected')], ['2'])
+        self.assertEqual([entry['label'] for entry in desktop if entry['_tag'] == 'Choice'], ['0', '1', '2'])
+        self.assertEqual([entry['label'] for entry in desktop if entry.get('selected')], ['1'])
+
+    def test_offers_no_agent_slot_count_before_the_controller_reports_one(self):
+        self.assertEqual(indicator.agent_slot_choices({}, 'hogwild'), [])
+        self.assertEqual(indicator.agent_slot_choices(None, 'desktop'), [])
+
+    def test_sets_one_agent_slot_count_from_the_host_submenu(self):
+        sources = {'wolfstarGithubAgent': {'_tag': 'Available', 'dashboard': {
+            'status': 'ready',
+            'agentControl': {'_tag': 'Running'},
+            'agents': [],
+            'queue': [],
+            'incidents': [],
+            'hostTasks': [{'taskId': 'task-1', 'host': 'hogwild'}],
+            'hostCapacity': {'localActive': 1, 'localMaximum': 2, 'desktopActive': 0, 'desktopMaximum': 1, 'desktopConnected': True},
+            'agentSlots': {'hogwildCeiling': 4, 'hogwildMemoryMaximum': 2, 'desktopCeiling': 2, 'memoryPerAgentGiB': 8},
+        }}}
+        stub = StubIndicator()
+        requested = []
+
+        indicator.build_menu(
+            stub,
+            sources,
+            None,
+            lambda: None,
+            lambda *_args: None,
+            lambda *_args: None,
+            lambda *_args: None,
+            None,
+            lambda host, slots: requested.append((host, slots)),
+        )
+
+        menu = stub.menus[0]
+        host = next(item for item in menu.get_children() if item.get_label().startswith('Hogwild'))
+        self.assertEqual(host.get_label(), 'Hogwild · 1 of 2 running')
+        labels = menu_labels(host.get_submenu())
+        self.assertIn('Agent slots', labels)
+        self.assertIn('● 2', labels)
+        self.assertIn('○ 4', labels)
+        next(child for child in host.get_submenu().get_children() if child.get_label() == '○ 4').emit('activate')
+        self.assertEqual(requested, [('hogwild', 4)])
+
     def test_agent_menu_does_not_include_github_actions(self):
         sources = indicator.read_system_sources(lambda: {'status': 'ready'})
         stub = StubIndicator()
@@ -1294,6 +1348,48 @@ class WatchLogTest(unittest.TestCase):
 
         self.assertEqual(output.getvalue().count('message 005'), 0)
         self.assertEqual(output.getvalue().count('message 099'), 1)
+
+
+class TrayHostTest(unittest.TestCase):
+    def test_assigns_live_tasks_to_hosts_and_keeps_waiting_tasks_visible(self):
+        def agent(task_id):
+            return {'_tag': 'ActiveAgent', 'id': task_id, 'role': 'issue_triage',
+                    'repository': 'wolfstar-project/example', 'itemNumber': 12,
+                    'subjectUrl': 'https://github.com/wolfstar-project/example/issues/12',
+                    'progress': {'label': task_id}, 'session': {'_tag': 'Disconnected'}}
+        dashboard = {'status': 'ready', 'agents': [agent('remote'), agent('local'), agent('waiting')],
+                     'hostTasks': [{'host': 'hogwild', 'taskId': 'remote'}, {'host': 'desktop', 'taskId': 'local'}],
+                     'desktop': {'connected': True, 'report': {'reservedGiB': 12, 'memoryGiB': 16}}}
+        stub = StubIndicator()
+        indicator.build_menu(stub, {'wolfstarGithubAgent': {'_tag': 'Available', 'dashboard': dashboard}},
+                             None, lambda: None, lambda *_: None, lambda *_: None, lambda *_: None)
+        menu = stub.menus[0]
+        for host, task_id in [('Hogwild', 'remote'), ('Desktop', 'local')]:
+            section = next(item for item in menu.get_children() if item.get_label().startswith(host + ' ·'))
+            task = next(item for item in section.get_submenu().get_children() if item.get_submenu())
+            self.assertEqual(menu_labels(task.get_submenu())[0], task_id)
+        self.assertTrue(any(item.get_submenu() and 'waiting' in menu_labels(item.get_submenu())
+                            for item in menu.get_children()))
+        self.assertIn('Desktop memory · 12 / 16 GiB', menu_labels(menu))
+
+    def test_running_jobs_use_host_status_when_github_lags(self):
+        runner = {'Activity': {'_tag': 'Running', 'job': 'unit'}, 'Names': 'runner-1',
+                  'RunnerLabels': {'rocks.wolfstar.desktop-runner.repository': 'wolfstar-project/example'}}
+        stub = StubIndicator()
+        runner_indicator.build_menu(stub, {'_tag': 'Available', 'hosts': [
+            {'_tag': 'Available', 'name': 'Desktop', 'runners': [runner]}]},
+            {'_tag': 'Available', 'jobs': []}, None, lambda: None, lambda *_: None)
+        labels = menu_labels(stub.menus[0])
+        self.assertNotIn('Running jobs · 0', labels)
+        host = next(item for item in stub.menus[0].get_children() if 'Desktop' in item.get_label())
+        self.assertTrue(any('Running · unit' in label for label in menu_labels(host.get_submenu())))
+
+    def test_surfaces_docker_permission_error(self):
+        def denied(host):
+            raise subprocess.CalledProcessError(1, ['docker', 'ps'], stderr='permission denied on Docker socket')
+        with patch.object(runner_indicator, 'request_runners', denied):
+            result = runner_indicator.request_runner_host({'name': 'Hogwild', 'dockerHost': 'ssh://hogwild'})
+        self.assertIn('permission denied on Docker socket', result['message'])
 
 
 if __name__ == '__main__':

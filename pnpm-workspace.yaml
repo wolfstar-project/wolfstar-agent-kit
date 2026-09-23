@@ -1,47 +1,49 @@
-shellEmulator: true
+minimumReleaseAgeExcludePrune: true
 
 trustPolicy: no-downgrade
+trustPolicyIgnoreAfter: 262800
+shellEmulator: true
 
 packages:
   - packages/*
-
-trustPolicyIgnoreAfter: 262800
-
-catalog:
-  '@anthropic-ai/claude-agent-sdk': ^0.3.252
-  '@iconify-json/octicon': ^1.2.20
-  '@iconify-json/simple-icons': ^1.2.93
-  '@nuxt/fonts': ^0.14.0
-  '@nuxt/icon': ^2.5.0
-  '@nuxt/ui': ^4.10.0
-  '@openai/codex-sdk': ^0.147.0
-  '@types/node': ^26.2.0
-  '@vueuse/nuxt': ^14.4.0
-  citty: ^0.2.2
-  consola: ^3.4.2
-  h3: ^2.0.1-rc.26
-  nuxt: ^4.5.2
-  obuild: ^0.4.38
-  octokit: ^5.0.5
-  oxfmt: ^0.65.0
-  oxlint: ^1.80.0
-  srvx: ^0.12.5
-  typescript: 6.0.3
-  vitest: ^4.1.10
-  vue-tsc: ^3.3.10
-  yaml: ^2.9.0
 
 allowBuilds:
   esbuild: false
   vue-demi: true
 
 minimumReleaseAgeExclude:
-  - '@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.252'
-  - '@anthropic-ai/claude-agent-sdk-darwin-x64@0.3.252'
-  - '@anthropic-ai/claude-agent-sdk-linux-arm64-musl@0.3.252'
-  - '@anthropic-ai/claude-agent-sdk-linux-arm64@0.3.252'
-  - '@anthropic-ai/claude-agent-sdk-linux-x64-musl@0.3.252'
-  - '@anthropic-ai/claude-agent-sdk-linux-x64@0.3.252'
-  - '@anthropic-ai/claude-agent-sdk-win32-arm64@0.3.252'
-  - '@anthropic-ai/claude-agent-sdk-win32-x64@0.3.252'
-  - '@anthropic-ai/claude-agent-sdk@0.3.252'
+  - '@iconify-json/octicon@1.2.36'
+  - '@iconify-json/simple-icons@1.2.97'
+  - '@harlan-zw/jev@0.2.4'
+
+catalog:
+  '@anthropic-ai/claude-agent-sdk': ^0.3.252
+  '@coldtea/pr-lens-renderer': ^0.2.6
+  '@coldtea/pr-lens-schema': ^0.4.0
+  '@harlan-zw/jev': ^0.2.0
+  '@iconify-json/octicon': ^1.2.36
+  '@iconify-json/simple-icons': ^1.2.97
+  '@nuxt/fonts': ^0.14.0
+  '@nuxt/icon': ^2.5.1
+  '@nuxt/ui': ^4.11.1
+  '@openai/codex-sdk': ^0.155.1
+  '@types/node': ^26.6.2
+  '@vueuse/nuxt': ^15.0.0
+  citty: ^0.2.2
+  consola: ^3.4.2
+  h3: ^2.0.1-rc.32
+  mermaid: ^11.12.0
+  nuxt: ^4.5.2
+  nuxt-skew-protection: ^1.5.4
+  obuild: ^0.4.40
+  octokit: ^5.0.5
+  oxfmt: ^0.65.0
+  oxlint: ^1.80.0
+  srvx: ^1.0.5
+  typescript: 6.0.3
+  vitepress: ^1.6.4
+  vitepress-plugin-mermaid: ^2.0.17
+  vitest: ^5.0.1
+  vue: ^3.5.43
+  vue-tsc: ^3.3.11
+  yaml: ^2.9.1

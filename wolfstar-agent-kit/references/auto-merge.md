@@ -11,17 +11,51 @@ The label never changes whether a pull request is reviewed. Automated review run
 Add it for a change with no judgement in it:
 
 - comments or wording inside non-Markdown files, with no behaviour change
+- Markdown that nothing executes: a README, docs, or a blog post
 - dependency bump or lockfile refresh
 - formatting, lint autofix, or generated file refresh
 - changelog or version bump
 
 Never add it for a change a reviewer must judge: source behaviour, public API, configuration, CI workflow, authentication, authorization, payments, data migrations, deletes, or user-visible copy.
 
+Markdown an agent reads as instructions is source behaviour. That covers Skills, `agent-context/`, `CLAUDE.md`, `AGENTS.md`, `GLOSSARY.md`, and `.github` issue or pull request templates. A change there alters what every agent does in every repository, so Wolfstar merges it.
+
 When unsure, leave it off. A missing label costs one human merge. A wrong label ships an unreviewed change.
 
 Remove the label when a pull request grows past the change it was added for.
 
-Markdown-only work never reaches this policy. The `pr` skill pushes it directly to `origin/main`.
+## Merge risk
+
+A repository on `auto_merge.pull_requests: contained` does not need the label for a low risk code change. Every Review returns a Merge risk, and a `Contained` verdict merges on its own.
+
+| Verdict      | Means                                  | Goes to    |
+| ------------ | -------------------------------------- | ---------- |
+| `Contained`  | a mistake costs one revert commit      | Auto merge |
+| `Reviewable` | a person should read it                | Wolfstar   |
+| `Sensitive`  | a mistake is expensive or hard to undo | Wolfstar   |
+
+Two independent answers produce it and the more dangerous wins, so `Contained` needs both. The controller computes a floor from the changed paths and counts. The Review Agent claims the rest from the diff, which is the only part that sees blast radius.
+
+A file an agent reads as instructions is always `Sensitive`, and a repository cannot widen its own path list to cover one.
+
+This changes what the label is for, on those repositories. The label used to be the only way a pull request merged itself. It is now an override a person applies when they have read the change and disagree with the verdict. Set `merge_risk.label_overrides_risk: false` to stop even that beating a `Sensitive` verdict.
+
+Merge risk routes the merge and never the Review. Every tracked pull request is still reviewed.
+
+## Repository scope
+
+A repository can widen Auto merge from labelled pull requests to every pull request:
+
+```yaml
+- github: wolfstar-project/melbjs-clone
+  auto_merge:
+    pull_requests: every
+    minimum_confidence: 80
+```
+
+With `pull_requests: every`, no label is needed and the repository's own `minimum_confidence` replaces the service-wide one. Every other condition below still holds: owned repository, trusted author, published `READY` review for the exact head commit, no open finding. The block requires an owned repository with `pr_review: true`.
+
+Use it only where a wrong merge costs little, such as a demo site. Leave it off every repository Wolfstar would want to read first. Without the block, or with `pull_requests: labelled`, the label decides.
 
 ## When the service hands over
 
@@ -32,7 +66,7 @@ condition holds:
 2. The repository owner matches the authenticated GitHub login.
 3. The pull request author is a trusted author for that repository.
 4. Automated review returned `READY` for the exact current head commit.
-5. Review confidence meets the configured minimum.
+5. Review confidence meets the configured minimum: the repository's own with `pull_requests: every`, else `auto_merge.minimum_confidence`.
 6. The pull request is open, is not a draft, and GitHub reports it mergeable.
 
 The handover pins the reviewed head commit as `expectedHeadOid`, so GitHub

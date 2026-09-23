@@ -49,8 +49,41 @@ function fixture(): DashboardSnapshot {
     mergeState: 'clean',
   })
   return dashboardSnapshot({
+    hostCapacity: { localActive: 1, localMaximum: 2, desktopActive: 1, desktopMaximum: 1, desktopConnected: true },
+    agentSlots: { hogwildCeiling: 4, hogwildMemoryMaximum: 2, desktopCeiling: 2, memoryPerAgentGiB: 8 },
+    hostTasks: [
+      { taskId: hex('1'), host: 'desktop' },
+      { taskId: 'run-1', host: 'hogwild' },
+    ],
+    desktop: {
+      connected: true,
+      report: {
+        memoryGiB: 16,
+        reservedGiB: 12,
+        agents: 1,
+        actions: 1,
+        jobs: {
+          _tag: 'Available',
+          jobs: [
+            {
+              runner: 'desktop-1',
+              repository: nuxtSeo,
+              name: 'Build and test sitemap fixtures across supported Nuxt versions',
+              startedAt: Date.now() - 120_000,
+            },
+          ],
+        },
+      },
+      requestedMemoryGiB: null,
+    },
     status: 'degraded',
     mutationsEnabled: true,
+    serviceUpdate: {
+      _tag: 'Available',
+      deployedCommit: '4f57e66b7d1c2e3f4a5b6c7d8e9f001122334455',
+      latestCommit: 'e98866d07987ca2390299382c1a8352bd016e741',
+      checkedAt: minutesAgo(2),
+    },
     agentStart: { _tag: 'Available' },
     openPullRequests: 5,
     providerCapacities: [
@@ -208,7 +241,7 @@ function fixture(): DashboardSnapshot {
         subjectUrl: `https://github.com/${unhead}/issues/731`,
         createdAt: minutesAgo(120),
         updatedAt: minutesAgo(15),
-        state: { _tag: 'AwaitingApproval', kind: 'issue_work' },
+        state: { _tag: 'AwaitingApproval', kind: 'issue_triage' },
       },
       {
         kind: 'pull_request',
@@ -313,10 +346,10 @@ function fixture(): DashboardSnapshot {
         scheduledFor: minutesAgo(600),
         specSha: hex('7'),
         mode: 'report',
-        state: { _tag: 'Completed', evidence: 'Ranked 6 open pull requests.' },
+        state: { _tag: 'Running', workerId: 'routine-agent', leaseExpiresAt: daysAhead(0.01) },
         fence: 1,
         attempts: 1,
-        progress: { percent: 100, label: 'Done' },
+        progress: { percent: 55, label: 'Reviewing pull requests' },
         usage: { _tag: 'Unavailable' },
         createdAt: minutesAgo(600),
         updatedAt: minutesAgo(590),
@@ -331,6 +364,92 @@ function fixture(): DashboardSnapshot {
           },
         ],
         reportState: 'Published',
+      },
+    ],
+    batches: [
+      {
+        id: hex('b1'),
+        repository: nuxtSeo,
+        state: { _tag: 'Running', workerId: 'lease-2', fence: 1, leaseExpiresAt: daysAhead(0.1) },
+        issues: [
+          {
+            taskId: hex('c1'),
+            issueNumber: 795,
+            title: 'Runner doc misses the burst-registration DNS failure',
+            body: '',
+            triageSummary: null,
+            relatedIssues: [796],
+            target: 'docs/ops/github-actions-runner.md',
+          },
+          {
+            taskId: hex('c2'),
+            issueNumber: 796,
+            title: 'DataForSEO refusals warn once per day',
+            body: '',
+            triageSummary: null,
+            relatedIssues: [795],
+            target: 'layers/pro/dataforseo/server/utils/pipeline.ts',
+          },
+          {
+            taskId: hex('c3'),
+            issueNumber: 797,
+            title: 'Public token callers cannot resolve a Site by URL',
+            body: '',
+            triageSummary: null,
+            relatedIssues: [],
+            target: 'layers/pro/sites/server/utils/require-site-access.ts',
+          },
+        ],
+        units: [
+          {
+            id: 'unit-0',
+            position: 0,
+            primaryTaskId: hex('c1'),
+            issueNumbers: [795, 796],
+            dependsOnUnitId: null,
+            rationale: 'Both change the DataForSEO pipeline and its runbook.',
+            state: { _tag: 'Published', pullRequestNumber: 801, headRef: 'fix/issue-795', headSha: hex('5') },
+          },
+          {
+            id: 'unit-1',
+            position: 1,
+            primaryTaskId: hex('c3'),
+            issueNumbers: [797],
+            dependsOnUnitId: 'unit-0',
+            rationale: 'Reuses the site lookup the first unit extracts.',
+            state: { _tag: 'Running' },
+          },
+        ],
+        createdAt: minutesAgo(25),
+        updatedAt: minutesAgo(1),
+      },
+      {
+        id: hex('b2'),
+        repository: unhead,
+        state: { _tag: 'Running', workerId: 'lease-3', fence: 1, leaseExpiresAt: daysAhead(0.1) },
+        issues: [
+          {
+            taskId: hex('c4'),
+            issueNumber: 30,
+            title: 'fetch-head throws for expected upstream failures',
+            body: '',
+            triageSummary: null,
+            relatedIssues: [31],
+            target: 'layers/tools/server/api/tools/fetch-head.get.ts',
+          },
+          {
+            taskId: hex('c5'),
+            issueNumber: 31,
+            title: 'fetch-head 5xx mapping',
+            body: '',
+            triageSummary: null,
+            relatedIssues: [30],
+            target: 'layers/tools/server/api/tools/fetch-head.get.ts',
+          },
+        ],
+        units: null,
+        createdAt: minutesAgo(2),
+        updatedAt: minutesAgo(2),
       },
     ],
   })
@@ -532,4 +651,35 @@ function historyReviewAgents(): MockReviewAgent[] {
   ]
 }
 
-state = { ...state, agents: [...state.agents, ...historyReviewAgents()] }
+/*
+ * Pull requests triage skipped. They queue no Task and run no Review, so
+ * History is the only place they appear and the mock needs its own.
+ */
+function historyTriageSkips(): DashboardSnapshot['triageSkips'] {
+  return [
+    {
+      key: 'triage-skip:wolfstar-project/nuxt-seo#601@rev-skip-1',
+      repository: 'wolfstar-project/nuxt-seo',
+      pullRequestNumber: 601,
+      title: 'docs: rework the README header and pitch',
+      url: 'https://github.com/wolfstar-project/nuxt-seo/pull/601',
+      decidedBy: 'model',
+      confidence: 0.95,
+      reason: 'model: classification chose skip with confidence 0.95.',
+      decidedAt: minutesAgo(90),
+    },
+    {
+      key: 'triage-skip:unjs/unhead#318@rev-skip-2',
+      repository: 'unjs/unhead',
+      pullRequestNumber: 318,
+      title: 'docs: fix a broken link in the migration guide',
+      url: 'https://github.com/unjs/unhead/pull/318',
+      decidedBy: 'rule',
+      confidence: null,
+      reason: 'rule: every changed path is inside the prose set.',
+      decidedAt: minutesAgo(260),
+    },
+  ]
+}
+
+state = { ...state, agents: [...state.agents, ...historyReviewAgents()], triageSkips: historyTriageSkips() }

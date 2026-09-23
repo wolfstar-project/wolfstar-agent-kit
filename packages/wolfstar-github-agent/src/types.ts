@@ -1,7 +1,12 @@
 import type { AgentProviderName, AgentTokenUsage } from './agent-provider.ts'
 import type { AutoMergePolicy } from './auto-merge.ts'
 import type { PullRequestPurpose } from './baseline-repair-state.ts'
+import type { DesktopBroker } from './desktop-broker.ts'
+import type { AgentSlotLimits, HostCapacity } from './host-capacity.ts'
+import type { MergeRisk, MergeRiskPolicy } from './merge-risk.ts'
+import type { PackageReleaseConfig } from './package-release.ts'
 import type { PriorAutomatedReview } from './review-comment.ts'
+import type { RoutineName } from './routines/index.ts'
 
 export type RepositoryOwnership = 'owned' | 'maintained' | 'external'
 
@@ -16,10 +21,40 @@ export type TakeOwnershipConfig =
 
 export type RepositoryAuthentication = 'app' | 'user'
 
+/**
+ * Which pull requests Auto merge may take in one repository.
+ *
+ * `Labelled` is the default: only a pull request carrying the
+ * `wolfstar-agent-auto-merge` label, at or above the service-wide minimum
+ * confidence. `Every` takes every trusted-author pull request at or above the
+ * repository's own minimum confidence. It suits a repository where a wrong
+ * merge costs little, such as a demo site, and never a repository Wolfstar would
+ * want to read first.
+ */
+export type RepositoryAutoMergeScope =
+  | { _tag: 'Labelled' }
+  | { _tag: 'Every'; minimumConfidence: number }
+  /**
+   * Auto merge covers a pull request the Merge risk calls Contained.
+   *
+   * The label still works alongside it. `labelOverridesRisk` decides whether
+   * a Sensitive verdict beats a label a person left on a pull request that
+   * has since grown.
+   */
+  | { _tag: 'Contained'; minimumConfidence: number; policy: MergeRiskPolicy; labelOverridesRisk: boolean }
+
 export interface RepositoryMapping {
+  /** Explicit authority for stable patch and minor package releases. */
+  release?: PackageReleaseConfig
   github: string
   checkout: string
   enabled: boolean
+  /** Higher values claim available agent capacity first. Defaults to zero. */
+  priority?: number
+  /** A dedicated repository poll interval. Omit to use the service interval. */
+  pollIntervalSeconds?: number
+  /** Overrides global Reasoning effort for this repository. An explicit pinned effort still wins. */
+  reasoningEffort?: RoleReasoningEfforts
   /**
    * `app` uses the GitHub App installation. `user` uses Wolfstar's own token, for
    * a repository he maintains in an organization that cannot install the App.
@@ -35,6 +70,8 @@ export interface RepositoryMapping {
   pullRequestReview: boolean
   conflictResolution: boolean
   takeOwnership: TakeOwnershipConfig
+  /** Which pull requests Auto merge may take here. Labelled unless the configuration widens it. */
+  autoMerge: RepositoryAutoMergeScope
 }
 
 export interface ExternalRepositoryWatch {
@@ -43,6 +80,19 @@ export interface ExternalRepositoryWatch {
 }
 
 export type WebhookConfig = { _tag: 'Disabled' } | { _tag: 'Enabled'; host: string; port: number; secretPath: string }
+
+/** The Jev classification service, reached through the Cloudflare AI endpoint. */
+export type ClassificationConfig =
+  | { _tag: 'Disabled' }
+  | {
+      _tag: 'Enabled'
+      accountId: string
+      tokenPath: string
+      gatewayId?: string
+      model: string
+      /** The confidence an Issue triage route needs before it bypasses the Agent turn. Null never bypasses. */
+      issueTriageBand: number | null
+    }
 
 /**
  * What may start work on this machine.
@@ -81,6 +131,23 @@ export interface AgentConfig {
      * not against core count: each Agent runs a whole coding session.
      */
     maximumActiveAgents: number | null
+    /**
+     * Memory one Agent is assumed to need, in whole GiB.
+     *
+     * The service divides its memory by this number and never starts more
+     * Agents than the result. Lower it to grant more slots on the same host.
+     */
+    memoryPerAgentGiB: number
+    /** Memory the service leaves to the host, in whole GiB, before it counts slots. */
+    hostReserveGiB: number
+    /**
+     * Reasoning effort overrides per Agent provider and role.
+     *
+     * A listed role replaces that provider's own per-role default. An absent
+     * provider or role keeps the default. A pinned Agent selection with an
+     * explicit Reasoning effort still wins over this.
+     */
+    reasoningEffort: RoleReasoningEfforts
   }
   github: {
     appId: number
@@ -91,6 +158,8 @@ export interface AgentConfig {
     host: string
     port: number
     allowedOrigin: string
+    /** HTTPS or loopback HTTP origins allowed to frame the dashboard. Empty keeps framing denied. */
+    frameAncestors: readonly string[]
   }
   /** Which triggers this machine answers. Defaults to every trigger. */
   triggers: readonly ServiceTrigger[]
@@ -101,6 +170,8 @@ export interface AgentConfig {
    * cannot reach the control API on the dashboard port.
    */
   webhook: WebhookConfig
+  /** The Jev classification service, reached through Cloudflare. Off unless the configuration turns it on. */
+  classification: ClassificationConfig
   storage: {
     path: string
   }
@@ -109,6 +180,8 @@ export interface AgentConfig {
   autoMerge: AutoMergePolicy
   /** New issue work stops when open pull requests reach this limit. */
   maxOpenPullRequests: number
+  /** Whether Ready Routine-filed issues are planned as Batches before Issue work starts. */
+  issueBatches: boolean
   pollIntervalSeconds: number
   issueCutoff: string
   externalRepositories: ExternalRepositoryWatch[]
@@ -214,12 +287,15 @@ export type PullRequestApprovalResult =
   | { _tag: 'Duplicate'; approval: PullRequestApprovalState }
   | { _tag: 'Rejected'; reason: PullRequestApprovalRejection }
 
-export type IssueWorkApprovalResult =
-  | { _tag: 'Approved'; taskId: string }
-  | { _tag: 'Duplicate'; taskId: string }
+/** The work one issue Approval unlocks. Triage runs first; work follows on its own when triage says ready. */
+export type IssueApprovalWork = 'issue_triage' | 'issue_work'
+
+export type IssueApprovalResult =
+  | { _tag: 'Approved'; work: IssueApprovalWork; taskId: string }
+  | { _tag: 'Duplicate'; work: IssueApprovalWork; taskId: string }
   | {
       _tag: 'Rejected'
-      reason: { _tag: 'ItemNotFound' | 'RevisionMismatch' | 'ApprovalNotRequired' | 'TriageRequired' | 'NotAuthorized' }
+      reason: { _tag: 'ItemNotFound' | 'RevisionMismatch' | 'ApprovalNotRequired' | 'NotAuthorized' | 'NothingToStart' }
     }
 
 export type ReviewRerunSource = 'dashboard' | 'github_comment' | 'repair_dispute'
@@ -251,9 +327,14 @@ export type ItemDismissalResult =
   | { _tag: 'Duplicate' }
   | { _tag: 'Rejected'; reason: { _tag: 'ItemNotFound' } }
 
-export type ItemSummary =
-  | (GitHubIssueItem & ItemSummaryBase)
-  | (GitHubPullRequestItem & ItemSummaryBase & { approval: PullRequestApprovalState })
+type PullRequestItemSummary = GitHubPullRequestItem &
+  ItemSummaryBase & {
+    approval: PullRequestApprovalState
+    /** The Pull request triage decision for this exact Revision, when one is recorded. */
+    triage?: { outcome: 'ReviewRequired' | 'ReviewSkipped' | 'ReviewRequiredAfterFailure'; reason: string }
+  }
+
+export type ItemSummary = (GitHubIssueItem & ItemSummaryBase) | PullRequestItemSummary
 
 export interface ReviewEvidence {
   label: string
@@ -346,7 +427,12 @@ export type RecordAgentFeedbackResult =
   | { _tag: 'Recorded'; feedback: AgentFeedback }
   | { _tag: 'Rejected'; reason: { _tag: 'ReviewRunNotFound' } }
 
+export type ReviewGatePublication = { _tag: 'Unpublished' } | { _tag: 'Published'; publicationId: string }
+
 export interface ReviewRun {
+  gatePublication: ReviewGatePublication
+  /** The target branch whose diff this Review covered. */
+  baseRef: string | null
   id: string
   repository: string
   pullRequestNumber: number
@@ -365,9 +451,49 @@ export interface ReviewRun {
   findings: ReviewFinding[]
   feedback: AgentFeedback | null
   publications: ReviewPublication[]
+  /**
+   * What this Review concluded about merging without a person.
+   *
+   * It sits on the Review run rather than on the Review outcome, because an
+   * outcome is derived from the Review gates without judgement and Merge risk
+   * is not a gate. Absent or null covers every run recorded before this
+   * existed, and every repository that never asked for it. A reader must treat
+   * both as no verdict, never as a Contained one.
+   */
+  mergeRisk?: MergeRiskRecord | null
+  /**
+   * The Reasoning effort this Review answered at.
+   *
+   * Absent or null covers every run recorded before the Reasoning effort band
+   * existed, and every provider that names no effort.
+   */
+  reasoningEffort?: CodexReasoningEffort | null
+}
+
+/**
+ * The two independent answers and what they combined to.
+ *
+ * All three are kept, because a wrong verdict has to be attributable. A drifting
+ * Agent claim and a mis-set repository policy need different fixes.
+ */
+export interface MergeRiskRecord {
+  floor: MergeRisk
+  claim: MergeRisk
+  combined: MergeRisk
 }
 
 /** One explicit answer for every successfully completed Review Task. */
+/**
+ * What this service already holds for one head commit, from a worker's view.
+ *
+ * `Current` was recorded under the repository's current policy and may be
+ * resumed. `Stale` covers an old policy or target branch: the planner queued a fresh Review to
+ * replace it, so neither it nor its comment on GitHub may stand in. `None`
+ * means this service never reviewed the head, so a complete comment from
+ * another actor may.
+ */
+export type StoredReviewForHead = { _tag: 'Current'; run: ReviewRun } | { _tag: 'Stale' } | { _tag: 'None' }
+
 export type ReviewResolution =
   | { _tag: 'Reviewed'; reviewRunId: string }
   | { _tag: 'ReviewSkipped'; reason: string }
@@ -377,7 +503,12 @@ export type ReviewResolution =
 
 export type ReviewDesiredOutcome = 'READY' | 'PENDING' | 'BLOCKED' | 'WAITING' | 'EXISTING' | 'SKIPPED'
 
-export interface RecordReviewRunInput extends Omit<ReviewRun, 'feedback' | 'outcome' | 'publications' | 'usage'> {
+export interface RecordReviewRunInput extends Omit<
+  ReviewRun,
+  'baseRef' | 'feedback' | 'gatePublication' | 'mergeRisk' | 'outcome' | 'publications' | 'usage'
+> {
+  /** Absent for a repository that never asked for Merge risk. */
+  mergeRisk?: MergeRiskRecord | null
   confidence?: number
   /** Trusted repository policy used by this Review. */
   policyDigest?: string
@@ -478,6 +609,7 @@ export interface ClaimedReviewFixTask extends ReviewFixTask {
   state: Extract<TaskState, { _tag: 'Running' }>
   repositoryMapping: RepositoryMapping
   pullRequest: GitHubPullRequestItem
+  rounds: { number: number; limit: number; prior: RepairRound[] }
 }
 
 /**
@@ -488,7 +620,26 @@ export interface ClaimedReviewFixTask extends ReviewFixTask {
  * worth another agent turn. The second never is, so the tag, and not the
  * wording of a reason, decides whether the review runs again.
  */
-export type ReviewFixQueueResult = { _tag: 'Queued'; taskId: string } | { _tag: 'ActionRequired'; reason: string }
+export type ReviewFixQueueResult =
+  | { _tag: 'Queued'; taskId: string; rounds: { number: number; limit: number } }
+  | { _tag: 'ActionRequired'; reason: string }
+
+/**
+ * One earlier controller Repair in the chain that produced the current head.
+ *
+ * Round 1 is the first Repair after a contributor commit. A later round reads
+ * every earlier one, so it never repeats an approach Review already rejected.
+ */
+export interface RepairRound {
+  number: number
+  revisionId: string
+  commitSha: string
+  /** What that round's Repair Agent reported, or null when the report was never stored. */
+  summary: string | null
+  checks: string[]
+  /** Summaries of the findings that round set out to fix. */
+  findings: string[]
+}
 
 export interface BaselineRepairTask {
   id: string
@@ -583,6 +734,7 @@ export type AgentRole =
   | 'pull_request_triage'
   | 'issue_triage'
   | 'issue_work'
+  | 'batch_plan'
   | 'routine_scan'
   | 'routine_fix'
 
@@ -592,14 +744,14 @@ export type AgentRole =
  * A repository spec selects from this list and never extends it, so a pull
  * request can change a schedule and can never name new work.
  */
-export type RoutineName = 'sentry-checkin' | 'pr-triage' | 'agent-feedback'
+export type { RoutineName } from './routines/index.ts'
 
 /**
  * What a Routine run does with what it finds.
  *
  * `report` writes to the tracking issue and opens nothing. `propose` opens one
- * pull request per Candidate. An unproven Routine earns `propose` by holding
- * its Candidate precision in `report` first.
+ * pull request per Candidate. Sentry `propose` runs may also resolve verified
+ * deployed fixes. An unproven Routine earns `propose` through Candidate precision.
  */
 export type RoutineMode = 'report' | 'propose'
 
@@ -639,6 +791,85 @@ export interface RoutineIssueSource {
   routineName: RoutineName
   target: string
 }
+
+/**
+ * One planned group of Ready issues in one repository.
+ *
+ * A Batch reserves its Issue work Tasks the moment it is opened, so the plain
+ * Issue work scheduler leaves them alone. One Batch planning turn then decides
+ * which issues share one pull request and which pull requests stack on which.
+ * Every unit publishes the moment its Agent finishes. Nothing waits for the
+ * whole Batch.
+ */
+export type BatchState =
+  | { _tag: 'Queued' }
+  | { _tag: 'Running'; workerId: string; fence: number; leaseExpiresAt: string }
+  | { _tag: 'Completed' }
+  | { _tag: 'Failed'; reason: string }
+
+/** One issue a Batch reserved, with the text the planning turn reads. */
+export interface BatchIssue {
+  taskId: string
+  issueNumber: number
+  title: string
+  body: string
+  triageSummary: string | null
+  /** Open issues the Issue triage named as fix-together partners. */
+  relatedIssues: readonly number[]
+  /** The Routine target file, when a Routine filed the issue. */
+  target: string | null
+}
+
+/** One pull request the Batch plan produces. */
+export interface BatchUnit {
+  id: string
+  position: number
+  /** The Issue work Task whose lease runs this unit and whose head branch names the pull request. */
+  primaryTaskId: string
+  /** Issue numbers this unit closes, the primary first. */
+  issueNumbers: readonly number[]
+  /** The unit whose published head branch this unit stacks on, or null for the default branch. */
+  dependsOnUnitId: string | null
+  rationale: string
+  state: BatchUnitState
+}
+
+export type BatchUnitState =
+  | { _tag: 'Waiting' }
+  | { _tag: 'Running' }
+  | { _tag: 'Published'; pullRequestNumber: number; headRef: string; headSha: string }
+  | { _tag: 'ActionRequired'; reason: string }
+  | { _tag: 'Failed'; reason: string }
+
+export interface Batch {
+  id: string
+  repository: string
+  state: BatchState
+  issues: readonly BatchIssue[]
+  /** Null until the Batch planning turn answered. */
+  units: readonly BatchUnit[] | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ClaimedBatch extends Batch {
+  state: Extract<BatchState, { _tag: 'Running' }>
+  repositoryMapping: RepositoryMapping
+}
+
+/** What the planning turn decides for one unit, before the store assigns ids. */
+export interface PlannedBatchUnit {
+  issueNumbers: readonly number[]
+  /** Zero-based position of the unit this one stacks on, or null. */
+  dependsOn: number | null
+  rationale: string
+}
+
+/** Where one unit's dependency stands, read by the unit that waits on it. */
+export type BatchDependency =
+  | { _tag: 'Pending' }
+  | { _tag: 'Published'; pullRequestNumber: number; headRef: string; headSha: string }
+  | { _tag: 'Unavailable'; reason: string }
 
 /** One leased Candidate issue command, ready for the controller to file. */
 export interface ClaimedCandidateIssueCommand extends CandidateIssueCommand {
@@ -777,6 +1008,13 @@ export interface Candidate {
   runId: string
   /** Stable across runs. Never derived from a line number. */
   fingerprint: string
+  /**
+   * The issue title, written by the Agent that proposed this Candidate.
+   *
+   * The claim is a whole sentence, so it reads badly in an issue list. Older
+   * rows carry no title and fall back to the claim at read time.
+   */
+  title: string
   target: string
   claim: string
   verification: string
@@ -793,6 +1031,8 @@ interface ReviewStatusCommandBase {
   pullRequestNumber: number
   revisionId: string
   expectedHeadSha: string
+  /** The command's recorded base branch. Unknown legacy scope cannot authorize a write. */
+  expectedBaseRef: string | null
   body: string
   reviewRunId: string | null
   desiredOutcome: ReviewDesiredOutcome | null
@@ -803,6 +1043,7 @@ interface ReviewStatusCommandBase {
 export type ReviewStatusTaskPhase =
   | { taskKind: 'adversarial_review'; phase: 'snapshot' | 'review' | 'terminal' }
   | { taskKind: 'review_fix'; phase: 'repair' | 'terminal' }
+  | { taskKind: 'existing_review'; phase: 'terminal' }
 
 export type ReviewStatusCommand = ReviewStatusCommandBase & ReviewStatusTaskPhase
 
@@ -899,7 +1140,14 @@ export interface ClaimedIssueTriageCommentCommand extends IssueTriageCommentComm
  * token that covers one kind and not the other fails half of those calls. One
  * level means no caller can pick the wrong one.
  */
-export type GitHubRepositoryAccess = 'read' | 'checks_read' | 'contents_write' | 'item_write' | 'workflows_write'
+export type GitHubRepositoryAccess =
+  | 'check_write'
+  | 'read'
+  | 'checks_read'
+  | 'contents_write'
+  | 'item_write'
+  | 'pull_request_merge'
+  | 'workflows_write'
 
 export interface GitHubRepositoryToken {
   token: string
@@ -923,6 +1171,12 @@ export interface OpenAgentPullRequest {
   headSha: string
   baseRef: string
   taskKind: 'baseline_repair' | 'issue_work'
+}
+
+/** One rendered PR Lens view and the caption a reader without images gets. */
+export interface PullRequestDiagram {
+  svg: string
+  alt: string
 }
 
 interface PublicationCommandBase {
@@ -952,12 +1206,16 @@ export type PublicationCommand =
       _tag: 'OpenPullRequest'
       taskKind: 'issue_work'
       issueNumber: number
+      /** Additional issues covered by this exact publication. Omitted for a single issue. */
+      combinedIssueNumbers?: readonly number[]
       pullRequestTitle: string
       pullRequestBody: string
+      /** The drawn PR Lens picture the description opens with, or null when the change earned none. */
+      diagram: PullRequestDiagram | null
     })
   | (PublicationCommandBase & {
       _tag: 'OpenPullRequest'
-      taskKind: 'baseline_repair'
+      taskKind: 'baseline_repair' | 'review_fix'
       pullRequestNumber: number
       pullRequestTitle: string
       pullRequestBody: string
@@ -972,6 +1230,12 @@ export type PreparedPublication = PublicationCommand extends infer Command
 export type MutationWorkerOutcome =
   | { _tag: 'Publish'; publication: PreparedPublication; usage?: AgentTokenUsage }
   | { _tag: 'ActionRequired'; reason: string; evidence: string; usage?: AgentTokenUsage }
+  /**
+   * The work this Task existed for is already on GitHub.
+   *
+   * The evidence names it, so nobody spends an agent turn producing it again.
+   */
+  | { _tag: 'Completed'; evidence: string; usage?: AgentTokenUsage }
   /**
    * The world fixed the problem this Task existed for.
    *
@@ -1115,10 +1379,15 @@ export type OpencodeAgentModel =
 export type AgentModel = ClaudeAgentModel | CodexAgentModel | OpencodeAgentModel
 export type CodexReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
+/** Reasoning effort overrides keyed by Agent provider, then by Agent role. */
+export type RoleReasoningEfforts = Partial<Record<AgentProviderName, Partial<Record<AgentRole, CodexReasoningEffort>>>>
+
 export interface RoleProfile {
   model: AgentModel
   /** Omitted by models that expose no reasoning variants. */
   reasoningEffort?: CodexReasoningEffort
+  /** Set when a person named this effort, by pin or configuration, so the Reasoning effort band leaves it alone. */
+  reasoningEffortExplicit?: true
 }
 
 export interface AgentProfile {
@@ -1193,7 +1462,7 @@ export type AgentSelection =
 export type QueueState =
   | { _tag: 'Active'; work: AgentRole }
   | { _tag: 'ActionRequired'; reason: string }
-  | { _tag: 'AwaitingApproval'; kind: PullRequestApprovalKind | 'issue_work' }
+  | { _tag: 'AwaitingApproval'; kind: PullRequestApprovalKind | IssueApprovalWork }
   | { _tag: 'Queued'; work: AgentRole }
   | { _tag: 'Pending'; reason: string }
 
@@ -1232,9 +1501,10 @@ export type IncidentScope =
 /**
  * What one Incident is about.
  *
- * Every kind except `runner_lost` comes from `classifyFailure`, which reads a
- * failure message. `runner_lost` comes from GitHub's own job steps instead, so
- * it is raised where the checks snapshot is built.
+ * Most kinds come from `classifyFailure`, which reads a failure message.
+ * `runner_lost` comes from GitHub's own job steps instead, so it is raised
+ * where the checks snapshot is built. `ci_gate_pending` comes from a clock
+ * reading against a gate that never moved, so no message exists to classify.
  */
 export type IncidentKind =
   | 'github_unavailable'
@@ -1255,6 +1525,15 @@ export type IncidentKind =
    * under review is not broken, so its check runs read as PENDING.
    */
   | 'runner_lost'
+  /**
+   * A CI Review gate has read PENDING far longer than any healthy one does.
+   *
+   * No failure message exists, because nothing failed. The controller waits
+   * correctly, and that is the problem: a repository whose CI never starts
+   * used to read exactly like one whose CI is slow. The bounds and the
+   * wording live in `ci-gate-pending.ts`.
+   */
+  | 'ci_gate_pending'
   | 'unknown'
 
 /** What the controller will do about an Incident without being asked. */
@@ -1283,17 +1562,49 @@ export interface Incident {
   lastSeenAt: string
 }
 
+/**
+ * One pull request the Agent decided needed no Review.
+ *
+ * A skip queues no Task and produces no Review run, so History has nothing
+ * else to record it with. The decider and its confidence come from the stored
+ * reason, parsed once here rather than read as prose on the page.
+ */
+export interface TriageSkip {
+  key: string
+  repository: string
+  pullRequestNumber: number
+  title: string
+  /** The pull request on GitHub. */
+  url: string
+  decidedBy: 'rule' | 'model'
+  /** The confidence the Classification answered with, absent when the rule decided. */
+  confidence: number | null
+  reason: string
+  decidedAt: string
+}
+
 export interface DashboardSnapshot {
+  hostTasks?: Array<{ taskId: string | null; host: 'hogwild' | 'desktop' }>
+  hostCapacity?: HostCapacity
+  agentSlots?: AgentSlotLimits
+  desktop?: ReturnType<DesktopBroker['read']>
   generatedAt: string
   status: 'starting' | 'ready' | 'degraded'
   mutationsEnabled: boolean
   agentControl: AgentControl
   restartRequest: RestartRequest | null
+  serviceUpdate: ServiceUpdateStatus
   selectionMode: SelectionMode
   /** Open pull requests across every enabled repository. */
   openPullRequests: number
   /** Issue work stops when open pull requests reach this limit. */
   maxOpenPullRequests: number
+  /** Classification service facts, present when the configuration enables it. */
+  classification?: { model: string; gatewayId: string }
+  /** Pull request triage decisions over the last 24 hours. */
+  triageDecisions: { reviewRequired: number; reviewSkipped: number; couldNotDecide: number }
+  /** Pull requests the Agent decided needed no Review, newest first. */
+  triageSkips: TriageSkip[]
   agentProfile: AgentProfile
   agentSelection: AgentSelection
   agentStart: AgentStartState
@@ -1312,6 +1623,8 @@ export interface DashboardSnapshot {
   tasks: DashboardTask[]
   routines: Routine[]
   routineRuns: DashboardRoutineRun[]
+  /** Open Batches first, then the most recent finished ones. */
+  batches: Batch[]
 }
 
 export type StoredAgentControl = { _tag: 'Running' } | { _tag: 'Paused'; pausedAt: string }
@@ -1324,11 +1637,20 @@ export type SelectionMode = 'auto' | 'manual'
 
 export type AgentControl = { _tag: 'Running' } | { _tag: 'Paused'; pausedAt: string; safeToRestart: boolean }
 
+export type ServiceUpdateStatus =
+  | { _tag: 'Checking'; deployedCommit: string }
+  | { _tag: 'Current'; deployedCommit: string; latestCommit: string; checkedAt: string }
+  | { _tag: 'Available'; deployedCommit: string; latestCommit: string; checkedAt: string }
+  | { _tag: 'Unavailable'; deployedCommit: string; checkedAt: string; reason: string }
+
 export type RestartRequestSource = 'dashboard' | 'tray' | 'helper'
+
+export type RestartOperation = { _tag: 'Restart' } | { _tag: 'Update'; targetCommit: string }
 
 interface RestartRequestBase {
   id: string
   source: RestartRequestSource
+  operation: RestartOperation
   requestedAt: string
 }
 

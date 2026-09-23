@@ -2,18 +2,27 @@ import type { GitHubRepositoryAccess } from '../src/types.ts'
 import { describe, expect, it } from 'vitest'
 import {
   createGitHubWriteGate,
+  isRepositoryWriteQuarantineReason,
   repositoryQuarantineReason,
   withGitHubWritePreflight,
 } from '../src/github-write-gate.ts'
 import { err, ok } from '../src/result.ts'
 
 describe('gitHub write gate', () => {
+  it('recognizes only the write quarantine reason', () => {
+    expect(isRepositoryWriteQuarantineReason(repositoryQuarantineReason('wolfstar-project/example'))).toBe(true)
+    expect(
+      isRepositoryWriteQuarantineReason(
+        `wolfstar-project/example: ${repositoryQuarantineReason('wolfstar-project/example')}`,
+      ),
+    ).toBe(true)
+    expect(isRepositoryWriteQuarantineReason('Repository policy does not authorize this write.')).toBe(false)
+  })
+
   it('refuses every write credential to a repository nobody enabled', async () => {
     const requested: GitHubRepositoryAccess[] = []
-    const refused: string[] = []
     const gate = createGitHubWriteGate({
       mayWrite: () => false,
-      onRefused: (github) => refused.push(github),
       source: {
         getToken: (_repository, access) => {
           requested.push(access)
@@ -26,10 +35,12 @@ describe('gitHub write gate', () => {
     const results = await Promise.all([
       gate.getToken('wolfstar-project/example', 'item_write'),
       gate.getToken('wolfstar-project/example', 'contents_write'),
+      gate.getToken('wolfstar-project/example', 'pull_request_merge'),
+      gate.getToken('wolfstar-project/example', 'workflows_write'),
     ])
 
     expect(results).toEqual(
-      Array.from({ length: 2 }, () => ({
+      Array.from({ length: 4 }, () => ({
         _tag: 'Err',
         error: {
           repository: 'wolfstar-project/example',
@@ -38,16 +49,12 @@ describe('gitHub write gate', () => {
       })),
     )
     expect(requested).toEqual([])
-    expect(refused).toEqual(['wolfstar-project/example', 'wolfstar-project/example'])
   })
 
   it('passes reads and trusted writes through unchanged', async () => {
     const requested: GitHubRepositoryAccess[] = []
     const gate = createGitHubWriteGate({
       mayWrite: (github) => github === 'wolfstar-project/example',
-      onRefused: () => {
-        throw new Error('An enabled repository must not be refused.')
-      },
       source: {
         getToken: (_repository, access) => {
           requested.push(access)

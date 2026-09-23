@@ -45,7 +45,7 @@ function stagedIssueStore() {
     externalId: 'issue',
     observedAt: '2026-08-13T01:00:00.000Z',
     source: 'poll',
-    subject: issueItem(),
+    subject: issueItem({ author: 'wolfstar-project' }),
   })
   const triage = store.claimNextIssueTriageTask('triage', '2026-08-13T01:01:00.000Z', 60_000)
   if (triage === null || observed._tag !== 'Inserted') throw new Error('Expected issue triage.')
@@ -56,7 +56,7 @@ function stagedIssueStore() {
     at: '2026-08-13T01:01:01.000Z',
     evidence: JSON.stringify({ _tag: 'READY_TO_IMPLEMENT' }),
   })
-  store.approveIssueWork({
+  store.approveIssue({
     repository: 'wolfstar-project/example',
     issueNumber: 12,
     revisionId: observed.revisionId,
@@ -75,6 +75,7 @@ function stagedIssueStore() {
       issueNumber: 12,
       pullRequestTitle: 'Fix #12',
       pullRequestBody: 'Closes #12.',
+      diagram: null,
       commitSha: 'issue-commit',
       baseSha: 'base-sha',
       baseRef: 'main',
@@ -104,7 +105,7 @@ describe('publication scheduler', () => {
       publisher: {
         finalize: () => {
           calls.push('pull request')
-          return Promise.resolve(ok('Opened pull request #42.'))
+          return Promise.resolve(ok({ evidence: 'Opened pull request #42.', pullRequestNumber: 42 }))
         },
         getHeadSha: () => Promise.resolve(ok(head)),
         push: (command) => {
@@ -142,7 +143,7 @@ describe('publication scheduler', () => {
       },
       store,
       publisher: {
-        finalize: () => Promise.resolve(ok('Published commit123.')),
+        finalize: () => Promise.resolve(ok({ evidence: 'Published commit123.' })),
         getHeadSha: () => Promise.resolve(ok('commit123')),
         push: () => {
           pushes += 1
@@ -176,7 +177,7 @@ describe('publication scheduler', () => {
       },
       store,
       publisher: {
-        finalize: () => Promise.resolve(ok('Published commit123.')),
+        finalize: () => Promise.resolve(ok({ evidence: 'Published commit123.' })),
         getHeadSha: () => Promise.resolve(ok('different123')),
         push: () => {
           calls.push('push')
@@ -207,7 +208,7 @@ describe('publication scheduler', () => {
       },
       store,
       publisher: {
-        finalize: () => Promise.resolve(ok('Opened pull request #7.')),
+        finalize: () => Promise.resolve(ok({ evidence: 'Opened pull request #7.', pullRequestNumber: 7 })),
         // The branch survives from an attempt that never opened a pull request.
         getHeadSha: () => Promise.resolve(ok(calls.includes('push') ? 'issue-commit' : 'orphan-commit')),
         push: () => {
@@ -246,7 +247,7 @@ describe('publication scheduler', () => {
       },
       store,
       publisher: {
-        finalize: () => Promise.resolve(ok('Published commit123.')),
+        finalize: () => Promise.resolve(ok({ evidence: 'Published commit123.' })),
         getHeadSha: () => {
           reads += 1
           return Promise.resolve(reads === 1 ? ok('abc123') : err('network unavailable'))

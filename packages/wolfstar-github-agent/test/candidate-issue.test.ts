@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import {
   candidateIssueBody,
   candidateIssueCommands,
+  candidateIssueTitle,
   createCandidateIssueController,
   routineIssueLabel,
 } from '../src/candidate-issue-controller.ts'
@@ -31,6 +32,7 @@ const candidate: Candidate = {
   routineId: routine.routineId,
   runId: routine.id,
   fingerprint: 'src/store.ts#openRoutineRun',
+  title: 'Fixture title',
   target: 'src/store.ts',
   claim: 'This helper is never called.',
   verification: 'pnpm test',
@@ -61,6 +63,7 @@ function seed(store: ReturnType<typeof openJournalStore>): void {
     candidates: [
       {
         fingerprint: candidate.fingerprint,
+        title: 'Fixture title',
         target: candidate.target,
         claim: candidate.claim,
         verification: candidate.verification,
@@ -186,6 +189,7 @@ describe('filing the issues Candidates propose', () => {
         runId: routine.id,
         candidates: Array.from({ length: 8 }, (_unused, index) => ({
           fingerprint: `src/file-${index}.ts`,
+          title: 'Fixture title',
           target: `src/file-${index}.ts`,
           claim: 'unused',
           verification: 'pnpm test',
@@ -276,6 +280,53 @@ describe('filing the issues Candidates propose', () => {
     }
   })
 
+  it('reuses one open dependency issue when a different version batch arrives', async () => {
+    const store = openJournalStore(':memory:')
+    try {
+      seed(store)
+      const dependencyRoutine = { ...routine, name: 'dependency-updates' as const }
+      store.recordCandidates({
+        routineId: routine.routineId,
+        runId: routine.id,
+        candidates: [{ ...candidate, fingerprint: 'dependency-updates:new-version' }],
+        at: now().toISOString(),
+      })
+      store.stageCandidateIssues({
+        commands: candidateIssueCommands(store.listCandidates(routine.routineId), dependencyRoutine),
+        at: now().toISOString(),
+      })
+      let open: { number: number; url: string } | null = null
+      const created: string[] = []
+      const searched: string[] = []
+      const controller = createCandidateIssueController({
+        now,
+        store,
+        workerId: 'controller-1',
+        github: {
+          findOpenIssueByFingerprint: async ({ fingerprint }) => {
+            searched.push(fingerprint)
+            return ok(open)
+          },
+          createIssue: async ({ body }) => {
+            created.push(body)
+            open = { number: 7, url: 'https://github.com/wolfstar-project/example/issues/7' }
+            return ok(open)
+          },
+        },
+      })
+      const results = await controller.publishPending(new AbortController().signal)
+      expect(results).toEqual([
+        { _tag: 'Ok', value: { repository: routine.repository, issueNumber: 7 } },
+        { _tag: 'Ok', value: { repository: routine.repository, issueNumber: 7 } },
+      ])
+      expect(created).toHaveLength(1)
+      expect(created[0]).toContain('<!-- candidate-fingerprint: dependency-updates -->')
+      expect(searched).toEqual(['dependency-updates', 'dependency-updates'])
+    } finally {
+      store.close()
+    }
+  })
+
   it('adopts the issue an ambiguous create already filed', async () => {
     const store = openJournalStore(':memory:')
     try {
@@ -332,7 +383,7 @@ describe('filing the issues Candidates propose', () => {
 
       const claimed = store.claimNextCandidateIssue('controller-2', now().toISOString(), 60_000)
 
-      expect(claimed?.title).toBe('pr-triage: This helper is never called.')
+      expect(claimed?.title).toBe('Fixture title')
       expect(claimed?.reason).toBe('GitHub returned 502.')
     } finally {
       store.close()
@@ -364,6 +415,46 @@ describe('filing the issues Candidates propose', () => {
       await controller.publishPending(new AbortController().signal)
 
       expect(store.claimNextCandidateIssue('controller-2', now().toISOString(), 60_000)).toBeNull()
+    } finally {
+      store.close()
+    }
+  })
+
+  it('asks again a day later, so a repository that switches Issues on gets its proposals', async () => {
+    const store = openJournalStore(':memory:')
+    try {
+      seed(store)
+      const commands = candidateIssueCommands(store.listCandidates(routine.routineId), routine)
+      store.stageCandidateIssues({ commands, at: now().toISOString() })
+      const refusing = {
+        findOpenIssueByFingerprint: () => Promise.resolve(ok(null)),
+        createComment: async () => ok({ id: 1 }),
+        createIssue: async () => ({
+          _tag: 'Err' as const,
+          error: {
+            repository: 'wolfstar-project/example',
+            message: 'Issues has been disabled in this repository.',
+            status: 410,
+          },
+        }),
+      }
+      await createCandidateIssueController({ github: refusing, now, store, workerId: 'controller-1' }).publishPending(
+        new AbortController().signal,
+      )
+
+      expect(store.stageCandidateIssues({ commands, at: '2026-08-27T20:00:00.000Z' })).toBe(0)
+      expect(store.claimNextCandidateIssue('controller-2', '2026-08-27T20:00:00.000Z', 60_000)).toBeNull()
+
+      expect(store.stageCandidateIssues({ commands, at: '2026-08-28T07:10:00.000Z' })).toBe(1)
+      const calls: Array<{ title: string; labels?: readonly string[] }> = []
+      await createCandidateIssueController({
+        github: publisher(calls),
+        now: () => new Date('2026-08-28T07:10:00.000Z'),
+        store,
+        workerId: 'controller-3',
+      }).publishPending(new AbortController().signal)
+
+      expect(calls.map((call) => call.title)).toEqual(['Fixture title'])
     } finally {
       store.close()
     }
@@ -436,5 +527,53 @@ describe('filing the issues Candidates propose', () => {
     } finally {
       store.close()
     }
+  })
+})
+
+describe('the title one Candidate gets', () => {
+  it('uses the title the Agent wrote, not the claim, and adds no routine prefix', () => {
+    const [command] = candidateIssueCommands(
+      [
+        {
+          ...candidate,
+          title: 'Cache the skill detail response',
+          claim: 'Every TTL expiry re-runs six D1 queries at once, so the route sheds load.',
+        },
+      ],
+      routine,
+    )
+
+    expect(command?.title).toBe('Cache the skill detail response')
+  })
+
+  it('falls back to the claim when the Agent leaves the title blank', () => {
+    expect(candidateIssueTitle({ title: '   ', claim: 'The deploy gate cannot run the binary.' })).toBe(
+      'The deploy gate cannot run the binary.',
+    )
+  })
+
+  it('collapses a title written across several lines', () => {
+    expect(candidateIssueTitle({ title: 'Cache the skill\n  detail response', claim: 'unused' })).toBe(
+      'Cache the skill detail response',
+    )
+  })
+
+  it('caps a title at the 256 characters GitHub accepts', () => {
+    expect(candidateIssueTitle({ title: 'a'.repeat(300), claim: 'unused' })).toHaveLength(256)
+  })
+
+  it('keeps the claim in the body when the title is shorter', () => {
+    const [command] = candidateIssueCommands(
+      [
+        {
+          ...candidate,
+          title: 'Cache the skill detail response',
+          claim: 'Every TTL expiry re-runs six D1 queries at once.',
+        },
+      ],
+      routine,
+    )
+
+    expect(command?.body).toContain('Every TTL expiry re-runs six D1 queries at once.')
   })
 })

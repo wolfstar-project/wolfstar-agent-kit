@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
 import { err, ok } from '../src/result.ts'
 import { createReviewStatusScheduler } from '../src/review-status-scheduler.ts'
@@ -5,11 +9,15 @@ import { openJournalStore } from '../src/store.ts'
 import { pullRequestItem, repositoryMapping } from './fixtures.ts'
 
 const stores: Array<ReturnType<typeof openJournalStore>> = []
+const directories: string[] = []
 
-afterEach(() => stores.splice(0).forEach((store) => store.close()))
+afterEach(() => {
+  stores.splice(0).forEach((store) => store.close())
+  directories.splice(0).forEach((directory) => rmSync(directory, { recursive: true, force: true }))
+})
 
-function stagedTerminalStatus() {
-  const store = openJournalStore(':memory:')
+function stagedTerminalStatus(path = ':memory:') {
+  const store = openJournalStore(path)
   stores.push(store)
   const repository = repositoryMapping()
   const pullRequest = pullRequestItem({ mergeState: 'clean' })
@@ -23,6 +31,30 @@ function stagedTerminalStatus() {
   if (observed._tag !== 'Inserted') throw new Error('Expected a pull request.')
   const task = store.claimNextAdversarialReviewTask('reviewer-1', '2026-08-13T01:01:00.000Z', 60_000)
   if (task === null) throw new Error('Expected a Review Task.')
+  const gates = {
+    merge: { _tag: 'Passed' as const, evidence: [] },
+    review: { _tag: 'Passed' as const, evidence: [] },
+    ci: { _tag: 'Passed' as const, evidence: [] },
+  }
+  expect(
+    store.recordReviewRun({
+      id: 'review-1',
+      repository: repository.github,
+      pullRequestNumber: pullRequest.number,
+      revisionId: task.revisionId,
+      headSha: pullRequest.headSha,
+      provider: 'codex',
+      sessionId: 'session',
+      model: 'gpt-5.6',
+      agentVersion: '1.2.3',
+      skillDigest: 'a'.repeat(64),
+      startedAt: '2026-08-13T01:01:00.000Z',
+      completedAt: '2026-08-13T01:01:05.000Z',
+      gates,
+      confidence: 96,
+      findings: [],
+    })._tag,
+  ).toBe('Inserted')
   const staged = store.stageReviewStatus({
     taskKind: 'adversarial_review',
     phase: 'terminal',
@@ -33,6 +65,9 @@ function stagedTerminalStatus() {
     revisionId: observed.revisionId,
     expectedHeadSha: pullRequest.headSha,
     body: '<!-- wolfstar-agent-kit:pr-triage -->\n### 🤖 READY · 96/100',
+    reviewRunId: 'review-1',
+    gates,
+    desiredOutcome: 'READY',
   })
   if (staged._tag === 'Rejected') throw new Error(staged.reason)
   store.completeWorkerTask({
@@ -59,19 +94,78 @@ function snapshot(pullRequest: ReturnType<typeof pullRequestItem>) {
 }
 
 describe('review status scheduler', () => {
+  it('retires a legacy status without a recorded base branch before any GitHub write', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'legacy-review-status-'))
+    directories.push(directory)
+    const path = join(directory, 'journal.sqlite')
+    const test = stagedTerminalStatus(path)
+    // Old Revision payloads can lack the base branch that current observations record.
+    const legacy = new DatabaseSync(path)
+    legacy.exec("UPDATE revisions SET payload = json_remove(payload, '$.baseRef')")
+    legacy.close()
+    const writes: string[] = []
+    const scheduler = createReviewStatusScheduler({
+      store: test.store,
+      now: () => new Date('2026-08-13T01:01:31.000Z'),
+      intervalMilliseconds: 5_000,
+      leaseMilliseconds: 60_000,
+      workerId: 'publisher',
+      onError: (error) => {
+        throw error
+      },
+      onFailure: (_repository, _number, reason) => {
+        throw new Error(reason)
+      },
+      onPublished: () => {
+        throw new Error('The legacy status must retire before publication.')
+      },
+      github: {
+        readExistingReviewLabel: () => {
+          throw new Error('Unexpected existing review.')
+        },
+        getPullRequestReviewSnapshot: () => Promise.resolve(ok(snapshot(test.pullRequest))),
+        upsertReviewStatus: () => {
+          writes.push('comment')
+          return Promise.resolve(ok({ commentId: 42, url: test.pullRequest.url }))
+        },
+        stampAgentLabel: () => {
+          writes.push('label')
+          return Promise.resolve(ok(undefined))
+        },
+      },
+    })
+    await scheduler.runNow()
+
+    expect(writes).toEqual([])
+    expect(test.store.listWorkflowEvents({ stream: 'review_status', limit: 20 })).toContainEqual(
+      expect.objectContaining({
+        entityId: test.staged.commandId,
+        event: 'Superseded',
+      }),
+    )
+    expect(test.store.claimNextTerminalReviewStatus('next-publisher', '2026-08-13T01:02:00.000Z', 60_000)).toBeNull()
+  })
+
   it('publishes terminal status after the Agent Task completed', async () => {
     const test = stagedTerminalStatus()
     const bodies: string[] = []
+    const labels: string[] = []
     const failures: string[] = []
     const published: string[] = []
     const scheduler = createReviewStatusScheduler({
       github: {
+        readExistingReviewLabel: () => {
+          throw new Error('Unexpected existing review.')
+        },
         getPullRequestReviewSnapshot: () => Promise.resolve(ok(snapshot(test.pullRequest))),
         upsertReviewStatus: (_repository, _number, _commentId, body) => {
           bodies.push(body)
           return Promise.resolve(ok({ commentId: 42, url: `${test.pullRequest.url}#issuecomment-42` }))
         },
-        stampAgentLabel: () => Promise.resolve(ok(undefined)),
+        stampAgentLabel: (_repository, _number, label) => {
+          labels.push(label)
+          return Promise.resolve(ok(undefined))
+        },
       },
       intervalMilliseconds: 5_000,
       leaseMilliseconds: 60_000,
@@ -88,12 +182,16 @@ describe('review status scheduler', () => {
     await scheduler.runNow()
 
     expect(bodies).toEqual(['<!-- wolfstar-agent-kit:pr-triage -->\n### 🤖 READY · 96/100'])
+    expect(labels).toEqual(['READY'])
     expect(failures).toEqual([])
     // The success signal an Incident raised here needs to be resolved by.
     expect(published).toEqual([`wolfstar-project/example#${test.pullRequest.number}`])
     expect(
       test.store.claimNextTerminalReviewStatus('status-publisher-2', '2026-08-13T01:02:00.000Z', 60_000),
     ).toBeNull()
+    expect(test.store.listWorkflowEvents({ stream: 'review_status', limit: 20 }).map((event) => event.event)).toContain(
+      'Published',
+    )
   })
 
   it('retries a terminal status failure without another Agent Task', async () => {
@@ -103,6 +201,9 @@ describe('review status scheduler', () => {
     const published: string[] = []
     const scheduler = createReviewStatusScheduler({
       github: {
+        readExistingReviewLabel: () => {
+          throw new Error('Unexpected existing review.')
+        },
         getPullRequestReviewSnapshot: () => Promise.resolve(ok(snapshot(test.pullRequest))),
         upsertReviewStatus: () => {
           writes += 1
@@ -139,6 +240,9 @@ describe('review status scheduler', () => {
     const commentIds: Array<number | null> = []
     const scheduler = createReviewStatusScheduler({
       github: {
+        readExistingReviewLabel: () => {
+          throw new Error('Unexpected existing review.')
+        },
         getPullRequestReviewSnapshot: () => Promise.resolve(ok(snapshot(test.pullRequest))),
         upsertReviewStatus: (_repository, _number, commentId) => {
           commentIds.push(commentId)

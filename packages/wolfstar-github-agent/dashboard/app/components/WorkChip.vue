@@ -1,15 +1,16 @@
 <script setup lang="ts">
-import type { AgentRole } from '../../../src/types.ts'
+import type { WorkKey } from '../utils/dashboard.ts'
 import { workChip } from '../utils/dashboard.ts'
 
-/** Says what a card is for. Neutral by rule: colour on this board means state. */
-const { work } = defineProps<{ work: AgentRole }>()
+/** Says what a card is for: an icon and a word, muted, no box. Colour on this board means state. */
+const { work } = defineProps<{ work: WorkKey }>()
 
 const chip = computed(() => workChip(work))
 </script>
 
 <template>
-  <UBadge variant="outline" color="neutral" :icon="chip.icon" class="text-toned" :ui="{ leadingIcon: 'text-dimmed' }">
-    {{ chip.label }}
-  </UBadge>
+  <span class="inline-flex items-center gap-1 whitespace-nowrap text-sm text-muted">
+    <UIcon :name="chip.icon" class="size-3.5 shrink-0 text-dimmed" aria-hidden="true" />
+    <span>{{ chip.label }}</span>
+  </span>
 </template>
