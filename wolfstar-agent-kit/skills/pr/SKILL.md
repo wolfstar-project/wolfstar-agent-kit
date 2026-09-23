@@ -1,29 +1,16 @@
 ---
 name: pr
-description: 'Create or update a pull request from current work. Use when work should be branched, committed, pushed, submitted, shipped, or landed on an owned repository.'
+description: 'Create or update a pull request from current work. Use when work should be branched, committed, pushed, submitted, shipped, or landed on an owned repository, and whenever a pull request title or description is written or revised, even if nothing is pushed.'
 user_invocable: true
 ---
 
 Create or update a pull request for the current branch. Idempotent -- safe to run at any stage.
 
-## Markdown-only exception
+## No direct pushes
 
-If every task-owned changed path ends in `.md`, use this exception for a repository Wolfstar owns or maintains.
-Push the change directly to `origin/main`. Never open a pull request for Markdown-only work.
+Every change opens a pull request. Markdown is no exception: a Skill or instruction file changes agent behaviour in every repository, and a README change still earns a review. Never push to `origin/main` directly.
 
-Before editing, follow the [worktree isolation contract](../../references/worktree-isolation.md). Start from the current `origin/main`.
-
-After editing:
-
-1. Check every task-owned changed path.
-   If one path does not end in `.md`, use the normal pull request workflow below.
-2. Run any checks that cover the changed Markdown.
-3. Commit with a Conventional Commit subject.
-4. Push without force: `git push origin HEAD:main`.
-5. Verify `origin/main` points at the pushed commit.
-
-If the direct push fails, stop and report the refusal. Do not create a pull request as a fallback.
-Do not wait for CI or deployment unless its event uses `paths` to include the changed Markdown.
+A Markdown-only pull request runs no CI unless a workflow event uses `paths` to include that Markdown. Its review is the whole gate, so treat the review outcome as the check.
 
 ## When to invoke
 
@@ -32,7 +19,7 @@ Invoke on intent, not on phrasing. If the next command you are about to run is `
 None of these are reasons to skip it:
 
 - **The user never said "PR".** Once a fix is written and verified, "fix", "ship it", "land this", or a bare "yes" all mean land it. The trigger list in the description is examples, not a required wording.
-- **The change is small.** Except for Markdown-only work above, a one-line fix still needs the repo's template, the AI disclosure, a body with no verification section, and green CI. Size changes none of that.
+- **The change is small.** A one-line fix or a docs edit still needs the repo's template, the AI disclosure, a body with no verification section, and green CI. Size changes none of that.
 - **Invoking costs a turn.** Rewriting a hand-made PR body costs more, and a PR pushed without Step 4 can fail CI in front of a reviewer.
 - **You already ran the git commands.** Then a PR exists and is probably wrong. Re-enter here anyway -- Step 1 detects the existing PR and Step 5 syncs it in place.
 
@@ -45,6 +32,7 @@ Running the git and `gh` commands by hand is the failure mode this skill exists 
 - **Never sync a clean pull request with its base branch:** A newer base alone needs no pull request commit.
   Merge the base into the head only when GitHub reports merge conflicts.
 - **Never `--no-verify`** -- if hooks fail, fix the underlying issue.
+- **`gh pr merge` refuses a pull request that has a child** -- GitHub asks for the stack merge. Use `gh stack merge`, and expect a child to turn CONFLICTING when its parent squash merges alone. Repair steps in [references/stacked-prs.md](references/stacked-prs.md).
 - **Never move unknown changes** -- primary checkout changes may belong to another task. Copy only changes this task owns.
 - **`gh pr create` fails silently with bad body** -- always use HEREDOC for the body, never inline quotes.
 - **CI flakes vs real failures** -- if the same check fails twice with different errors, it's flaky. If same error, it's real. Don't retry flakes more than once.
@@ -97,6 +85,7 @@ Run IN PARALLEL:
 Bash: git log main..HEAD --oneline
 Bash: git diff main...HEAD --stat
 Bash: gh issue list --state open --limit 20 --json number,title
+Bash: gh pr list --state open --limit 20 --json number,title,headRefName,baseRefName
 Bash: gh pr view --json number,title,body,url 2>&1
 ```
 
@@ -105,6 +94,14 @@ Determine what exists:
 - **No commits ahead of main** and **no uncommitted changes** -> nothing to do, tell user
 - **PR exists** -> we're syncing title/body, skip to Step 4
 - **No PR** -> creating fresh, continue to Step 2
+
+### Stacked work
+
+Read the open pull requests. If this change does not build, pass, or make sense without one of their diffs, it is stacked work: base the branch on that pull request in Step 0 and target it in Step 5.
+
+Related but independent work is not stacked work. It targets `origin/main`, even when it touches the same files or closes a sibling issue. Independent pull requests merge in parallel; a stack merges in order and every child waits for its parent.
+
+[references/stacked-prs.md](references/stacked-prs.md) has the `gh stack` commands, the ones this skill bans, and the merge and repair steps.
 
 ## Step 2: Find Related Issues
 
@@ -154,7 +151,7 @@ These exist because the generated bodies drift the same way every time.
 - **Benchmarks when they are relevant and measured.** A performance or caching change earns a real before and after. Never invent, estimate, or infer a figure. If you did not measure it, say nothing, or offer to run it.
 - **No self-ticked checkboxes** beyond the ones the repo's own template asks for. A list of `- [x]` items you wrote and ticked yourself is not evidence, it reads as homework.
 - **Delete empty sections.** Never write "None.", "No linked issue.", or "N/A" under a heading. No linked issue means no Linked issue section.
-- **Length follows risk.** A fix gets 1 to 3 sentences. Spend more only where a reviewer must understand a behaviour change, a data migration, or a non-obvious tradeoff. Never narrate the diff; the diff is right there.
+- **Length follows risk.** A fix gets 1 to 3 sentences. Spend more only where a reviewer must understand a behaviour change, a data migration, or a non-obvious tradeoff.
 - **Earn every number.** Include a figure only if a reviewer would act differently for knowing it. `7,438 rows backfilled` earns its place in a migration note. `533 tests passed, 2 skipped` does not.
 - **Vary the shape.** Do not open every paragraph with `This `. Do not follow a past-tense problem sentence with a present-tense `This adds…` in every PR. For a small fix, one sentence is the whole description.
 - **Disclose AI writing visibly.** If Wolfstar Agent Kit drafts or edits the description, append the exact AI disclosure after the description. Never hide it in an HTML comment or template metadata.
@@ -170,6 +167,12 @@ Modelled on Wolfstar's hand-written PRs to `nuxt/nuxt`. These are the moves that
 - **Bullets and fragments are fine.** "Types aren't documented, copied docs from the site" is a complete thought. Prose paragraphs are not mandatory.
 - **Motivation before mechanism** for a feature: who needs this, what they do today, what is bad about that, then the change.
 - **Do not perform completeness.** Leave the repo template's HTML comments untouched. Tick a checklist box only if it is true. Shipping with boxes unticked is normal and correct.
+
+### Diagram
+
+Before writing the description, decide whether the change earns a diagram. Read the [pr-lens skill](../pr-lens/SKILL.md) and use its threshold: three or more modules, a crossed boundary, or a sequence a reviewer must follow. If it qualifies, author and render the graph document there, then reference the top architecture view from the description with a Markdown image and pass the same path to `--attach` on `gh pr create` or `gh pr edit`. One view is normal. Two is the ceiling unless the change is a large refactor.
+
+A diagram goes in the description, after the why and before the AI disclosure. Never in a trailing comment.
 
 **Strip AI tells from the title and description** before pushing, run them through `/humanize-writing`. For PRs specifically: no em-dashes, drop the over-explained "this means that..." takeaway, and use specifics (issue numbers, real before/after behaviour, measured figures) instead of vague claims like "improves performance". A PR body that reads as AI-generated erodes reviewer trust.
 
@@ -195,13 +198,7 @@ changed. They are notifications now, so a dead client costs nothing.
 
 ## Step 4: Verify
 
-Run all checks before pushing:
-
-```bash
-pnpm lint && pnpm typecheck && pnpm build
-```
-
-Fix any failures before proceeding.
+Run `check` before pushing (lint, typecheck, tests). Add `pnpm build` when the package publishes a build. Fix any failures before proceeding.
 
 ## Step 5: Push & Create or Update
 
@@ -228,6 +225,10 @@ EOF
 )"
 ```
 
+For stacked work, add `--base PARENT_BRANCH` to `gh pr create`, then link the chain with `gh stack link PARENT_BRANCH BRANCH`. Open the description with `Stacked on #PARENT_PR.` Read [references/stacked-prs.md](references/stacked-prs.md) before either command.
+
+When Step 3 rendered a diagram, add `--attach .pr-lens/<view>-dark-<hash>.svg` for each image the body references. GitHub CLI rewrites the Markdown path to the uploaded asset.
+
 Output the PR URL when done. Log to `${CLAUDE_PLUGIN_DATA}/pr-history.log`.
 
 ### Let the agent merge it
@@ -235,13 +236,14 @@ Output the PR URL when done. Log to `${CLAUDE_PLUGIN_DATA}/pr-history.log`.
 `wolfstar-github-agent` reviews every pull request it tracks. Add `wolfstar-agent-auto-merge` when the change holds no judgement, and the service merges it after a `READY` review:
 
 - comments or wording inside non-Markdown files, with no behaviour change
+- Markdown that nothing executes: a README, docs, or a blog post
 - dependency bump or lockfile refresh
 - formatting, lint autofix, or generated file refresh
 - changelog or version bump
 
-Never add the label to a change a reviewer must judge: source behaviour, public API, configuration, CI workflow, authentication, authorization, payments, data handling, or user-visible copy. When unsure, leave it off. A missing label costs one human merge. A wrong label ships an unreviewed change.
+Never add the label to a change a reviewer must judge: source behaviour, public API, configuration, CI workflow, authentication, authorization, payments, data handling, or user-visible copy. Markdown an agent reads as instructions counts as source behaviour: Skills, `agent-context/`, `CLAUDE.md`, `AGENTS.md`, `GLOSSARY.md`, and `.github` templates. When unsure, leave it off. A missing label costs one human merge. A wrong label ships an unreviewed change.
 
-Read [references/auto-merge.md](../../references/auto-merge.md) for the exact conditions.
+Read [references/auto-merge.md](../../references/auto-merge.md) for the exact conditions. A repository whose service block sets `auto_merge.pull_requests: every` needs no label; the service merges every trusted pull request there after a `READY` review at that repository's minimum confidence.
 
 ```bash
 gh label create wolfstar-agent-auto-merge --color 0e8a16 --description "Lets wolfstar-github-agent merge this after a READY review" 2>/dev/null || true
@@ -264,28 +266,49 @@ EOF
 
 Keep it to the checks a reviewer would otherwise have to repeat. Prose lines, not ticked boxes.
 
-### Screenshots
+### Screenshots and video
 
-A visible change earns a picture, in that same comment. GitHub only accepts a pasted image through the web UI, so upload the file first and embed the URL it prints:
+A visible change earns media in the same comment. GitHub CLI 2.99.0 or later uploads it to the pull request:
 
 ```bash
-"${CLAUDE_SKILL_DIR}/../../scripts/pr-asset.sh" .playwright/after.png
-# https://pr.wolfstar.rocks/<repo>/<branch>/after-9f2c1a04.png
+WOLFSTAR_AGENT_PR_SKILL=1 gh pr comment NUMBER \
+  --body "Checked the visible change in the running app." \
+  --attach './.playwright/after.png#The updated page'
 ```
 
-The URL carries a hash of the file, so a changed screenshot is a new URL and the edge can never serve the old one. Re-upload after every change and put the new URL in the comment. `~/.config/wolfstar-agent-kit/pr-assets.env` holds the account, the token, and the public host. Without it the script exits 2 and says what is missing; post the comment without the image rather than blocking the PR.
+Use `--attach` for images and videos. Repeat the flag for up to 50 files. GitHub hosts the files with the pull request. Never upload pull request media to another service.
 
-Take the picture before you need it: [nuxt-frontend-review](../nuxt-frontend-review/SKILL.md) already captures the running page. Two images beat one, labelled `Before` and `After`:
+Match each Markdown image path exactly to its attachment path, including relative versus absolute spelling.
+After posting, read the published body and check that every image uses its uploaded GitHub URL.
+If uploads succeeded but local links remain, repair the same body using those returned URLs. Do not upload duplicates.
 
-```markdown
-| Before                                                                         | After                                                                        |
-| ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
-| ![before](https://pr.wolfstar.rocks/nuxt-seo/fix-og-image/before-3d81be77.png) | ![after](https://pr.wolfstar.rocks/nuxt-seo/fix-og-image/after-9f2c1a04.png) |
+Visually inspect every screenshot before attaching it. Check the full-resolution image and the intended display size.
+
+Look for clipping, overlap, overflow, alignment, contrast, missing content, and broken responsive layouts. Treat every visible defect as task scope.
+
+If inspection finds a defect, do not upload that screenshot. Repair the UI in the task worktree. Run Step 4 and a focused browser check.
+
+Commit and push the repair without amending. Recapture the same view and inspect it again. Repeat until the attached result is clean.
+
+Keep a labelled `Before` image only when it explains the repaired defect. Its matching `After` image must show the same area.
+
+Take the picture before you need it. [nuxt-frontend-review](../nuxt-frontend-review/SKILL.md) already captures the running page. Two images beat one, labelled `Before` and `After`:
+
+```bash
+WOLFSTAR_AGENT_PR_SKILL=1 gh pr comment NUMBER \
+  --body "$(cat <<'EOF'
+| Before | After |
+| --- | --- |
+| ![Before](./.playwright/before.png) | ![After](./.playwright/after.png) |
+EOF
+)" \
+  --attach ./.playwright/before.png \
+  --attach ./.playwright/after.png
 ```
 
-Only for a change someone can see: a page, a component, a CLI frame, a rendered email. Never a screenshot of passing tests or a green terminal.
+GitHub CLI replaces each local Markdown path with its uploaded URL. If every upload fails, it posts no comment. If a later upload fails, it posts the successful files and exits with an error. Check the printed comment URL before retrying.
 
-The bucket expires objects after 90 days, so a picture on a very old pull request goes blank. That is also what clears the superseded uploads. Nothing to clean up by hand, and [close-off](../close-off/SKILL.md) leaves the bucket alone: a merged pull request stays readable while anyone is still likely to open it.
+Only attach media for a visible change: a page, a component, a CLI frame, or a rendered email. Never attach a screenshot of passing tests or a green terminal.
 
 ## Step 6: Monitor CI & Review Comments
 

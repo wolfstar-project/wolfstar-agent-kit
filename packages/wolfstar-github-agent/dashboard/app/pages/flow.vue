@@ -89,7 +89,7 @@ const pullRequestSteps: Step[] = [
   },
   {
     title: 'Rerun review',
-    text: 'Wolfstar uses the dashboard or comments /wolfstar-agent rerun to queue the current head commit once.',
+    text: 'Wolfstar uses the dashboard or comments @wolfstar-agent rerun to queue the current head commit once.',
   },
   {
     title: 'GitHub status',
@@ -121,7 +121,14 @@ const issueSteps: Step[] = [
       { title: 'Outside contributor', text: 'Wait for Approval of that exact issue state.', marker: 'decision' },
     ],
   },
-  { title: 'Issue work', text: 'The triage Agent resumes its own session, makes the change, and runs focused checks.' },
+  {
+    title: 'Batch',
+    text: 'Two or more Ready Routine-filed issues in one repository are planned together: one turn decides which share a pull request and which stack on which.',
+  },
+  {
+    title: 'Issue work',
+    text: 'The triage Agent resumes its own session, makes the change, and runs focused checks. Batch units run three at a time under one permit and publish as each finishes.',
+  },
   {
     title: 'Draft pull request',
     text: 'The controller pushes the pinned commit to an allowed branch and opens one pull request.',
@@ -162,7 +169,6 @@ const recovery = [
 ]
 
 const gaps = [
-  { title: 'Claude review', text: 'The service starts Codex or opencode Agents only, so no Claude review runs.' },
   { title: 'Take Ownership', text: 'The service does not watch a merge deployment or run production smoke checks.' },
 ]
 
@@ -208,7 +214,7 @@ const stepNumber = (index: number): string => String(index + 1).padStart(2, '0')
     </div>
 
     <section aria-labelledby="flow-intake" class="flex flex-col gap-3">
-      <ColumnHeading id="flow-intake" label="GitHub intake" />
+      <ColumnHeading id="flow-intake" rule label="GitHub intake" />
       <ol
         class="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)_auto_minmax(0,1fr)_auto_minmax(0,1fr)] md:items-stretch"
       >
@@ -229,7 +235,7 @@ const stepNumber = (index: number): string => String(index + 1).padStart(2, '0')
 
     <div class="grid items-start gap-6 md:grid-cols-2">
       <section aria-labelledby="flow-pull-request" class="flex flex-col gap-3">
-        <ColumnHeading id="flow-pull-request" label="Pull request" />
+        <ColumnHeading id="flow-pull-request" rule label="Pull request" />
         <ol class="flex flex-col gap-2 rounded-lg bg-muted p-2">
           <li
             v-for="(step, index) in pullRequestSteps"
@@ -265,7 +271,7 @@ const stepNumber = (index: number): string => String(index + 1).padStart(2, '0')
       </section>
 
       <section aria-labelledby="flow-issue" class="flex flex-col gap-3">
-        <ColumnHeading id="flow-issue" label="Issue" />
+        <ColumnHeading id="flow-issue" rule label="Issue" />
 
         <ol class="flex flex-col gap-2 rounded-lg bg-muted p-2">
           <li
@@ -303,7 +309,7 @@ const stepNumber = (index: number): string => String(index + 1).padStart(2, '0')
     </div>
 
     <section aria-labelledby="flow-recovery" class="flex flex-col gap-3">
-      <ColumnHeading id="flow-recovery" label="Automatic recovery" />
+      <ColumnHeading id="flow-recovery" rule label="Automatic recovery" />
       <ul class="divide-y divide-default" role="list">
         <li
           v-for="row in recovery"
@@ -323,7 +329,7 @@ const stepNumber = (index: number): string => String(index + 1).padStart(2, '0')
     </section>
 
     <section aria-labelledby="flow-gaps" class="flex flex-col gap-3">
-      <ColumnHeading id="flow-gaps" label="Known gaps" :count="gaps.length" tone="error" />
+      <ColumnHeading id="flow-gaps" rule label="Known gaps" :count="gaps.length" tone="error" />
       <ul class="grid gap-2 md:grid-cols-2" role="list">
         <li v-for="gap in gaps" :key="gap.title" class="rounded-md border p-3" :class="markerClass.gap">
           <span class="font-medium">{{ gap.title }}</span>
@@ -333,7 +339,7 @@ const stepNumber = (index: number): string => String(index + 1).padStart(2, '0')
     </section>
 
     <section aria-labelledby="flow-roles" class="flex flex-col gap-3">
-      <ColumnHeading id="flow-roles" label="Who can do what" />
+      <ColumnHeading id="flow-roles" rule label="Who can do what" />
       <ul
         class="grid divide-y divide-default rounded-md border border-default bg-elevated md:grid-cols-3 md:divide-x md:divide-y-0"
         role="list"

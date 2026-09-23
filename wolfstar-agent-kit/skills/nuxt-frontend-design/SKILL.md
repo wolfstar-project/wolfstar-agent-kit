@@ -33,18 +33,7 @@ These justify the specificity in the rest of the skill. Hold them while working;
 
 ## Project State
 
-!`if [ -f nuxt.config.ts ]; then echo "IS_NUXT=true"; else echo "IS_NUXT=false"; fi`
-!`bash -c 'F=""; if [ -f app.config.ts ]; then F="app.config.ts"; fi; if [ -f app/app.config.ts ]; then F="app/app.config.ts"; fi; if [ -n "$F" ] && grep -q "colors:" "$F" 2>/dev/null; then echo "HAS_COLORS=true"; else echo "HAS_COLORS=false"; fi'`
-!`bash -c 'for f in app/assets/css/main.css app/css/main.css app/css/global.css app/assets/css/global.css; do if [ -f "$f" ] && grep -q "@theme" "$f" 2>/dev/null; then echo "HAS_THEME=true"; exit 0; fi; done; echo "HAS_THEME=false"'`
-!`if [ -f DESIGN.md ]; then echo "HAS_GUIDELINES=true"; else echo "HAS_GUIDELINES=false"; fi`
-!`bash -c 'OUT=$(ls -t .claude/context/jobs/ 2>/dev/null | head -10); if [ -n "$OUT" ]; then echo "$OUT"; else echo "NO_JOBS"; fi'`
-!`bash -c 'JOB=$(ls -t .claude/context/jobs/ 2>/dev/null | head -1); if [ -n "$JOB" ]; then echo "LATEST_JOB=$JOB"; if [ -f ".claude/context/jobs/$JOB/build-handoff.json" ]; then echo "PRIOR_BUILD=true"; jq -r "\"PRIOR_BUILD_DATE=\" + (.created // \"unknown\")" ".claude/context/jobs/$JOB/build-handoff.json" 2>/dev/null; else echo "PRIOR_BUILD=false"; fi; else echo "PRIOR_BUILD=false"; fi'`
-!`bash -c 'JOB=$(ls -t .claude/context/jobs/ 2>/dev/null | head -1); if [ -n "$JOB" ] && [ -f ".claude/context/jobs/$JOB/review-report.md" ]; then echo "PRIOR_REVIEW=true"; grep -m1 "^verdict:" ".claude/context/jobs/$JOB/review-report.md" 2>/dev/null; else echo "PRIOR_REVIEW=false"; fi'`
-!`bash -c 'JOB=$(ls -t .claude/context/jobs/ 2>/dev/null | head -1); if [ -n "$JOB" ] && [ -f ".claude/context/jobs/$JOB/build-progress.md" ]; then printf "PAGES_BUILT="; grep -c "^## " ".claude/context/jobs/$JOB/build-progress.md" 2>/dev/null; else echo "PAGES_BUILT=0"; fi'`
-!`if command -v dev-browser >/dev/null 2>&1; then echo "DEV_BROWSER=true"; else echo "DEV_BROWSER=false"; fi`
-!`bash -c 'OUT=$(find app/pages -name "*.vue" 2>/dev/null | head -10); if [ -n "$OUT" ]; then echo "$OUT"; else echo "NO_PAGES"; fi'`
-!`bash -c 'OUT=$(ls "${CLAUDE_SKILL_DIR}/references/themes/" 2>/dev/null | sed "s/.md$//"); if [ -n "$OUT" ]; then echo "$OUT"; else echo "NO_THEMES"; fi'`
-!`bash -c 'F=""; if [ -f app.config.ts ]; then F="app.config.ts"; fi; if [ -f app/app.config.ts ]; then F="app/app.config.ts"; fi; if [ -n "$F" ] && grep -q "colors:" "$F" 2>/dev/null; then N=$(grep -E "neutral:" "$F" 2>/dev/null | head -1 | sed "s/.*neutral:[[:space:]]*['"'"'\"]//" | sed "s/['"'"'\"].*//" ); if [ -n "$N" ]; then echo "$N"; else echo "NO_NEUTRAL"; fi; else echo "NO_NEUTRAL"; fi'`
+!`bash "${CLAUDE_SKILL_DIR}/scripts/project-state.sh"`
 
 ## Phase Detection
 
@@ -66,7 +55,7 @@ IS_NUXT=false: this skill needs a Nuxt project (`nuxt.config.ts`). Say so and st
 
 Phase 2 depends on a complete design system. If any of the three indicators is missing, run Phase 1 first and tell the user you're doing so.
 
-Phase 1 consumes a lot of context. When Phase 1 completes in the current conversation, prefer emitting the handoff and telling the user: "Design system ready. Start a new conversation and run `/nuxt-frontend-design {page}` to build with fresh context." Continue in the same conversation only if the remaining build is small and context is still clean.
+After Phase 1, emit the handoff and continue into Phase 2 when pages were asked for. Offer a fresh conversation with `/nuxt-frontend-design {page}` only after repair passes or for multi-page builds.
 
 ## Content & Asset Rules
 
@@ -90,7 +79,7 @@ Hard rejections unless the user explicitly asked for them:
 - Emoji in UI copy unless the brand system registers emoji as a token
 - Generic stat blocks ("10M+ users, 99.9% uptime, 24/7 support")
 - Overused sans stacks: Inter, Roboto, Open Sans, Lato, Montserrat, Arial, any bare `system-ui` / `sans-serif` fallback as the only font
-- SaaS-landing cliché serifs (Fraunces, Playfair, DM Serif) used _without commitment_, i.e. paired with a generic sans for body copy as decoration only. A theme that genuinely commits to an editorial, paper-craft, or literary aesthetic (kinetic-paper, flow) is right to use an editorial serif. The ban targets "add a serif heading for personality" tokenism.
+- SaaS-landing cliché serifs (Fraunces, Playfair, DM Serif) used _without commitment_, i.e. paired with a generic sans for body copy as decoration only. A theme that genuinely commits to an editorial, paper-craft, or literary aesthetic (kinetic-paper, flow, monograph) is right to use an editorial serif. The ban targets "add a serif heading for personality" tokenism.
 
 ### Placeholder Over Fake
 
@@ -142,7 +131,7 @@ Theme signature tokens are the exception: when a theme's voice depends on an eff
 - [design-system.md](references/design-system.md): full setup guide (colors, fonts, tokens, component theming)
 - [themes/{name}.md](references/themes/): complete theme implementation files
 
-Available themes: frost, clay, blueprint, nebula, zen, neon, teenage-engineering, kinetic-paper, flow, devtool (the live list is injected above).
+Available themes: frost, clay, blueprint, nebula, zen, neon, teenage-engineering, kinetic-paper, flow, devtool, monograph (the live list is injected above).
 
 Read exactly one theme file: `${CLAUDE_SKILL_DIR}/references/themes/{chosen-theme}.md`. Reading several for comparison burns context without improving the choice. With no theme specified, default to `frost` for dark mode projects and `zen` for light mode; ask only when the choice is genuinely ambiguous.
 
@@ -159,6 +148,21 @@ Emit `DESIGN.md` at the project root after writing `app.config.ts`, `main.css`, 
 7. **Verify tokens lint**: `npx --yes @google/design.md lint DESIGN.md 2>/dev/null | jq -r '.summary.errors'` returns `0`. If the linter crashes (`raw.match is not a function`) because a component prop holds a float or `rgba()`, quote floats and convert `rgba()` to 8-digit hex. Contrast warnings on button-primary are informational here; if the theme's signature colour intentionally trades 4.5:1 for aesthetic, document it under `## Design Decisions`.
 
 Modifying an existing design system: update `DESIGN.md` in place.
+
+### After Setup: COPY.md is the other half
+
+`DESIGN.md` owns the pixels. It does not own the words, and a page built with no decision about
+its words ships whatever sentence each agent liked that day.
+
+After emitting `DESIGN.md`, check for `COPY.md` at the project root. If the project has
+user-visible strings and no `COPY.md`, say so and offer to run the
+[`copywriting` skill](../copywriting/SKILL.md) `init` workflow. Do not write one from inside
+this skill: it bootstraps from the strings that already ship, and that is a different harvest
+from the one done here.
+
+When `COPY.md` exists, read it before writing a single label, heading, empty state or error, and
+keep `DESIGN.md` pointing at it rather than restating voice rules. `DESIGN.md`'s Voice section
+is one line: which file owns this.
 
 ### Setup Recovery
 
@@ -186,10 +190,16 @@ If not already in context from Phase 1:
 
 ```
 DESIGN.md                 -> aesthetic intent, component rules, avoid list, custom utilities
+COPY.md                   -> canonical strings, register per surface, banned language
+GLOSSARY.md               -> what each product concept is called
 app/assets/css/main.css   -> @theme tokens, --ui-* overrides, custom classes
 app.config.ts             -> colors, component theme overrides, defaultVariants
 nuxt.config.ts            -> fonts, colorMode, ui.theme.colors
 ```
+
+Every string the page renders comes from `COPY.md` and `GLOSSARY.md`, in that order: the noun
+from the glossary, the sentence around it from the copy file. Inventing either while building a
+component is how a product ends up describing itself four ways.
 
 Use the project's semantic tokens, fonts, and component overrides. Never hardcode colors, shadows, or radii that bypass the design system. For a design variation, override an existing Nuxt UI token rather than introducing a new one.
 

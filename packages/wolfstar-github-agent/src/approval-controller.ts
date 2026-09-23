@@ -16,15 +16,19 @@ export interface ApprovalController {
 }
 
 export interface ApprovalControllerOptions {
-  github: Pick<GitHubAgentSource, 'consumeApprovalLabel' | 'ensureApprovalLabel' | 'upsertReviewStatus'>
+  github: Pick<
+    GitHubAgentSource,
+    'clearAgentLabels' | 'consumeApprovalLabel' | 'ensureApprovalLabel' | 'upsertReviewStatus'
+  >
   now: () => Date
   store: Pick<
     JournalStore,
-    | 'approveIssueWork'
+    | 'approveIssue'
     | 'approvePullRequest'
     | 'getSelectionMode'
+    | 'hasApprovalPromptComment'
     | 'hasPullRequestApproval'
-    | 'isIssueWorkApprovalReady'
+    | 'isIssueApprovalPending'
     | 'recordApprovalPromptComment'
   >
 }
@@ -50,7 +54,7 @@ export function createApprovalController(options: ApprovalControllerOptions): Ap
           !repository.enabled ||
           !repository.issueWork ||
           trustedAuthor ||
-          !options.store.isIssueWorkApprovalReady(repository.github, subject.number, revisionId)
+          !options.store.isIssueApprovalPending(repository.github, subject.number, revisionId)
         )
           return ok(undefined)
         const label = APPROVAL_LABELS.review
@@ -58,7 +62,7 @@ export function createApprovalController(options: ApprovalControllerOptions): Ap
           return options.github.ensureApprovalLabel(repository, label, signal)
         const consumed = await options.github.consumeApprovalLabel(repository, 'issue', subject.number, label, signal)
         if (consumed._tag === 'Err') return consumed
-        const approved = options.store.approveIssueWork({
+        const approved = options.store.approveIssue({
           repository: repository.github,
           issueNumber: subject.number,
           revisionId,
@@ -93,6 +97,16 @@ export function createApprovalController(options: ApprovalControllerOptions): Ap
         if (manualSelection || trustedAuthor) return ok(undefined)
         const available = await options.github.ensureApprovalLabel(repository, label, signal)
         if (available._tag === 'Err') return available
+        // A verdict label answers for one head commit, and this prompt says no
+        // Review has answered this one. No Task exists here to clear it later,
+        // so a READY from the previous head would sit on the pull request until
+        // somebody approves the new one. The prompt follows the head across
+        // Revisions, so an unrecorded prompt means the head is new, and the
+        // clear runs once per head rather than once per poll.
+        if (!options.store.hasApprovalPromptComment(repository.github, pullRequest.number, revisionId)) {
+          const cleared = await options.github.clearAgentLabels(repository, pullRequest.number, signal)
+          if (cleared._tag === 'Err') return cleared
+        }
         const body = approvalPrompt(label, pullRequest.headSha)
         const posted = await options.github.upsertReviewStatus(
           repository,

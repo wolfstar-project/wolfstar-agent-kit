@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# Rejects a commit subject that does not follow Conventional Commits.
+#
+# The Claude Code plugin hook states this format, but it only fires in a Claude
+# Code session. The GitHub agent workers run opencode or codex, and Wolfstar
+# commits by hand, so that hook reaches a fraction of the commits. Git runs this
+# one for every author and every provider.
+set -uo pipefail
+
+message_file=${1:-}
+[ -n "$message_file" ] || exit 0
+[ -f "$message_file" ] || exit 0
+
+# Only the trusted checkout roots. Every other repository keeps its own rules.
+repository_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+case "$repository_root" in
+  "$HOME"/pkg/* | "$HOME"/sites/* | "$HOME"/pkg | "$HOME"/sites) ;;
+  *) exit 0 ;;
+esac
+
+# The first line that is neither blank nor a comment is the subject.
+subject=$(grep -v '^#' "$message_file" | grep -m1 -v '^[[:space:]]*$' || true)
+[ -n "$subject" ] || exit 0
+
+# Git writes these itself, or a later rebase consumes them.
+case "$subject" in
+  'Merge '* | 'Revert '* | 'fixup!'* | 'squash!'* | 'amend!'*) exit 0 ;;
+esac
+
+types='feat|fix|docs|chore|refactor|perf|test|style'
+
+refuse() {
+  printf '\nCommit refused: %s\n\n' "$1" >&2
+  printf 'Subject: %s\n\n' "$subject" >&2
+  printf 'Use `type(scope): description`.\n' >&2
+  printf 'Types: feat, fix, docs, chore, refactor, perf, test, style.\n' >&2
+  printf 'The scope is optional. Name the module or folder.\n' >&2
+  printf 'Keep the subject under 70 characters. Use the imperative mood.\n' >&2
+  printf 'Do not end the subject with a period.\n' >&2
+  exit 1
+}
+
+if ! printf '%s' "$subject" | grep -qE "^($types)(\([A-Za-z0-9._/@-]+\))?!?: .+"; then
+  refuse 'the subject has no Conventional Commits type.'
+fi
+
+if [ "${#subject}" -gt 70 ]; then
+  refuse "the subject is ${#subject} characters. The limit is 70."
+fi
+
+case "$subject" in
+  *.) refuse 'the subject ends with a period.' ;;
+esac
+
+# A repository opts in to scope names by adding a `## Scopes` table to
+# GLOSSARY.md. The table lists retired spellings only, never every allowed
+# scope. An allowlist would churn: across Wolfstar's repositories 40 to 59
+# percent of scopes appear exactly once, so the list would need constant
+# edits while the real drift is a handful of synonym pairs.
+glossary="$repository_root/GLOSSARY.md"
+[ -f "$glossary" ] || exit 0
+
+scope=$(printf '%s' "$subject" | sed -n 's/^[a-z]*(\([^)]*\))\{0,1\}.*/\1/p')
+[ -n "$scope" ] || exit 0
+
+# Reads the `| Never | Use instead | Why |` rows under `## Scopes` only.
+replacement=$(awk -F'|' -v want="$scope" '
+  /^## Scopes[[:space:]]*$/ { inside = 1; next }
+  /^## / { inside = 0 }
+  inside && NF >= 4 {
+    never = $2; use = $3
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", never)
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", use)
+    gsub(/`/, "", never)
+    gsub(/`/, "", use)
+    if (never == want) { print use; exit }
+  }
+' "$glossary")
+
+if [ -n "$replacement" ]; then
+  printf '\nCommit refused: GLOSSARY.md retires the scope `%s`.\n\n' "$scope" >&2
+  printf 'Subject: %s\n\n' "$subject" >&2
+  printf 'Use `%s` instead.\n' "$replacement" >&2
+  printf 'The Scopes table in GLOSSARY.md names the canonical scope.\n' >&2
+  exit 1
+fi
+
+exit 0

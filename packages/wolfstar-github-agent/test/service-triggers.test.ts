@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
 import { homedir } from 'node:os'
+import { describe, expect, it } from 'vitest'
 import { parseConfigText } from '../src/config.ts'
 import { dashboardSnapshotForTriggers, recordRoutineOnlyRepositoryHealth } from '../src/service.ts'
 import { dashboardSnapshot } from './fixtures.ts'

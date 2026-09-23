@@ -1,3 +1,6 @@
+import type { ClassificationSource } from './classification.ts'
+import { choice } from 'advocaat'
+
 /**
  * One taxonomy for every failure the controller can observe.
  *
@@ -290,6 +293,17 @@ export function isTransientFailure(signal: FailureSignal): boolean {
 }
 
 /**
+ * Whether a refused Publication says its subject moved on.
+ *
+ * The controller retires that Publication on purpose and queues fresh work for
+ * the new head commit. Nothing broke and nobody has to act, so an Incident
+ * names a healthy path as a fault. One sat open for twelve days doing that.
+ */
+export function isSubjectMovedReason(message: string): boolean {
+  return classifyFailure({ message }).kind === 'subject_changed'
+}
+
+/**
  * Whether another attempt at the same work can change the result.
  *
  * A Task the controller refused by policy reads the same policy on every
@@ -327,4 +341,175 @@ export function recoveryDelayMilliseconds(recoveryAttempts: number): number {
 
 export function nextRecoveryAt(failedAt: string, recoveryAttempts: number): string {
   return new Date(Date.parse(failedAt) + recoveryDelayMilliseconds(recoveryAttempts)).toISOString()
+}
+
+/**
+ * What one failing check says about who can fix it.
+ *
+ * `Repairable` means the repository is the cause, so an Agent may change it.
+ * `Infrastructure` means the runner host or a remote service failed. No change
+ * to the repository fixes that, and every past Agent turn on one produced a
+ * mask: a retry wrapper, a concurrency limit, or a build flag. A person repairs
+ * the host, then re-runs the check.
+ */
+export type CheckFailureClass = { _tag: 'Repairable' } | { _tag: 'Infrastructure'; reason: string }
+
+export interface CheckFailureSignal {
+  name: string
+  conclusion: string | null
+  /** What the job steps say, when the controller could read them. */
+  runnerLost?: boolean
+  /** The last lines of the failed job log, oldest first. Empty when unavailable. */
+  logTail: string[]
+}
+
+/**
+ * A runner killed the job process, or the host killed the runner. GitHub
+ * prints the kill as the last lines of the failed step, so only the tail's
+ * final lines count. A test that asserts kill-signal output prints it earlier.
+ */
+const runnerKillPatterns: RegExp[] = [
+  /\bexit code 129\b/i,
+  /\bexit code 137\b/i,
+  /\brunner has received a shutdown signal\b/i,
+  /\blost communication with the server\b/i,
+  /\bThe hosted runner\b.+\blost communication\b/i,
+  /\bThe self-hosted runner\b.+\blost communication\b/i,
+  /\bThe operation was canceled\b/i,
+]
+
+/** Remote services a workflow downloads from, which the repository does not control. */
+const remoteHostPattern =
+  /\b(?:unpkg\.com|nodejs\.org|registry\.npmjs\.org|registry\.yarnpkg\.com|objects\.githubusercontent\.com|release-assets\.githubusercontent\.com|github\.com\/[\w.-]+\/[\w.-]+\/releases\/download)\b/i
+
+/**
+ * A download failed at the transport level. Bare words such as `timeout`,
+ * `fetch failed`, or a `503` also appear in repository tests that mention a
+ * package host, so only an OS or client error token counts.
+ */
+const remoteFetchFailurePatterns: RegExp[] = [
+  /\bETIMEDOUT\b/,
+  /\bECONNRESET\b/,
+  /\bECONNREFUSED\b/,
+  /\bENOTFOUND\b/,
+  /\bEAI_AGAIN\b/,
+  /\bUND_ERR_(?:CONNECT_TIMEOUT|HEADERS_TIMEOUT|SOCKET)\b/,
+  /\bsocket hang up\b/i,
+  /\bERR_PNPM_FETCH_\w+\b/,
+]
+
+/** How many neighbouring lines one download failure may span: the URL, a stack trace, then the cause. */
+const remoteFetchWindow = 6
+
+/** How many final lines of the tail a runner kill may occupy. */
+const runnerKillTail = 3
+
+function remoteFetchFailure(logTail: string[]): string | null {
+  for (let index = 0; index < logTail.length; index += 1) {
+    const window = logTail.slice(index, index + remoteFetchWindow).join('\n')
+    const host = window.match(remoteHostPattern)
+    if (host !== null && matches(remoteFetchFailurePatterns, window)) return host[0]
+  }
+  return null
+}
+
+/**
+ * Classifies one failing check from what the controller can read before an Agent starts.
+ *
+ * Only a runner kill or a remote download failure is Infrastructure. A heap
+ * limit inside a step stays Repairable, because the workflow's `NODE_OPTIONS`
+ * is the repository's to change. An unreadable log stays Repairable, because
+ * an Agent can still read the repository. A `timed_out` conclusion stays
+ * Repairable unless the log shows the host or a download stalled.
+ */
+export function classifyCheckFailure(signal: CheckFailureSignal): CheckFailureClass {
+  if (signal.runnerLost === true)
+    return {
+      _tag: 'Infrastructure',
+      reason: `The runner lost the job for check "${signal.name}" before any step failed.`,
+    }
+  // A `timed_out` conclusion alone says nothing about who hung. A repository
+  // test can hang as easily as a host can stall, so the log decides.
+  const tail = signal.logTail.slice(-runnerKillTail)
+  // GitHub reports the kill on a `##[error]` annotation or as the final line.
+  // A test name that quotes an exit code sits inside vitest output, not there.
+  const killed = tail.find(
+    (line, index) => (line.startsWith('##[error]') || index === tail.length - 1) && matches(runnerKillPatterns, line),
+  )
+  if (killed !== undefined)
+    return { _tag: 'Infrastructure', reason: `The runner killed the job for check "${signal.name}": ${killed.trim()}` }
+  const host = remoteFetchFailure(signal.logTail)
+  if (host !== null)
+    return { _tag: 'Infrastructure', reason: `A download from ${host} failed during check "${signal.name}".` }
+  return { _tag: 'Repairable' }
+}
+
+/**
+ * The classification question for one failing check the patterns could not
+ * name. Exported so tests can assert the contract without the service.
+ */
+/**
+ * Option order affects the answer distribution, so the criteria order is part
+ * of the measured contract: reorder only alongside a fresh eval of the
+ * residual classifier.
+ */
+export function checkFailureQuestions(checkName: string) {
+  return {
+    cause: choice(
+      `The state holds the final lines of one failed GitHub Actions check, "${checkName}". Decide who must fix it.`,
+      {
+        Repairable: 'The repository owns the failure: its code, its tests, its configuration, or its dependencies.',
+        Infrastructure:
+          'The host or the network owns the failure: the runner itself, disk, memory of the machine, or a remote download that never reached the repository.',
+      },
+    ),
+  }
+}
+
+/** Infrastructure from the classification needs this much confidence. Below it, the check stays Repairable. */
+export const CHECK_INFRASTRUCTURE_CONFIDENCE_FLOOR = 0.85
+
+/**
+ * Classifies one failing check, with the classification service answering what
+ * the patterns cannot.
+ *
+ * The patterns decide first and the service never overrides them: a runner
+ * kill or a named remote host is settled fact. Only a check the patterns left
+ * Repairable is asked about, and only a confident answer moves it, because a
+ * wrong Infrastructure answer stops the repair and asks a person to fix a
+ * host. Every other answer, and every failure, keeps the repair.
+ */
+export async function classifyCheckFailureWithResidual(input: {
+  signal: CheckFailureSignal
+  classification: ClassificationSource | null
+  abort?: AbortSignal
+}): Promise<CheckFailureClass> {
+  const classified = classifyCheckFailure(input.signal)
+  if (classified._tag === 'Infrastructure' || input.classification === null) return classified
+  if (input.signal.logTail.length === 0) return classified
+  const result = await input.classification.classify({
+    state: { check: input.signal.name, conclusion: input.signal.conclusion, logTail: input.signal.logTail.slice(-30) },
+    questions: checkFailureQuestions(input.signal.name),
+    ...(input.abort === undefined ? {} : { signal: input.abort }),
+  })
+  if (result._tag === 'Err') return classified
+  // The boundary trust ends here: an answer that is not a typed choice with
+  // a numeric confidence reads as no answer, never as a verdict.
+  const answer = result.value.answers.cause
+  if (
+    answer === undefined ||
+    answer.type !== 'choice' ||
+    typeof answer.choice !== 'string' ||
+    !Number.isFinite(answer.confidence) ||
+    answer.confidence < 0 ||
+    answer.confidence > 1
+  ) {
+    return classified
+  }
+  const confidence = Math.round(answer.confidence * 100) / 100
+  if (answer.choice !== 'Infrastructure' || confidence < CHECK_INFRASTRUCTURE_CONFIDENCE_FLOOR) return classified
+  return {
+    _tag: 'Infrastructure',
+    reason: `The classification read check "${input.signal.name}" as infrastructure with confidence ${confidence}.`,
+  }
 }

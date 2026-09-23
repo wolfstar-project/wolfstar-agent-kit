@@ -17,6 +17,9 @@ const toast = useToast()
 const wide = useMediaQuery('(min-width: 48rem)')
 
 const restart = computed(() => restartNotice(snapshot.value.restartRequest))
+const restartActive = computed(
+  () => snapshot.value.restartRequest?._tag === 'Requested' || snapshot.value.restartRequest?._tag === 'Restarting',
+)
 const paused = computed(() => snapshot.value.agentControl._tag === 'Paused')
 
 async function toggleNotifications(): Promise<void> {
@@ -39,6 +42,7 @@ const items = computed<DropdownMenuItem[][]>(() => {
           { label: 'Board', to: '/', icon: 'i-octicon-columns-16' },
           { label: 'History', to: '/history', icon: 'i-octicon-history-16' },
           { label: 'Watching', to: '/watching', icon: 'i-octicon-broadcast-16' },
+          { label: 'Routines', to: '/routines', icon: 'i-octicon-calendar-16' },
           { label: 'Stats', to: '/stats', icon: 'i-octicon-graph-16' },
         ],
         [
@@ -112,7 +116,7 @@ const items = computed<DropdownMenuItem[][]>(() => {
     ],
     [
       {
-        label: restart.value === undefined ? 'Restart after current work' : restart.value.text,
+        label: restartActive.value && restart.value !== undefined ? restart.value.text : 'Restart after current work',
         icon: 'i-octicon-sync-16',
         disabled: controlPending.value || restart.value?._tag === 'Requested' || restart.value?._tag === 'Restarting',
         onSelect: () => requestRestart(),

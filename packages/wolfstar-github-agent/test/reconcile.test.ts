@@ -1,16 +1,461 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
+import { routedResult } from '../src/issue-classification.ts'
 import { reconcileRepository } from '../src/reconcile.ts'
 import { err, ok } from '../src/result.ts'
 import { AGENT_ACTOR_LOGIN } from '../src/review-comment.ts'
+import { routineReportCommand } from '../src/routine-report-controller.ts'
 import { openJournalStore } from '../src/store.ts'
 import { issueItem, pullRequestItem, repositoryMapping } from './fixtures.ts'
 
-const noPullRequestRead = {
+const noFinalRead = {
+  getIssue: () => Promise.reject(new Error('No issue should need a final read.')),
   getPullRequest: () => Promise.reject(new Error('No pull request should need a final read.')),
 }
 
 describe('gitHub reconciliation', () => {
+  it('keeps a failed Review refresh visible until its own operation recovers', async () => {
+    const store = openJournalStore(':memory:', true)
+    const repository = repositoryMapping()
+    const scope = { _tag: 'Repository' as const, repository: repository.github }
+    const at = '2026-08-13T01:00:00.000Z'
+    store.syncRepositories([repository], at)
+    store.setRepositoryWritesEnabled(repository.github, true)
+    store.recordPollFailure(repository.github, at, 'GitHub could not list open items.')
+    store.recordIncident({
+      scope,
+      kind: 'unknown',
+      severity: 'error',
+      operation: 'review_status_publication',
+      message: 'GitHub could not publish the Review.',
+      recovery: { _tag: 'ActionRequired' },
+      at,
+    })
+    const github = { ...noFinalRead, listOpenItems: () => Promise.resolve(ok([])) }
+    let refreshes = 0
+    let merges = 0
+    try {
+      const failedRefresh = await reconcileRepository(repository, {
+        github,
+        store,
+        now: () => new Date(at),
+        refreshReviewGates: async () => {
+          refreshes++
+          store.recordIncident({
+            scope,
+            kind: 'unknown',
+            severity: 'error',
+            operation: 'review_gate_refresh',
+            message: 'GitHub could not read the Review gates.',
+            recovery: { _tag: 'ActionRequired' },
+            at,
+          })
+          return err('GitHub could not read the Review gates.')
+        },
+        autoMerge: {
+          reconcile: async () => {
+            merges++
+          },
+        },
+      })
+      expect(failedRefresh._tag).toBe('Ok')
+      expect(refreshes).toBe(1)
+      expect(merges).toBe(0)
+      expect(
+        store
+          .listIncidents()
+          .map((incident) => incident.operation)
+          .sort(),
+      ).toEqual(['review_gate_refresh', 'review_status_publication'])
+
+      const recovered = await reconcileRepository(repository, {
+        github,
+        store,
+        now: () => new Date('2026-08-13T01:01:00.000Z'),
+        refreshReviewGates: async () => {
+          store.resolveIncidents(scope, '2026-08-13T01:01:00.000Z', 'review_gate_refresh')
+          return ok(undefined)
+        },
+      })
+      expect(recovered._tag).toBe('Ok')
+      expect(store.listIncidents().map((incident) => incident.operation)).toEqual(['review_status_publication'])
+    } finally {
+      store.close()
+    }
+  })
+
+  it('refreshes settled Review gates after observations and before Auto merge', async () => {
+    const store = openJournalStore(':memory:', true)
+    const repository = repositoryMapping()
+    const order: string[] = []
+    store.syncRepositories([repository], '2026-08-13T00:00:00.000Z')
+    store.setRepositoryWritesEnabled(repository.github, true)
+    try {
+      const result = await reconcileRepository(repository, {
+        github: {
+          ...noFinalRead,
+          listOpenItems: () => Promise.resolve(ok([pullRequestItem({ mergeState: 'clean' })])),
+        },
+        store,
+        now: () => new Date('2026-08-13T01:00:00.000Z'),
+        refreshReviewGates: async (mapping) => {
+          expect(store.listOpenPullRequestNumbers(mapping.github)).toEqual([24])
+          order.push('refresh')
+          return ok(undefined)
+        },
+        autoMerge: {
+          reconcile: async () => {
+            order.push('merge')
+          },
+        },
+      })
+      expect(result._tag).toBe('Ok')
+      expect(order).toEqual(['refresh', 'merge'])
+    } finally {
+      store.close()
+    }
+  })
+
+  it('does not Auto merge an eligible pull request when the gate refresh aborts', async () => {
+    const store = openJournalStore(':memory:', true)
+    const repository = repositoryMapping()
+    store.syncRepositories([repository], '2026-08-13T00:00:00.000Z')
+    store.setRepositoryWritesEnabled(repository.github, true)
+    const signal = new AbortController()
+    signal.abort()
+    let merges = 0
+    const result = await reconcileRepository(repository, {
+      github: {
+        ...noFinalRead,
+        listOpenItems: () => Promise.resolve(ok([pullRequestItem({ autoMerge: true, mergeState: 'clean' })])),
+      },
+      store,
+      now: () => new Date('2026-08-13T01:00:00.000Z'),
+      signal: signal.signal,
+      refreshReviewGates: async (_repository, refreshSignal) =>
+        refreshSignal.aborted ? err('Review gate refresh was aborted.') : ok(undefined),
+      autoMerge: {
+        reconcile: async () => {
+          merges++
+        },
+      },
+    })
+    expect(result._tag).toBe('Ok')
+    expect(merges).toBe(0)
+    store.close()
+  })
+
+  it('never asks for a triage verdict in Manual Selection without the Review label', async () => {
+    const store = openJournalStore(':memory:', true)
+    const repository = repositoryMapping()
+    const at = '2026-09-18T01:00:00.000Z'
+    store.syncRepositories([repository], at)
+    store.setRepositoryWritesEnabled(repository.github, true)
+    store.setSelectionMode('manual')
+    let verdicts = 0
+    try {
+      const result = await reconcileRepository(repository, {
+        github: {
+          ...noFinalRead,
+          listOpenItems: () => Promise.resolve(ok([pullRequestItem({ mergeState: 'clean' })])),
+        },
+        store,
+        now: () => new Date(at),
+        pullRequestTriage: {
+          verdict: async () => {
+            verdicts++
+            throw new Error('No verdict was asked for.')
+          },
+          settle: async () => {
+            throw new Error('No settle was asked for.')
+          },
+        },
+      })
+      expect(result._tag).toBe('Ok')
+      expect(verdicts).toBe(0)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('never asks for a triage verdict on a draft or untrusted pull request', async () => {
+    const store = openJournalStore(':memory:', true)
+    const repository = repositoryMapping()
+    const at = '2026-09-18T01:00:00.000Z'
+    store.syncRepositories([repository], at)
+    store.setRepositoryWritesEnabled(repository.github, true)
+    let verdicts = 0
+    try {
+      const draft = await reconcileRepository(repository, {
+        github: {
+          ...noFinalRead,
+          listOpenItems: () =>
+            Promise.resolve(
+              ok([
+                pullRequestItem({ draft: true, mergeState: 'clean' }),
+                pullRequestItem({ mergeState: 'conflicting' }),
+                pullRequestItem({ mergeState: 'clean', author: 'outside-contributor' }),
+              ]),
+            ),
+        },
+        store,
+        now: () => new Date(at),
+        pullRequestTriage: {
+          verdict: async () => {
+            verdicts++
+            throw new Error('No verdict was asked for.')
+          },
+          settle: async () => {
+            throw new Error('No settle was asked for.')
+          },
+        },
+      })
+      expect(draft._tag).toBe('Ok')
+      expect(verdicts).toBe(0)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('never asks for a triage verdict on a dismissed pull request', async () => {
+    const store = openJournalStore(':memory:', true)
+    const repository = repositoryMapping()
+    const at = '2026-09-18T01:00:00.000Z'
+    store.syncRepositories([repository], at)
+    store.setRepositoryWritesEnabled(repository.github, true)
+    store.recordObservation({
+      externalId: 'dismissed-pull-request',
+      observedAt: '2026-09-18T00:59:00.000Z',
+      source: 'poll',
+      subject: pullRequestItem({ mergeState: 'clean' }),
+    })
+    if (
+      store.dismissItem({ repository: repository.github, itemNumber: 24, at: '2026-09-18T00:59:30.000Z' })._tag !==
+      'Dismissed'
+    )
+      throw new Error('Expected the pull request to be dismissed.')
+    try {
+      const result = await reconcileRepository(repository, {
+        github: {
+          ...noFinalRead,
+          listOpenItems: () => Promise.resolve(ok([pullRequestItem({ mergeState: 'clean' })])),
+        },
+        store,
+        now: () => new Date(at),
+        pullRequestTriage: {
+          verdict: async () => {
+            throw new Error('No verdict was asked for.')
+          },
+          settle: async () => {
+            throw new Error('No settle was asked for.')
+          },
+        },
+      })
+      expect(result._tag).toBe('Ok')
+    } finally {
+      store.close()
+    }
+  })
+
+  it('never classifies or settles a dismissed issue', async () => {
+    const store = openJournalStore(':memory:', true)
+    const repository = repositoryMapping({ issueWork: true })
+    const at = '2026-09-18T01:00:00.000Z'
+    store.syncRepositories([repository], at)
+    store.setRepositoryWritesEnabled(repository.github, true)
+    const issue = issueItem()
+    store.recordObservation({
+      externalId: 'dismissed-issue',
+      observedAt: '2026-09-18T00:59:00.000Z',
+      source: 'poll',
+      subject: issue,
+    })
+    if (
+      store.dismissItem({ repository: repository.github, itemNumber: issue.number, at: '2026-09-18T00:59:30.000Z' })
+        ._tag !== 'Dismissed'
+    )
+      throw new Error('Expected the issue to be dismissed.')
+    try {
+      const result = await reconcileRepository(repository, {
+        github: {
+          ...noFinalRead,
+          listOpenItems: () => Promise.resolve(ok([issue])),
+        },
+        store,
+        now: () => new Date(at),
+        issueClassification: {
+          verdict: async () => {
+            throw new Error('No verdict was asked for.')
+          },
+          settle: async () => {
+            throw new Error('No settle was asked for.')
+          },
+        },
+      })
+      expect(result._tag).toBe('Ok')
+    } finally {
+      store.close()
+    }
+  })
+
+  it('a failed routed settle records the failure without stopping the pass', async () => {
+    const store = openJournalStore(':memory:', true)
+    const repository = repositoryMapping({ issueWork: true })
+    const at = '2026-09-18T01:00:00.000Z'
+    store.syncRepositories([repository], at)
+    store.setRepositoryWritesEnabled(repository.github, true)
+    let merges = 0
+    let settles = 0
+    try {
+      const result = await reconcileRepository(repository, {
+        github: {
+          ...noFinalRead,
+          listOpenItems: () => Promise.resolve(ok([issueItem()])),
+        },
+        store,
+        now: () => new Date(at),
+        issueClassification: {
+          verdict: async () => ({
+            _tag: 'Routed' as const,
+            confidence: 0.95,
+            title: 'Button does nothing',
+            body: 'Steps: open the app.',
+            result: routedResult({ route: 'NEEDS_INFO', difficulty: 2, impact: 3, hasReproduction: true }),
+          }),
+          settle: async () => {
+            settles++
+            return err('GitHub refused the routed comment.')
+          },
+        },
+        autoMerge: {
+          reconcile: async () => {
+            merges++
+          },
+        },
+      })
+      expect(result._tag).toBe('Ok')
+      expect(merges).toBe(1)
+      // The failure is transient by design: the stored decision retries the
+      // settle on the next poll, which needs the pass to have continued.
+      expect(settles).toBe(1)
+    } finally {
+      store.close()
+    }
+  })
+
+  it('never classifies a routine tracking issue the table knows', async () => {
+    const store = openJournalStore(':memory:', true)
+    const repository = repositoryMapping({ issueWork: true })
+    const at = '2026-09-18T01:00:00.000Z'
+    store.syncRepositories([repository], at)
+    store.setRepositoryWritesEnabled(repository.github, true)
+    const tracking = issueItem({ number: 42 })
+    const [routine] = store.syncRoutines({
+      repository: repository.github,
+      specSha: 'abc123',
+      entries: [
+        {
+          name: 'sentry-checkin',
+          crons: ['0 7 * * *'],
+          timeZone: 'Australia/Melbourne',
+          mode: 'report',
+          enabled: true,
+        },
+      ],
+      at: '2026-09-18T00:00:00.000Z',
+    })
+    if (routine === undefined) throw new Error('Expected a stored Routine.')
+    const run = store.openRoutineRun({
+      routineId: routine.id,
+      scheduledFor: '2026-09-18T07:00:00.000Z',
+      specSha: routine.specSha,
+      at: '2026-09-18T07:00:00.000Z',
+    })
+    if (run === null) throw new Error('Expected a Routine run.')
+    {
+      const task = store.claimNextRoutineRun('scanner', '2026-09-18T07:00:00.500Z', 45 * 60_000)
+      if (task === null) throw new Error('Expected a queued Routine run.')
+      store.completeRoutineRun({
+        taskId: task.id,
+        workerId: task.state.workerId,
+        fence: task.state.fence,
+        at: '2026-09-18T07:00:01.000Z',
+        evidence: 'No open Sentry issues.',
+      })
+    }
+    store.stageRoutineReport({
+      command: routineReportCommand({
+        repository: routine.repository,
+        routineId: routine.id,
+        routineName: routine.name,
+        run: { id: run.id, scheduledFor: run.scheduledFor },
+        report: { _tag: 'Completed', evidence: 'No open Sentry issues.' },
+      }),
+      at: '2026-09-18T07:00:02.000Z',
+    })
+    const command = store.claimNextRoutineReport('reporter-1', '2026-09-18T07:00:03.000Z', 60_000)
+    if (command === null) throw new Error('Expected a claimed Routine report.')
+    store.completeRoutineReport({
+      commandId: command.id,
+      workerId: command.workerId,
+      fence: command.fence,
+      at: '2026-09-18T07:00:04.000Z',
+      commentId: 1234,
+      trackingIssueNumber: tracking.number,
+    })
+    try {
+      const result = await reconcileRepository(repository, {
+        github: {
+          ...noFinalRead,
+          listOpenItems: () => Promise.resolve(ok([tracking])),
+        },
+        store,
+        now: () => new Date(at),
+        issueClassification: {
+          verdict: async () => {
+            throw new Error('No verdict was asked for.')
+          },
+          settle: async () => {
+            throw new Error('No settle was asked for.')
+          },
+        },
+      })
+      expect(result._tag).toBe('Ok')
+    } finally {
+      store.close()
+    }
+  })
+
+  it('settles nothing and asks no classification on a read-only deployment', async () => {
+    const store = openJournalStore(':memory:', true)
+    const repository = repositoryMapping({ issueWork: true })
+    const at = '2026-09-18T01:00:00.000Z'
+    store.syncRepositories([repository], at)
+    store.setRepositoryWritesEnabled(repository.github, true)
+    try {
+      const result = await reconcileRepository(repository, {
+        github: {
+          ...noFinalRead,
+          listOpenItems: () => Promise.resolve(ok([pullRequestItem({ mergeState: 'clean' }), issueItem()])),
+        },
+        mutationsEnabled: false,
+        store,
+        now: () => new Date(at),
+        pullRequestTriage: {
+          verdict: async () => {
+            throw new Error('No verdict was asked for.')
+          },
+          settle: async () => {
+            throw new Error('No settle was asked for.')
+          },
+        },
+      })
+      expect(result._tag).toBe('Ok')
+    } finally {
+      store.close()
+    }
+  })
+
   it('ignores issues authored by automated accounts', async () => {
     const store = openJournalStore(':memory:')
     const repository = repositoryMapping()
@@ -18,7 +463,7 @@ describe('gitHub reconciliation', () => {
 
     const result = await reconcileRepository(repository, {
       github: {
-        ...noPullRequestRead,
+        ...noFinalRead,
         listOpenItems: () => Promise.resolve(ok([issueItem({ author: 'github-actions[bot]' })])),
       },
       store,
@@ -60,7 +505,11 @@ describe('gitHub reconciliation', () => {
     expect(store.listIncidents()).toHaveLength(1)
 
     const result = await reconcileRepository(repository, {
-      github: { ...noPullRequestRead, listOpenItems: () => Promise.resolve(ok([botIssue])) },
+      github: {
+        ...noFinalRead,
+        getIssue: () => Promise.resolve(ok({ ...botIssue, state: 'closed' as const })),
+        listOpenItems: () => Promise.resolve(ok([botIssue])),
+      },
       store,
       now: () => new Date('2026-08-13T01:00:00.000Z'),
     })
@@ -74,6 +523,82 @@ describe('gitHub reconciliation', () => {
     store.close()
   })
 
+  it('keeps an issue open when its exact GitHub read says it is open', async () => {
+    const store = openJournalStore(':memory:')
+    const repository = repositoryMapping()
+    const issue = issueItem({ author: 'wolfstar-project' })
+    let exactReads = 0
+    store.syncRepositories([repository], '2026-08-13T00:00:00.000Z')
+    store.recordObservation({
+      externalId: 'issue-before-missing-list-result',
+      observedAt: '2026-08-13T00:01:00.000Z',
+      source: 'poll',
+      subject: issue,
+    })
+
+    const result = await reconcileRepository(repository, {
+      github: {
+        ...noFinalRead,
+        getIssue: () => {
+          exactReads += 1
+          return Promise.resolve(ok(issue))
+        },
+        listOpenItems: () => Promise.resolve(ok([])),
+      },
+      store,
+      now: () => new Date('2026-08-13T01:00:00.000Z'),
+    })
+
+    expect(result).toEqual({
+      _tag: 'Ok',
+      value: { repository: repository.github, subjects: 0, inserted: 0, duplicates: 0, stale: 0, closed: 0 },
+    })
+    expect(exactReads).toBe(1)
+    expect(store.getDashboardSnapshot('2026-08-13T01:00:00.000Z').items).toEqual([
+      expect.objectContaining({ kind: 'issue', number: issue.number, state: 'open' }),
+    ])
+    store.close()
+  })
+
+  it('keeps an issue open when its exact GitHub read fails', async () => {
+    const store = openJournalStore(':memory:')
+    const repository = repositoryMapping()
+    const issue = issueItem({ author: 'wolfstar-project' })
+    store.syncRepositories([repository], '2026-08-13T00:00:00.000Z')
+    store.recordObservation({
+      externalId: 'issue-before-read-failure',
+      observedAt: '2026-08-13T00:01:00.000Z',
+      source: 'poll',
+      subject: issue,
+    })
+
+    const result = await reconcileRepository(repository, {
+      github: {
+        ...noFinalRead,
+        getIssue: () =>
+          Promise.resolve(
+            err({
+              repository: repository.github,
+              message: 'GitHub did not return the issue.',
+              status: 503,
+            }),
+          ),
+        listOpenItems: () => Promise.resolve(ok([])),
+      },
+      store,
+      now: () => new Date('2026-08-13T01:00:00.000Z'),
+    })
+
+    expect(result).toEqual({
+      _tag: 'Err',
+      error: { repository: repository.github, message: 'GitHub did not return the issue.' },
+    })
+    expect(store.getDashboardSnapshot('2026-08-13T01:00:00.000Z').items).toEqual([
+      expect.objectContaining({ kind: 'issue', number: issue.number, state: 'open' }),
+    ])
+    store.close()
+  })
+
   it('keeps a Routine candidate issue eligible for Issue triage', async () => {
     const store = openJournalStore(':memory:')
     const repository = repositoryMapping()
@@ -81,7 +606,7 @@ describe('gitHub reconciliation', () => {
 
     const result = await reconcileRepository(repository, {
       github: {
-        ...noPullRequestRead,
+        ...noFinalRead,
         listOpenItems: () =>
           Promise.resolve(
             ok([
@@ -138,7 +663,7 @@ describe('gitHub reconciliation', () => {
 
     const result = await reconcileRepository(repository, {
       github: {
-        ...noPullRequestRead,
+        ...noFinalRead,
         listOpenItems: () => Promise.resolve(ok([{ ...trackingIssue, routineTracking: true }])),
       },
       store,
@@ -161,7 +686,7 @@ describe('gitHub reconciliation', () => {
     expect(store.countOpenPullRequests()).toBe(0)
 
     const github = {
-      ...noPullRequestRead,
+      ...noFinalRead,
       listOpenItems: () =>
         Promise.resolve(
           ok([
@@ -180,6 +705,8 @@ describe('gitHub reconciliation', () => {
     // A pull request that disappears from the open list closes, so it stops counting.
     await reconcileRepository(repository, {
       github: {
+        ...noFinalRead,
+        getIssue: () => Promise.resolve(ok(issueItem({ number: 12, author: 'wolfstar-project' }))),
         getPullRequest: () =>
           Promise.resolve(
             ok({
@@ -252,6 +779,7 @@ describe('gitHub reconciliation', () => {
 
     const result = await reconcileRepository(repository, {
       github: {
+        ...noFinalRead,
         listOpenItems: () => Promise.resolve(ok([])),
         getPullRequest: () =>
           Promise.resolve(
@@ -293,6 +821,7 @@ describe('gitHub reconciliation', () => {
 
     const result = await reconcileRepository(repository, {
       github: {
+        ...noFinalRead,
         listOpenItems: () => Promise.resolve(ok([])),
         getPullRequest: () =>
           Promise.resolve(
@@ -379,6 +908,7 @@ describe('gitHub reconciliation', () => {
 
     await reconcileRepository(repository, {
       github: {
+        ...noFinalRead,
         listOpenItems: () => Promise.resolve(ok([])),
         getPullRequest: () => {
           exactReads += 1
@@ -415,6 +945,7 @@ describe('gitHub reconciliation', () => {
 
     const result = await reconcileRepository(repository, {
       github: {
+        ...noFinalRead,
         listOpenItems: () => Promise.resolve(ok([])),
         getPullRequest: () => {
           store.recordObservation({
@@ -457,7 +988,7 @@ describe('gitHub reconciliation', () => {
 
     const result = await reconcileRepository(repository, {
       github: {
-        ...noPullRequestRead,
+        ...noFinalRead,
         listOpenItems: () => Promise.resolve(ok([pullRequestItem({ author: 'wolfstar-github-agent[bot]' })])),
       },
       store,
@@ -475,7 +1006,10 @@ describe('gitHub reconciliation', () => {
     const store = openJournalStore(':memory:')
     const repository = repositoryMapping()
     store.syncRepositories([repository], '2026-08-13T00:00:00.000Z')
-    const github = { ...noPullRequestRead, listOpenItems: () => Promise.resolve(ok([issueItem()])) }
+    const github = {
+      ...noFinalRead,
+      listOpenItems: () => Promise.resolve(ok([issueItem({ author: 'wolfstar-project' })])),
+    }
     const now = () => new Date('2026-08-13T01:00:00.000Z')
 
     const first = await reconcileRepository(repository, { github, store, now })
@@ -499,6 +1033,7 @@ describe('gitHub reconciliation', () => {
     const issue = issueItem({ approvalLabels: ['review'] })
     const approved: Array<{ kind: string; revisionId: string }> = []
     store.syncRepositories([repository], '2026-08-13T00:00:00.000Z')
+    store.setRepositoryWritesEnabled(repository.github, true)
 
     const result = await reconcileRepository(repository, {
       approvals: {
@@ -507,7 +1042,7 @@ describe('gitHub reconciliation', () => {
           return Promise.resolve(ok(undefined))
         },
       },
-      github: { ...noPullRequestRead, listOpenItems: () => Promise.resolve(ok([issue])) },
+      github: { ...noFinalRead, listOpenItems: () => Promise.resolve(ok([issue])) },
       store,
       now: () => new Date('2026-08-13T01:00:00.000Z'),
     })
@@ -517,12 +1052,43 @@ describe('gitHub reconciliation', () => {
     store.close()
   })
 
+  it('observes a repository without running mutation controllers while writes are disabled', async () => {
+    const store = openJournalStore(':memory:')
+    const repository = repositoryMapping()
+    const issue = issueItem({ approvalLabels: ['review'] })
+    let mutationCalls = 0
+    store.syncRepositories([repository], '2026-09-02T00:00:00.000Z')
+
+    const result = await reconcileRepository(repository, {
+      approvals: {
+        reconcile: () => {
+          mutationCalls += 1
+          return Promise.resolve(ok(undefined))
+        },
+      },
+      autoMerge: {
+        reconcile: () => {
+          mutationCalls += 1
+          return Promise.resolve()
+        },
+      },
+      github: { ...noFinalRead, listOpenItems: () => Promise.resolve(ok([issue])) },
+      store,
+      now: () => new Date('2026-09-02T00:01:00.000Z'),
+    })
+
+    expect(result._tag).toBe('Ok')
+    expect(mutationCalls).toBe(0)
+    expect(store.getDashboardSnapshot('2026-09-02T00:01:00.000Z').items).toHaveLength(1)
+    store.close()
+  })
+
   it('surfaces GitHub failures in repository health', async () => {
     const store = openJournalStore(':memory:')
     const repository = repositoryMapping()
     store.syncRepositories([repository], '2026-08-13T00:00:00.000Z')
     const github = {
-      ...noPullRequestRead,
+      ...noFinalRead,
       listOpenItems: () => Promise.resolve(err({ repository: repository.github, message: 'Rate limited' })),
     }
     const now = () => new Date('2026-08-13T01:00:00.000Z')
@@ -543,7 +1109,7 @@ describe('gitHub reconciliation', () => {
 
     const result = await reconcileRepository(repository, {
       github: {
-        ...noPullRequestRead,
+        ...noFinalRead,
         listOpenItems: () =>
           Promise.resolve(err({ repository: repository.github, message: 'This operation was aborted' })),
       },
@@ -564,7 +1130,7 @@ describe('gitHub reconciliation', () => {
   it('does not reuse legacy observation identities after revision schema changes', async () => {
     const store = openJournalStore(':memory:')
     const repository = repositoryMapping()
-    const incoming = issueItem()
+    const incoming = issueItem({ author: 'wolfstar-project' })
     const legacyExternalId = createHash('sha256')
       .update(`${repository.github}:${incoming.kind}:${incoming.number}:${JSON.stringify(incoming)}`)
       .digest('hex')
@@ -577,7 +1143,7 @@ describe('gitHub reconciliation', () => {
     })
 
     const result = await reconcileRepository(repository, {
-      github: { ...noPullRequestRead, listOpenItems: () => Promise.resolve(ok([incoming])) },
+      github: { ...noFinalRead, listOpenItems: () => Promise.resolve(ok([incoming])) },
       store,
       now: () => new Date('2026-08-13T01:00:00.000Z'),
     })

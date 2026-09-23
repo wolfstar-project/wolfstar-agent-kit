@@ -51,6 +51,57 @@ describe('stats range', () => {
 })
 
 describe('stats aggregation', () => {
+  it('groups current work and delivered outcomes by repository without counting publications as runs', () => {
+    const repository = 'wolfstar-project/example'
+    const other = 'skilld-dev/skilld'
+    const at = '2026-08-02T00:00:00.000Z'
+    const stats = buildStats({
+      generatedAt: at,
+      range: { from: '2026-08-01T00:00:00.000Z', to: '2026-08-08T00:00:00.000Z', timeZone: 'UTC' },
+      triageCoverageStartedAt: '2026-08-01T00:00:00.000Z',
+      facts: [
+        { _tag: 'Publication', repository, at, itemNumber: 1, work: 'review_fix', changedFiles: 1 },
+        { _tag: 'Publication', repository, at, itemNumber: 1, work: 'review_fix', changedFiles: 2 },
+        { _tag: 'Publication', repository: other, at, itemNumber: 1, work: 'conflict_resolution', changedFiles: 1 },
+        { _tag: 'Review', repository, at, startedAt: at, outcome: 'Ready', findings: 3 },
+        { _tag: 'Task', repository, at, startedAt: at, work: 'review_fix', outcome: 'Completed' },
+        { _tag: 'PullRequestTriage', repository, at, startedAt: at, outcome: 'ReviewRequired', decidedBy: 'rule' },
+        { _tag: 'Routine', repository: other, at, startedAt: null, outcome: 'Completed', candidates: 2 },
+        { _tag: 'Publication', repository: other, at, itemNumber: 2, work: 'issue_work', changedFiles: 1 },
+        {
+          _tag: 'Review',
+          repository: 'wolfstar-project/previous',
+          at: '2026-07-31T00:00:00.000Z',
+          startedAt: at,
+          outcome: 'Ready',
+          findings: 9,
+        },
+        { _tag: 'Review', repository, at: '2026-08-08T00:00:00.000Z', startedAt: at, outcome: 'Ready', findings: 9 },
+      ],
+    })
+
+    expect(stats.repositories).toEqual([
+      {
+        repository,
+        runs: 3,
+        changedPullRequests: 1,
+        fixCommits: 2,
+        conflictResolutions: 0,
+        openedPullRequests: 0,
+        reviewFindings: 3,
+      },
+      {
+        repository: other,
+        runs: 1,
+        changedPullRequests: 1,
+        fixCommits: 0,
+        conflictResolutions: 1,
+        openedPullRequests: 1,
+        reviewFindings: 0,
+      },
+    ])
+  })
+
   it('counts delivered outcomes without treating commits as unique pull requests', () => {
     const range = {
       from: '2026-08-01T00:00:00.000Z',
@@ -104,6 +155,7 @@ describe('stats aggregation', () => {
         },
         {
           _tag: 'Review',
+          repository: 'wolfstar-project/example',
           at: '2026-08-02T16:00:00.000Z',
           startedAt: '2026-08-02T15:50:00.000Z',
           outcome: 'Blocked',
@@ -111,6 +163,7 @@ describe('stats aggregation', () => {
         },
         {
           _tag: 'Task',
+          repository: 'wolfstar-project/example',
           at: '2026-08-02T15:10:00.000Z',
           startedAt: '2026-08-02T15:00:00.000Z',
           work: 'review_fix',
@@ -118,6 +171,7 @@ describe('stats aggregation', () => {
         },
         {
           _tag: 'Task',
+          repository: 'wolfstar-project/example',
           at: '2026-08-03T15:10:00.000Z',
           startedAt: null,
           work: 'conflict_resolution',
@@ -125,9 +179,11 @@ describe('stats aggregation', () => {
         },
         {
           _tag: 'PullRequestTriage',
+          repository: 'wolfstar-project/example',
           at: '2026-08-02T12:00:00.000Z',
           startedAt: '2026-08-02T11:59:55.000Z',
           outcome: 'ReviewSkipped',
+          decidedBy: 'model',
         },
       ],
     })
@@ -152,6 +208,7 @@ describe('stats aggregation', () => {
       reviewRequired: 0,
       reviewSkipped: 1,
       reviewRequiredAfterFailure: 0,
+      classified: 1,
       medianDurationMs: 5_000,
     })
     expect(snapshot.coverage.pullRequestTriage).toEqual({
@@ -165,48 +222,144 @@ describe('pull request triage Stats', () => {
   it('records one final decision for one pull request head commit', () => {
     const store = createStore()
     store.syncRepositories([repositoryMapping()], '2026-08-01T00:00:00.000Z')
-    const observed = store.recordObservation({
-      externalId: 'stats-triage',
+    const subject = pullRequestItem({ mergeState: 'clean' })
+    const first = store.recordObservation({
+      externalId: 'stats-triage-1',
       observedAt: '2026-08-02T00:00:00.000Z',
       source: 'poll',
-      subject: pullRequestItem({ mergeState: 'clean' }),
+      subject,
+      pullRequestTriage: {
+        _tag: 'Skipped',
+        reason: 'model: classification chose skip with confidence 0.93.',
+        source: 'model',
+      },
     })
-    if (observed._tag !== 'Inserted') throw new Error('Expected a pull request Revision.')
-    const task = store.claimNextAdversarialReviewTask('reviewer-1', '2026-08-02T00:01:00.000Z', 60_000)
-    if (task === null) throw new Error('Expected the Review Task.')
-    const input = {
-      taskId: task.id,
-      repository: task.repository,
-      pullRequestNumber: task.pullRequestNumber,
-      revisionId: task.revisionId,
-      headSha: task.pullRequest.headSha,
-      startedAt: '2026-08-02T00:01:01.000Z',
-      completedAt: '2026-08-02T00:01:02.000Z',
-      outcome: { _tag: 'ReviewSkipped' as const, reason: 'Only prose changed.' },
-    }
+    if (first._tag !== 'Inserted') throw new Error('Expected a pull request Revision.')
 
-    expect(store.recordPullRequestTriageRun(input)).toEqual({ _tag: 'Inserted' })
+    // A skip queues no Review Task, so nothing is claimable.
+    expect(store.claimNextAdversarialReviewTask('reviewer-1', '2026-08-02T00:01:00.000Z', 60_000)).toBeNull()
+    expect(store.getLatestPullRequestTriageRun(subject.repository, subject.number, subject.headSha)).toEqual({
+      outcome: 'ReviewSkipped',
+      reason: 'model: classification chose skip with confidence 0.93.',
+      completedAt: '2026-08-02T00:00:00.000Z',
+      settledAt: null,
+    })
+    expect(store.getLatestPullRequestTriageRun(subject.repository, subject.number, 'f'.repeat(40))).toBeNull()
+
+    // A reworded decision for the same Revision changes nothing: the first row stays authoritative.
+    const reworded = store.recordObservation({
+      externalId: 'stats-triage-2',
+      observedAt: '2026-08-02T00:02:00.000Z',
+      source: 'poll',
+      subject,
+      pullRequestTriage: { _tag: 'Skipped', reason: 'model: a retry reworded the same skip verdict.', source: 'model' },
+    })
+    expect(reworded).toEqual({ _tag: 'Duplicate', revisionId: first.revisionId })
+    expect(store.getLatestPullRequestTriageRun(subject.repository, subject.number, subject.headSha)).toEqual({
+      outcome: 'ReviewSkipped',
+      reason: 'model: classification chose skip with confidence 0.93.',
+      completedAt: '2026-08-02T00:00:00.000Z',
+      settledAt: null,
+    })
+
+    // A failure row converges: a later successful decision replaces it, so
+    // reuse works and the classification is not re-asked every poll.
+    const failedFirst = createStore()
+    failedFirst.syncRepositories([repositoryMapping()], '2026-09-01T00:00:00.000Z')
+    const failing = pullRequestItem({ mergeState: 'clean' })
+    const failureRevision = failedFirst.recordObservation({
+      externalId: 'convergence-failure',
+      observedAt: '2026-09-02T00:00:00.000Z',
+      source: 'poll',
+      subject: failing,
+      pullRequestTriage: { _tag: 'Failed', reason: 'model: the classification service failed: down' },
+    })
+    if (failureRevision._tag !== 'Inserted') throw new Error('Expected the failure Revision.')
     expect(
-      store.recordPullRequestTriageRun({
-        ...input,
-        startedAt: '2026-08-02T00:02:01.000Z',
-        completedAt: '2026-08-02T00:02:02.000Z',
-      }),
-    ).toEqual({ _tag: 'Duplicate' })
+      failedFirst.getLatestPullRequestTriageRun(failing.repository, failing.number, failing.headSha),
+    ).toMatchObject({ outcome: 'ReviewRequiredAfterFailure' })
+
+    failedFirst.recordObservation({
+      externalId: 'convergence-recovery',
+      observedAt: '2026-09-02T00:05:00.000Z',
+      source: 'poll',
+      subject: failing,
+      pullRequestTriage: {
+        _tag: 'Skipped',
+        reason: 'model: classification chose skip with confidence 0.93.',
+        source: 'model',
+      },
+    })
     expect(
-      store.recordPullRequestTriageRun({
-        ...input,
-        startedAt: '2026-08-02T00:03:01.000Z',
-        completedAt: '2026-08-02T00:03:02.000Z',
-        outcome: { _tag: 'ReviewSkipped' as const, reason: 'A retry reworded the same skip verdict.' },
-      }),
-    ).toEqual({ _tag: 'Duplicate' })
-    expect(
-      store.recordPullRequestTriageRun({
-        ...input,
-        outcome: { _tag: 'ReviewRequired', reason: 'Runtime code changed.' },
-      }),
-    ).toEqual({ _tag: 'Conflict' })
+      failedFirst.getLatestPullRequestTriageRun(failing.repository, failing.number, failing.headSha),
+    ).toMatchObject({ outcome: 'ReviewSkipped' })
+    expect(failedFirst.claimNextAdversarialReviewTask('reviewer-1', '2026-09-02T00:06:00.000Z', 60_000)).toBeNull()
+
+    // The manual Review label overrides the stored skip: the decision queues
+    // the Review Task the label asks for, and the row itself turns Required,
+    // so the next poll reuses Review instead of superseding the Task.
+    const overridden = store.recordObservation({
+      externalId: 'stats-triage-3',
+      observedAt: '2026-08-02T00:03:00.000Z',
+      source: 'poll',
+      subject,
+      pullRequestTriage: { _tag: 'RequiredOverride' },
+    })
+    expect(overridden).toEqual({ _tag: 'Duplicate', revisionId: first.revisionId })
+    expect(store.getLatestPullRequestTriageRun(subject.repository, subject.number, subject.headSha)).toMatchObject({
+      outcome: 'ReviewRequired',
+    })
+    expect(store.claimNextAdversarialReviewTask('reviewer-1', '2026-08-02T00:04:00.000Z', 60_000)).not.toBeNull()
+    // The label consumed, a later poll keeps the Task: the stored row says Review.
+    store.recordObservation({
+      externalId: 'stats-triage-4',
+      observedAt: '2026-08-02T00:05:00.000Z',
+      source: 'poll',
+      subject,
+      pullRequestTriage: { _tag: 'Required', reason: 'rule: this head commit already has a Review.', source: 'reuse' },
+    })
+    expect(store.claimNextAdversarialReviewTask('reviewer-2', '2026-08-02T00:06:00.000Z', 60_000)).not.toBeNull()
+
+    // An explicit rerun outranks a stored skip: the Task it queues survives
+    // the next poll instead of being superseded back into silence.
+    const skippedHead = createStore()
+    skippedHead.syncRepositories([repositoryMapping()], '2026-09-01T00:00:00.000Z')
+    const rerunSubject = pullRequestItem({ mergeState: 'clean' })
+    const rerunRevision = skippedHead.recordObservation({
+      externalId: 'rerun-skip',
+      observedAt: '2026-09-02T00:00:00.000Z',
+      source: 'poll',
+      subject: rerunSubject,
+      pullRequestTriage: {
+        _tag: 'Skipped',
+        reason: 'model: classification chose skip with confidence 0.95.',
+        source: 'model',
+      },
+    })
+    if (rerunRevision._tag !== 'Inserted') throw new Error('Expected the skipped Revision.')
+    const requested = skippedHead.requestReviewRerun({
+      repository: rerunSubject.repository,
+      pullRequestNumber: rerunSubject.number,
+      revisionId: rerunRevision.revisionId,
+      requestId: 'rerun-1',
+      source: 'github_comment',
+      requestedBy: 'wolfstar-project',
+      at: '2026-09-02T00:01:00.000Z',
+    })
+    if (requested._tag !== 'Queued' && requested._tag !== 'AlreadyQueued') throw new Error('Expected the rerun Task.')
+    skippedHead.recordObservation({
+      externalId: 'rerun-skip-again',
+      observedAt: '2026-09-02T00:02:00.000Z',
+      source: 'poll',
+      subject: rerunSubject,
+      pullRequestTriage: {
+        _tag: 'Skipped',
+        reason: 'model: classification chose skip with confidence 0.95.',
+        source: 'reuse',
+      },
+    })
+    expect(skippedHead.claimNextAdversarialReviewTask('reviewer-3', '2026-09-02T00:03:00.000Z', 60_000)).not.toBeNull()
+
     const stats = store.getStats(
       {
         from: '2026-08-01T00:00:00.000Z',
@@ -216,16 +369,51 @@ describe('pull request triage Stats', () => {
       '2026-08-08T00:00:00.000Z',
     )
 
+    expect(stats.repositories).toEqual([expect.objectContaining({ repository: subject.repository, runs: 1 })])
     expect(stats.work.find((work) => work._tag === 'PullRequestTriage')).toEqual(
       expect.objectContaining({
         runs: 1,
-        reviewSkipped: 1,
+        reviewRequired: 1,
       }),
     )
   })
 })
 
 describe('journal Stats evidence', () => {
+  it('keeps skipped Routine runs in their repository and excludes them outside the range', () => {
+    const store = createStore()
+    store.syncRepositories([repositoryMapping()], '2026-08-13T00:00:00.000Z')
+    store.syncRoutines({
+      repository: 'wolfstar-project/example',
+      specSha: 'abc123',
+      entries: [{ name: 'pr-triage', crons: ['0 7 * * *'], timeZone: 'UTC', mode: 'report', enabled: true }],
+      at: '2026-08-13T00:00:00.000Z',
+    })
+    store.skipRoutineRun({
+      routineId: 'wolfstar-project/example:pr-triage',
+      scheduledFor: '2026-08-13T07:00:00.000Z',
+      specSha: 'abc123',
+      reason: 'Outside the catch-up window.',
+      at: '2026-08-13T08:00:00.000Z',
+    })
+    const range = { from: '2026-08-13T00:00:00.000Z', to: '2026-08-14T00:00:00.000Z', timeZone: 'UTC' }
+
+    expect(store.getStats(range, range.to).repositories).toEqual([
+      {
+        repository: 'wolfstar-project/example',
+        runs: 1,
+        changedPullRequests: 0,
+        fixCommits: 0,
+        conflictResolutions: 0,
+        openedPullRequests: 0,
+        reviewFindings: 0,
+      },
+    ])
+    expect(store.getStats({ ...range, from: range.to, to: '2026-08-15T00:00:00.000Z' }, range.to).repositories).toEqual(
+      [],
+    )
+  })
+
   it('counts a Publication only after it publishes', () => {
     const store = createStore()
     store.syncRepositories([repositoryMapping()], '2026-08-13T00:00:00.000Z')
@@ -272,6 +460,9 @@ describe('journal Stats evidence', () => {
         evidence: 'Updated pull request #24.',
       }),
     ).toBe(true)
+    expect(store.getStats(range, range.to).repositories).toEqual([
+      expect.objectContaining({ repository: task.repository, conflictResolutions: 1 }),
+    ])
     expect(store.getStats(range, range.to).summary).toEqual(
       expect.objectContaining({
         changedPullRequests: { value: 1, previous: 0 },
@@ -348,6 +539,46 @@ describe('journal Stats evidence', () => {
       },
       '2026-08-14T00:00:00.000Z',
     )
+    expect(stats.repositories).toEqual([expect.objectContaining({ repository: task.repository, runs: 1 })])
     expect(stats.work.find((work) => work._tag === 'Review')).toEqual(expect.objectContaining({ runs: 1 }))
+  })
+})
+
+describe('pull request triage work stats', () => {
+  it('counts the decisions the classification answered apart from the rule ones', () => {
+    const at = '2026-08-02T12:00:00.000Z'
+    const snapshot = buildStats({
+      generatedAt: at,
+      range: { from: '2026-08-01T00:00:00.000Z', to: '2026-08-03T00:00:00.000Z', timeZone: 'UTC' },
+      triageCoverageStartedAt: '2026-07-01T00:00:00.000Z',
+      facts: [
+        {
+          _tag: 'PullRequestTriage',
+          repository: 'wolfstar-project/example',
+          at,
+          startedAt: at,
+          outcome: 'ReviewRequired',
+          decidedBy: 'rule',
+        },
+        {
+          _tag: 'PullRequestTriage',
+          repository: 'wolfstar-project/example',
+          at,
+          startedAt: at,
+          outcome: 'ReviewRequired',
+          decidedBy: 'rule',
+        },
+        {
+          _tag: 'PullRequestTriage',
+          repository: 'wolfstar-project/example',
+          at,
+          startedAt: at,
+          outcome: 'ReviewSkipped',
+          decidedBy: 'model',
+        },
+      ],
+    })
+    const triage = snapshot.work.find((entry) => entry._tag === 'PullRequestTriage')
+    expect(triage).toMatchObject({ runs: 3, reviewRequired: 2, reviewSkipped: 1, classified: 1 })
   })
 })

@@ -1,5 +1,6 @@
 import type { ActiveAgent, AgentStartState, Incident, QueueEntry } from '../src/types.ts'
 import { describe, expect, it } from 'vitest'
+import { hostTasks } from '../dashboard/app/utils/host-tasks.ts'
 import {
   capacityRow,
   circuitNotice,
@@ -7,6 +8,7 @@ import {
   faviconTone,
   nextRoutineInstant,
   restartNotice,
+  serviceUpdatePresentation,
   systemChipState,
 } from '../dashboard/app/utils/system.ts'
 import { dashboardSnapshot } from './fixtures.ts'
@@ -33,6 +35,21 @@ function activeAgent(overrides: Partial<ActiveAgent> = {}): ActiveAgent {
     ...overrides,
   }
 }
+
+it('shows only current host assignments with their Item and progress', () => {
+  const snapshot = dashboardSnapshot({
+    agents: [activeAgent(), activeAgent({ id: 'desktop-task', title: 'Desktop work' })],
+    hostTasks: [
+      { taskId: 'agent-1', host: 'hogwild' },
+      { taskId: 'desktop-task', host: 'desktop' },
+    ],
+  })
+  expect(hostTasks(snapshot, 'desktop')).toMatchObject([
+    { title: 'Desktop work', url: 'https://github.com/harlan-zw/nuxt-seo/pull/412', progress: 'Working' },
+  ])
+  expect(hostTasks(snapshot, 'hogwild')).toMatchObject([{ title: 'A pull request' }])
+  expect(hostTasks({ ...snapshot, hostTasks: [] }, 'desktop')).toEqual([])
+})
 
 function incident(overrides: Partial<Incident> = {}): Incident {
   return {
@@ -90,6 +107,17 @@ describe('systemChipState', () => {
 
     const busy = systemChipState(dashboardSnapshot({ agentStart: { _tag: 'Available' }, agents: [activeAgent()] }))
     expect(busy).toMatchObject({ _tag: 'Normal', active: 1, live: true })
+  })
+
+  it('counts the Agent slots each host holds, so the chip follows the control', () => {
+    const capacity = { localActive: 1, localMaximum: 3, desktopActive: 0, desktopMaximum: 1, desktopConnected: true }
+    const connected = systemChipState(dashboardSnapshot({ agentStart: { _tag: 'Available' }, hostCapacity: capacity }))
+    expect(connected).toMatchObject({ maximum: 4 })
+
+    const alone = systemChipState(
+      dashboardSnapshot({ agentStart: { _tag: 'Available' }, hostCapacity: { ...capacity, desktopConnected: false } }),
+    )
+    expect(alone).toMatchObject({ maximum: 3 })
   })
 
   it('names the one reason work cannot start', () => {
@@ -211,7 +239,12 @@ describe('circuitNotice', () => {
 })
 
 describe('restartNotice', () => {
-  const base = { id: 'restart-1', source: 'dashboard' as const, requestedAt: '2026-08-14T11:00:00.000Z' }
+  const base = {
+    id: 'restart-1',
+    source: 'dashboard' as const,
+    operation: { _tag: 'Restart' as const },
+    requestedAt: '2026-08-14T11:00:00.000Z',
+  }
 
   it('renders nothing for no request or a finished one', () => {
     expect(restartNotice(null)).toBeUndefined()
@@ -238,6 +271,57 @@ describe('restartNotice', () => {
         reason: 'The new process never answered /health.',
       }),
     ).toEqual({ _tag: 'ActionRequired', text: 'Restart did not complete: The new process never answered /health.' })
+  })
+
+  it('names an Update separately from a plain restart', () => {
+    const request = {
+      ...base,
+      _tag: 'Requested' as const,
+      operation: { _tag: 'Update' as const, targetCommit: 'b'.repeat(40) },
+    }
+    expect(restartNotice(request)).toEqual({ _tag: 'Requested', text: 'Update requested. Active work finishes first.' })
+  })
+})
+
+describe('serviceUpdatePresentation', () => {
+  const deployedCommit = 'a'.repeat(40)
+  const latestCommit = 'b'.repeat(40)
+
+  it('makes an available Update the exception', () => {
+    expect(
+      serviceUpdatePresentation({
+        _tag: 'Available',
+        deployedCommit,
+        latestCommit,
+        checkedAt: '2026-09-02T03:00:00.000Z',
+      }),
+    ).toEqual({
+      label: 'Update available',
+      tone: 'warning',
+      deployedCommit: 'aaaaaaa',
+      latestCommit: 'bbbbbbb',
+      checkedAt: '2026-09-02T03:00:00.000Z',
+      detail: undefined,
+    })
+  })
+
+  it('keeps current and unavailable checks explicit', () => {
+    expect(
+      serviceUpdatePresentation({
+        _tag: 'Current',
+        deployedCommit,
+        latestCommit: deployedCommit,
+        checkedAt: '2026-09-02T03:00:00.000Z',
+      }).label,
+    ).toBe('Current')
+    const unavailable = serviceUpdatePresentation({
+      _tag: 'Unavailable',
+      deployedCommit,
+      checkedAt: '2026-09-02T03:00:00.000Z',
+      reason: 'The latest commit could not be checked. Retry later.',
+    })
+    expect(unavailable).toMatchObject({ label: 'Check failed', tone: 'warning' })
+    expect(unavailable.latestCommit).toBeUndefined()
   })
 })
 

@@ -1,10 +1,12 @@
 import type { AgentSelection } from '../src/agent-profile.ts'
 import type { StatsRange, StatsSnapshot } from '../src/stats.ts'
-import type { SelectionMode } from '../src/types.ts'
+import type { RestartOperation, SelectionMode } from '../src/types.ts'
 import { Buffer } from 'node:buffer'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createAgentApp } from '../src/app.ts'
+import { createDesktopBroker } from '../src/desktop-broker.ts'
+import { readDesktopResponse } from '../src/desktop-protocol.ts'
 import { dashboardSnapshot } from './fixtures.ts'
 
 const allowedOrigin = 'https://wolfstar-github-agent.localhost'
@@ -30,15 +32,24 @@ function statsSnapshot(range: StatsRange, generatedAt: string): StatsSnapshot {
     },
     days: [],
     work: [],
+    repositories: [],
   }
 }
 const agentControls = {
   getStats: (range: StatsRange, generatedAt: string) => statsSnapshot(range, generatedAt),
+  listRoutines: () => [],
+  openRoutineRun: () => null,
   pauseAgents: (at: string) => ({ _tag: 'Paused' as const, pausedAt: at }),
-  requestRestart: (input: { id: string; source: 'dashboard' | 'tray' | 'helper'; at: string }) => ({
+  requestRestart: (input: {
+    id: string
+    source: 'dashboard' | 'tray' | 'helper'
+    operation: RestartOperation
+    at: string
+  }) => ({
     _tag: 'Requested' as const,
     id: input.id,
     source: input.source,
+    operation: input.operation,
     requestedAt: input.at,
   }),
   resumeAgents: (_at: string) => ({ _tag: 'Running' as const }),
@@ -54,15 +65,16 @@ const agentControls = {
 
 afterEach(() => vi.useRealTimers())
 
-function createApp(snapshot = dashboardSnapshot()) {
+function createApp(snapshot = dashboardSnapshot(), desktop?: ReturnType<typeof createDesktopBroker>) {
   return createAgentApp({
+    ...(desktop === undefined ? {} : { desktop }),
     allowedOrigin,
     dashboardPassword,
     dashboardRoot,
     now,
     store: {
       ...agentControls,
-      approveIssueWork: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+      approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
       approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
       cancelTask: () => ({ _tag: 'Rejected', reason: { _tag: 'TaskNotFound' } }),
       getDashboardSnapshot: () => snapshot,
@@ -82,7 +94,7 @@ describe('dashboard HTTP app', () => {
       now,
       store: {
         ...agentControls,
-        approveIssueWork: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         cancelTask: () => ({ _tag: 'Rejected', reason: { _tag: 'TaskNotFound' } }),
         getDashboardSnapshot: () => dashboardSnapshot(),
@@ -152,7 +164,7 @@ describe('dashboard HTTP app', () => {
       },
       store: {
         ...agentControls,
-        approveIssueWork: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         cancelTask: () => ({ _tag: 'Rejected', reason: { _tag: 'TaskNotFound' } }),
         getDashboardSnapshot: () => snapshot,
@@ -209,7 +221,7 @@ describe('dashboard HTTP app', () => {
       activityLog: { read: (id) => (id === taskId ? activity : []) },
       store: {
         ...agentControls,
-        approveIssueWork: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         cancelTask: () => ({ _tag: 'Rejected', reason: { _tag: 'TaskNotFound' } }),
         getDashboardSnapshot: () => snapshot,
@@ -244,7 +256,7 @@ describe('dashboard HTTP app', () => {
       now,
       store: {
         ...agentControls,
-        approveIssueWork: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         cancelTask: () => ({ _tag: 'Rejected', reason: { _tag: 'TaskNotFound' } }),
         getDashboardSnapshot: () => dashboardSnapshot(),
@@ -317,7 +329,7 @@ describe('dashboard HTTP app', () => {
       now,
       store: {
         ...agentControls,
-        approveIssueWork: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         cancelTask: () => ({ _tag: 'Rejected', reason: { _tag: 'TaskNotFound' } }),
         getDashboardSnapshot: () => dashboardSnapshot(),
@@ -346,6 +358,87 @@ describe('dashboard HTTP app', () => {
     ])
   })
 
+  it('opens a Routine run for the current minute on request', async () => {
+    const opened: unknown[] = []
+    const routine = {
+      id: 'wolfstar-project/example:daily-checkin',
+      repository: 'wolfstar-project/example',
+      name: 'daily-checkin' as const,
+      crons: ['0 7 * * *'],
+      timeZone: 'UTC',
+      mode: 'propose' as const,
+      enabled: true,
+      specSha: 'abc123',
+      lastRunAt: null,
+      trackingIssueNumber: null,
+      updatedAt: now().toISOString(),
+    }
+    const app = createAgentApp({
+      allowedOrigin,
+      dashboardPassword,
+      dashboardRoot,
+      now: () => new Date('2026-09-03T04:10:42.000Z'),
+      store: {
+        ...agentControls,
+        approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        cancelTask: () => ({ _tag: 'Rejected', reason: { _tag: 'TaskNotFound' } }),
+        getDashboardSnapshot: () => dashboardSnapshot(),
+        listReviewRuns: () => [],
+        listRoutines: () => [routine],
+        openRoutineRun(input) {
+          opened.push(input)
+          return {
+            id: `${input.routineId}:${input.scheduledFor}`,
+            routineId: input.routineId,
+            repository: routine.repository,
+            name: routine.name,
+            scheduledFor: input.scheduledFor,
+            specSha: input.specSha,
+            mode: routine.mode,
+            state: { _tag: 'Queued' },
+            fence: 0,
+            attempts: 0,
+            progress: { percent: 0, label: 'Starting' },
+            usage: { _tag: 'Unavailable' },
+            createdAt: input.at,
+            updatedAt: input.at,
+          }
+        },
+        requestReviewRerun: () => ({ _tag: 'Rejected', reason: { _tag: 'ItemNotFound' } }),
+      },
+    })
+    const headers = {
+      authorization: authorization,
+      host: allowedHost,
+      origin: allowedOrigin,
+      'content-type': 'application/json',
+    }
+
+    const response = await app.request(`http://${allowedHost}/api/routines/run`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ routineId: routine.id }),
+    })
+    const unknown = await app.request(`http://${allowedHost}/api/routines/run`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ routineId: 'wolfstar-project/example:pr-triage' }),
+    })
+
+    expect(response.status).toBe(202)
+    expect(await response.json()).toMatchObject({ scheduledFor: '2026-09-03T04:10:00.000Z', state: { _tag: 'Queued' } })
+    expect(opened).toEqual([
+      {
+        routineId: routine.id,
+        scheduledFor: '2026-09-03T04:10:00.000Z',
+        specSha: 'abc123',
+        at: '2026-09-03T04:10:42.000Z',
+      },
+    ])
+    expect(unknown.status).toBe(404)
+  })
+
   it('stores a dashboard Restart request', async () => {
     const requests: unknown[] = []
     const app = createAgentApp({
@@ -355,14 +448,20 @@ describe('dashboard HTTP app', () => {
       now,
       store: {
         ...agentControls,
-        approveIssueWork: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         cancelTask: () => ({ _tag: 'Rejected', reason: { _tag: 'TaskNotFound' } }),
         getDashboardSnapshot: () => dashboardSnapshot(),
         listReviewRuns: () => [],
         requestRestart(input) {
           requests.push(input)
-          return { _tag: 'Requested', id: input.id, source: input.source, requestedAt: input.at }
+          return {
+            _tag: 'Requested',
+            id: input.id,
+            source: input.source,
+            operation: input.operation,
+            requestedAt: input.at,
+          }
         },
         requestReviewRerun: () => ({ _tag: 'Rejected', reason: { _tag: 'ItemNotFound' } }),
       },
@@ -382,6 +481,120 @@ describe('dashboard HTTP app', () => {
     expect(response.status).toBe(202)
     expect(await response.json()).toEqual(expect.objectContaining({ _tag: 'Requested', source: 'dashboard' }))
     expect(requests).toEqual([expect.objectContaining({ source: 'dashboard', at: now().toISOString() })])
+  })
+
+  it('pins the available commit in a dashboard Update request', async () => {
+    const latestCommit = 'b'.repeat(40)
+    const requests: unknown[] = []
+    const app = createAgentApp({
+      allowedOrigin,
+      dashboardPassword,
+      dashboardRoot,
+      now,
+      store: {
+        ...agentControls,
+        approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        cancelTask: () => ({ _tag: 'Rejected', reason: { _tag: 'TaskNotFound' } }),
+        getDashboardSnapshot: () =>
+          dashboardSnapshot({
+            serviceUpdate: {
+              _tag: 'Available',
+              deployedCommit: 'a'.repeat(40),
+              latestCommit,
+              checkedAt: now().toISOString(),
+            },
+          }),
+        listReviewRuns: () => [],
+        requestRestart(input) {
+          requests.push(input)
+          return {
+            _tag: 'Requested',
+            id: input.id,
+            source: input.source,
+            operation: input.operation,
+            requestedAt: input.at,
+          }
+        },
+        requestReviewRerun: () => ({ _tag: 'Rejected', reason: { _tag: 'ItemNotFound' } }),
+      },
+    })
+
+    const response = await app.request(`http://${allowedHost}/api/service/update`, {
+      method: 'POST',
+      headers: {
+        authorization: authorization,
+        host: allowedHost,
+        origin: allowedOrigin,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ source: 'dashboard' }),
+    })
+
+    expect(response.status).toBe(202)
+    expect(requests).toEqual([
+      expect.objectContaining({
+        source: 'dashboard',
+        operation: { _tag: 'Update', targetCommit: latestCommit },
+      }),
+    ])
+  })
+
+  it('pins the available commit in a CLI Update request', async () => {
+    const latestCommit = 'b'.repeat(40)
+    const requests: unknown[] = []
+    const app = createAgentApp({
+      allowedOrigin,
+      dashboardPassword,
+      dashboardRoot,
+      now,
+      store: {
+        ...agentControls,
+        approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        cancelTask: () => ({ _tag: 'Rejected', reason: { _tag: 'TaskNotFound' } }),
+        getDashboardSnapshot: () =>
+          dashboardSnapshot({
+            serviceUpdate: {
+              _tag: 'Available',
+              deployedCommit: 'a'.repeat(40),
+              latestCommit,
+              checkedAt: now().toISOString(),
+            },
+          }),
+        listReviewRuns: () => [],
+        requestRestart(input) {
+          requests.push(input)
+          return {
+            _tag: 'Requested',
+            id: input.id,
+            source: input.source,
+            operation: input.operation,
+            requestedAt: input.at,
+          }
+        },
+        requestReviewRerun: () => ({ _tag: 'Rejected', reason: { _tag: 'ItemNotFound' } }),
+      },
+    })
+
+    const response = await app.request(`http://${allowedHost}/api/service/update`, {
+      method: 'POST',
+      headers: {
+        authorization: authorization,
+        host: allowedHost,
+        origin: allowedOrigin,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ source: 'helper' }),
+    })
+
+    expect(response.status).toBe(202)
+    expect(requests).toEqual([
+      expect.objectContaining({
+        source: 'helper',
+        operation: { _tag: 'Update', targetCommit: latestCommit },
+      }),
+    ])
   })
 
   it('reports read-only health', async () => {
@@ -404,6 +617,44 @@ describe('dashboard HTTP app', () => {
     const response = await createApp().request('http://attacker.invalid/health')
 
     expect(response.status).toBe(421)
+  })
+
+  it('accepts its own loopback address, so the control CLI works on the service host', async () => {
+    // Hogwild cannot resolve its own tailnet name, so `control routine-run`
+    // from that host failed with fetch failed, then 421 through 127.0.0.1.
+    const listenOrigin = 'http://127.0.0.1:3210'
+    const app = createAgentApp({
+      allowedOrigin,
+      listenOrigin,
+      dashboardPassword,
+      dashboardRoot,
+      now,
+      store: { ...agentControls } as never,
+    })
+    const response = await app.request(`${listenOrigin}/api/agents/pause`, {
+      method: 'POST',
+      headers: { authorization, host: '127.0.0.1:3210', origin: listenOrigin },
+    })
+
+    expect(response.status).toBe(200)
+  })
+
+  it('refuses a loopback host carrying the public origin, so each address keeps its own origin', async () => {
+    const listenOrigin = 'http://127.0.0.1:3210'
+    const app = createAgentApp({
+      allowedOrigin,
+      listenOrigin,
+      dashboardPassword,
+      dashboardRoot,
+      now,
+      store: { ...agentControls } as never,
+    })
+    const response = await app.request(`${listenOrigin}/api/agents/pause`, {
+      method: 'POST',
+      headers: { authorization, host: '127.0.0.1:3210', origin: allowedOrigin },
+    })
+
+    expect(response.status).toBe(403)
   })
 
   it('requires dashboard credentials', async () => {
@@ -448,6 +699,34 @@ describe('dashboard HTTP app', () => {
     expect(response.headers.get('content-security-policy')).toContain(`script-src 'self' 'nonce-${nonce}'`)
   })
 
+  it('denies framing unless frame ancestors are configured', async () => {
+    const denied = await createApp().request(`http://${allowedHost}/`, {
+      headers: { authorization, host: allowedHost },
+    })
+    expect(denied.headers.get('content-security-policy')).toContain("frame-ancestors 'none'")
+    expect(denied.headers.get('x-frame-options')).toBe('DENY')
+
+    const framed = createAgentApp({
+      allowedOrigin,
+      dashboardPassword,
+      dashboardRoot,
+      frameAncestors: ['https://deck.example.com'],
+      now,
+      store: {
+        ...agentControls,
+        approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        cancelTask: () => ({ _tag: 'Rejected', reason: { _tag: 'TaskNotFound' } }),
+        getDashboardSnapshot: () => dashboardSnapshot(),
+        listReviewRuns: () => [],
+        requestReviewRerun: () => ({ _tag: 'Rejected', reason: { _tag: 'ItemNotFound' } }),
+      },
+    })
+    const allowed = await framed.request(`http://${allowedHost}/`, { headers: { authorization, host: allowedHost } })
+    expect(allowed.headers.get('content-security-policy')).toContain("frame-ancestors 'self' https://deck.example.com")
+    expect(allowed.headers.get('x-frame-options')).toBeNull()
+  })
+
   it('serves the workflow map directly', async () => {
     const response = await createApp().request(`http://${allowedHost}/flow`, {
       headers: { authorization, host: allowedHost },
@@ -455,6 +734,27 @@ describe('dashboard HTTP app', () => {
 
     expect(response.status).toBe(200)
     expect(await response.text()).toContain('How GitHub work moves through the agent')
+  })
+
+  it('serves the Routines page', async () => {
+    const response = await createApp().request(`http://${allowedHost}/routines`, {
+      headers: { authorization, host: allowedHost },
+    })
+
+    expect(response.status).toBe(200)
+    expect(await response.text()).toContain('Scheduled checks, soonest first.')
+  })
+
+  it('serves the skew protection service worker', async () => {
+    const response = await createApp().request(`http://${allowedHost}/_nuxt-skew-sw.js`, {
+      headers: { authorization, host: allowedHost },
+    })
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-type')).toBe('text/javascript; charset=utf-8')
+    expect(response.headers.get('cache-control')).toBe('no-store')
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(await response.text()).toContain('loadedModules')
   })
 
   it('returns local review history for one pull request', async () => {
@@ -466,7 +766,7 @@ describe('dashboard HTTP app', () => {
       now,
       store: {
         ...agentControls,
-        approveIssueWork: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         cancelTask: () => ({ _tag: 'Rejected', reason: { _tag: 'TaskNotFound' } }),
         getDashboardSnapshot: () => dashboardSnapshot(),
@@ -506,7 +806,7 @@ describe('dashboard HTTP app', () => {
       now,
       store: {
         ...agentControls,
-        approveIssueWork: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         cancelTask: () => ({ _tag: 'Rejected', reason: { _tag: 'TaskNotFound' } }),
         getDashboardSnapshot: () => dashboardSnapshot(),
@@ -558,7 +858,7 @@ describe('dashboard HTTP app', () => {
       now,
       store: {
         ...agentControls,
-        approveIssueWork: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         cancelTask: () => ({ _tag: 'Rejected', reason: { _tag: 'TaskNotFound' } }),
         getDashboardSnapshot: () => dashboardSnapshot(),
@@ -591,7 +891,7 @@ describe('dashboard HTTP app', () => {
       now,
       store: {
         ...agentControls,
-        approveIssueWork: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         approvePullRequest(input) {
           approvals.push(input)
           return { _tag: 'Approved', approval: { _tag: 'ReviewApproved', approvedAt: input.at } }
@@ -644,9 +944,9 @@ describe('dashboard HTTP app', () => {
       now,
       store: {
         ...agentControls,
-        approveIssueWork(input) {
+        approveIssue(input) {
           approvals.push(input)
-          return { _tag: 'Approved', taskId: 'b'.repeat(64) }
+          return { _tag: 'Approved', work: 'issue_work', taskId: 'b'.repeat(64) }
         },
         approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         cancelTask: () => ({ _tag: 'Rejected', reason: { _tag: 'TaskNotFound' } }),
@@ -667,7 +967,7 @@ describe('dashboard HTTP app', () => {
     })
 
     expect(response.status).toBe(200)
-    expect(await response.json()).toEqual({ _tag: 'Approved', taskId: 'b'.repeat(64) })
+    expect(await response.json()).toEqual({ _tag: 'Approved', work: 'issue_work', taskId: 'b'.repeat(64) })
     expect(approvals).toEqual([
       { repository: 'wolfstar-project/example', issueNumber: 12, revisionId, at: now().toISOString() },
     ])
@@ -703,7 +1003,7 @@ describe('dashboard HTTP app', () => {
       now,
       store: {
         ...agentControls,
-        approveIssueWork: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         cancelTask(input) {
           cancellations.push(input)
@@ -768,7 +1068,7 @@ describe('dashboard HTTP app', () => {
       settleTask: async () => true,
       store: {
         ...agentControls,
-        approveIssueWork: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         cancelTask(input) {
           cancellations.push(input)
@@ -845,7 +1145,7 @@ describe('dashboard HTTP app', () => {
       },
       store: {
         ...agentControls,
-        approveIssueWork: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         cancelTask(input) {
           cancellations.push(input)
@@ -917,7 +1217,7 @@ describe('dashboard HTTP app', () => {
         settleTask: () => new Promise((resolve) => setTimeout(resolve, 11_000, true)),
         store: {
           ...agentControls,
-          approveIssueWork: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+          approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
           approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
           cancelTask: () => ({ _tag: 'Cancelled' }),
           getDashboardSnapshot: () => snapshot,
@@ -990,7 +1290,7 @@ describe('dashboard HTTP app', () => {
         settleTask: () => new Promise(() => {}),
         store: {
           ...agentControls,
-          approveIssueWork: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+          approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
           approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
           cancelTask: () => ({ _tag: 'Cancelled' }),
           getDashboardSnapshot: () => snapshot,
@@ -1066,7 +1366,7 @@ describe('dashboard HTTP app', () => {
       settleTask: async () => true,
       store: {
         ...agentControls,
-        approveIssueWork: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         cancelTask(input) {
           cancellations.push(input)
@@ -1103,7 +1403,7 @@ describe('dashboard HTTP app', () => {
       now,
       store: {
         ...agentControls,
-        approveIssueWork: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         cancelTask: () => ({ _tag: 'Rejected', reason: { _tag: 'TaskNotFound' } }),
         getDashboardSnapshot: () => dashboardSnapshot(),
@@ -1152,7 +1452,7 @@ describe('dashboard HTTP app', () => {
       shutdownSignal: shutdown.signal,
       store: {
         ...agentControls,
-        approveIssueWork: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         cancelTask: () => ({ _tag: 'Rejected', reason: { _tag: 'TaskNotFound' } }),
         getDashboardSnapshot() {
@@ -1173,5 +1473,110 @@ describe('dashboard HTTP app', () => {
 
     expect(reads).toBe(readsBeforeShutdown)
     await response.body?.cancel()
+  })
+})
+
+describe('agent slot HTTP boundary', () => {
+  const limits = { hogwildCeiling: 4, hogwildMemoryMaximum: 2, desktopCeiling: 2, memoryPerAgentGiB: 8 }
+  const capacity = { localActive: 0, localMaximum: 2, desktopActive: 0, desktopMaximum: 1, desktopConnected: true }
+
+  function createSlotApp() {
+    const written: Array<{ host: string; slots: number }> = []
+    const app = createAgentApp({
+      agentSlots: limits,
+      setAgentSlots: (host, slots) => {
+        written.push({ host, slots })
+        return { ...capacity, localMaximum: host === 'hogwild' ? slots : capacity.localMaximum }
+      },
+      hostCapacity: () => capacity,
+      allowedOrigin,
+      dashboardPassword,
+      dashboardRoot,
+      now,
+      store: {
+        ...agentControls,
+        approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        cancelTask: () => ({ _tag: 'Rejected', reason: { _tag: 'TaskNotFound' } }),
+        getDashboardSnapshot: () => dashboardSnapshot(),
+        listReviewRuns: () => [],
+        requestReviewRerun: () => ({ _tag: 'Rejected', reason: { _tag: 'ItemNotFound' } }),
+      },
+    })
+    const send = (body: unknown) =>
+      app.request(`http://${allowedHost}/api/agents/slots`, {
+        method: 'POST',
+        headers: { authorization, host: allowedHost, origin: allowedOrigin, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    return { app, send, written }
+  }
+
+  it('sets the slot count and answers with the capacity in force', async () => {
+    const { send, written } = createSlotApp()
+
+    const response = await send({ host: 'hogwild', slots: 4 })
+
+    expect(response.status).toBe(200)
+    await expect(response.json()).resolves.toMatchObject({ localMaximum: 4 })
+    expect(written).toEqual([{ host: 'hogwild', slots: 4 }])
+  })
+
+  it('refuses a count above the ceiling and writes nothing', async () => {
+    const { send, written } = createSlotApp()
+
+    expect((await send({ host: 'hogwild', slots: 5 })).status).toBe(400)
+    expect((await send({ host: 'desktop', slots: 3 })).status).toBe(400)
+    expect((await send({ slots: 1 })).status).toBe(400)
+    expect(written).toEqual([])
+  })
+
+  it('reports the control as unavailable while the service exposes no hosts', async () => {
+    const app = createApp()
+
+    const response = await app.request(`http://${allowedHost}/api/agents/slots`, {
+      method: 'POST',
+      headers: { authorization, host: allowedHost, origin: allowedOrigin, 'content-type': 'application/json' },
+      body: JSON.stringify({ host: 'hogwild', slots: 1 }),
+    })
+
+    expect(response.status).toBe(503)
+  })
+
+  it('carries the slot bounds in the snapshot, so the tray offers the counts the controller allows', async () => {
+    const { app } = createSlotApp()
+
+    const response = await app.request(`http://${allowedHost}/api/state`, {
+      headers: { authorization, host: allowedHost },
+    })
+
+    await expect(response.json()).resolves.toMatchObject({ agentSlots: limits, hostCapacity: capacity })
+  })
+})
+
+describe('desktop capacity HTTP boundary', () => {
+  it('decodes an idle claim from the controller as an empty Queue', async () => {
+    const app = createApp(dashboardSnapshot(), createDesktopBroker({ now: () => now().getTime() }))
+    const response = await app.request(`http://${allowedHost}/api/desktop/claim`, {
+      method: 'POST',
+      headers: { authorization, host: allowedHost, origin: allowedOrigin },
+    })
+    expect(response.ok).toBe(true)
+    await expect(readDesktopResponse(response)).resolves.toBeNull()
+  })
+
+  it('saves a valid memory setting and refuses malformed input', async () => {
+    const desktop = createDesktopBroker({ now: () => now().getTime() })
+    const app = createApp(dashboardSnapshot(), desktop)
+    const send = (body: unknown) =>
+      app.request(`http://${allowedHost}/api/desktop/capacity`, {
+        method: 'POST',
+        headers: { authorization, host: allowedHost, origin: allowedOrigin, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    expect((await send({ memoryGiB: 20 })).status).toBe(200)
+    expect(desktop.read().requestedMemoryGiB).toBe(20)
+    expect((await send({ memoryGiB: 0 })).status).toBe(400)
+    expect(desktop.read().requestedMemoryGiB).toBe(20)
   })
 })

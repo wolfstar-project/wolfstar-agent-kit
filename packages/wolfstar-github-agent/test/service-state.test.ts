@@ -78,6 +78,7 @@ function seedRoutineState(path: string): void {
       candidates: [
         {
           fingerprint: 'src/store.ts#openRoutineRun',
+          title: 'Fixture title',
           target: 'src/store.ts',
           claim: 'One Routine result belongs on Hogwild.',
           verification: 'pnpm test',

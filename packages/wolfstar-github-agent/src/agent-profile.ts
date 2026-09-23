@@ -8,6 +8,7 @@ import type {
   CodexReasoningEffort,
   PinnedAgentSelection,
   RoleProfile,
+  RoleReasoningEfforts,
 } from './types.ts'
 import { err, ok } from './result.ts'
 
@@ -22,6 +23,7 @@ export const CODEX_AGENT_PROFILE = {
     pull_request_triage: { model: 'gpt-5.6-luna', reasoningEffort: 'low' },
     issue_triage: { model: 'gpt-5.6-terra', reasoningEffort: 'medium' },
     issue_work: { model: 'gpt-5.6-terra', reasoningEffort: 'medium' },
+    batch_plan: { model: 'gpt-5.6-terra', reasoningEffort: 'medium' },
     review_fix: { model: 'gpt-5.6-terra', reasoningEffort: 'medium' },
     routine_scan: { model: 'gpt-5.6-terra', reasoningEffort: 'medium' },
     routine_fix: { model: 'gpt-5.6-terra', reasoningEffort: 'medium' },
@@ -39,13 +41,17 @@ export const CLAUDE_AGENT_PROFILE = {
     pull_request_triage: { model: 'claude-fable-5', reasoningEffort: 'low' },
     issue_triage: { model: 'claude-sonnet-5', reasoningEffort: 'medium' },
     issue_work: { model: 'claude-sonnet-5', reasoningEffort: 'medium' },
+    batch_plan: { model: 'claude-sonnet-5', reasoningEffort: 'medium' },
     review_fix: { model: 'claude-sonnet-5', reasoningEffort: 'medium' },
     routine_scan: { model: 'claude-sonnet-5', reasoningEffort: 'medium' },
     routine_fix: { model: 'claude-sonnet-5', reasoningEffort: 'medium' },
   },
 } as const satisfies AgentProfile
 
-/** GLM 5.3 Flash on the GLM Coding Plan answers every role at its highest reasoning effort. */
+/**
+ * GLM 5.3 Flash on the GLM Coding Plan answers every role at its highest
+ * reasoning effort unless `agent.reasoning_effort.opencode` lowers one role.
+ */
 export const OPENCODE_AGENT_PROFILE = {
   provider: 'opencode',
   authentication: 'opencode-go',
@@ -57,6 +63,7 @@ export const OPENCODE_AGENT_PROFILE = {
     pull_request_triage: { model: 'zai-coding-plan/glm-5.3-flash', reasoningEffort: 'high' },
     issue_triage: { model: 'zai-coding-plan/glm-5.3-flash', reasoningEffort: 'high' },
     issue_work: { model: 'zai-coding-plan/glm-5.3-flash', reasoningEffort: 'high' },
+    batch_plan: { model: 'zai-coding-plan/glm-5.3-flash', reasoningEffort: 'high' },
     review_fix: { model: 'zai-coding-plan/glm-5.3-flash', reasoningEffort: 'high' },
     routine_scan: { model: 'zai-coding-plan/glm-5.3-flash', reasoningEffort: 'high' },
     routine_fix: { model: 'zai-coding-plan/glm-5.3-flash', reasoningEffort: 'high' },
@@ -78,6 +85,7 @@ export const AGENT_ROLES = [
   'pull_request_triage',
   'issue_triage',
   'issue_work',
+  'batch_plan',
   'review_fix',
   'routine_scan',
   'routine_fix',
@@ -142,7 +150,7 @@ export interface AgentRuntime {
 }
 
 /** Reads the Agent runtime that answers the next agent turn. */
-export type AgentRuntimeSource = () => AgentRuntime
+export type AgentRuntimeSource = (repository?: string) => AgentRuntime
 
 export function agentProfile(provider: AgentProviderName): AgentProfile {
   return profiles[provider]
@@ -232,10 +240,18 @@ export function parseAgentSelection(value: unknown): Result<AgentSelection, stri
   return ok({ _tag: 'Pinned', provider, model, reasoningEffort })
 }
 
-function roleWithSelection(role: RoleProfile, selection: PinnedAgentSelection): RoleProfile {
+/** A pinned Reasoning effort wins, then the configured override, then the provider default. */
+function roleWithSelection(
+  role: RoleProfile,
+  selection: PinnedAgentSelection,
+  configured: CodexReasoningEffort | undefined,
+): RoleProfile {
   const model = selection.model ?? role.model
-  const reasoningEffort = selection.reasoningEffort ?? role.reasoningEffort
-  return reasoningEffort === undefined ? { model } : { model, reasoningEffort }
+  // A person named this effort, so the value alone cannot say it apart from
+  // the provider default it may equal. The flag carries the provenance.
+  const chosen = selection.reasoningEffort ?? configured
+  if (chosen !== undefined) return { model, reasoningEffort: chosen, reasoningEffortExplicit: true }
+  return role.reasoningEffort === undefined ? { model } : { model, reasoningEffort: role.reasoningEffort }
 }
 
 /**
@@ -244,10 +260,16 @@ function roleWithSelection(role: RoleProfile, selection: PinnedAgentSelection): 
  * The service sizes its agent permits when it starts, so agent capacity comes
  * from the caller and never from the selected provider's own profile.
  */
-export function resolveAgentProfile(selection: PinnedAgentSelection, maximumActiveAgents: number): AgentProfile {
+export function resolveAgentProfile(
+  selection: PinnedAgentSelection,
+  maximumActiveAgents: number,
+  roleReasoningEfforts: RoleReasoningEfforts = {},
+  repositoryReasoningEfforts: RoleReasoningEfforts = {},
+): AgentProfile {
   const base = agentProfile(selection.provider)
+  const configured = { ...roleReasoningEfforts[selection.provider], ...repositoryReasoningEfforts[selection.provider] }
   const roles = Object.fromEntries(
-    AGENT_ROLES.map((role) => [role, roleWithSelection(base.roles[role], selection)]),
+    AGENT_ROLES.map((role) => [role, roleWithSelection(base.roles[role], selection, configured[role])]),
   ) as Record<AgentRole, RoleProfile>
   return { ...base, maximumActiveAgents, roles }
 }
@@ -259,6 +281,10 @@ export interface AgentRuntimeSourceOptions {
   configuredProvider: AgentProviderName
   maximumActiveAgents: number
   providers: Record<AgentProviderName, AgentProvider>
+  /** Reasoning effort overrides the configuration file names, per provider and role. */
+  roleReasoningEfforts?: RoleReasoningEfforts
+  /** Repository overrides replace only the listed provider roles. */
+  repositoryReasoningEfforts?: ReadonlyMap<string, RoleReasoningEfforts>
   selection: () => AgentSelection
 }
 
@@ -270,10 +296,15 @@ export interface AgentRuntimeSourceOptions {
  */
 export function createAgentRuntimeSource(options: AgentRuntimeSourceOptions): AgentRuntimeSource {
   const configured = providerAgentSelection(options.configuredProvider)
-  return () => {
+  return (repository) => {
     const selection = resolveAgentSelection(options.selection(), configured, options.chooseProvider)
     return {
-      profile: resolveAgentProfile(selection, options.maximumActiveAgents),
+      profile: resolveAgentProfile(
+        selection,
+        options.maximumActiveAgents,
+        options.roleReasoningEfforts,
+        repository === undefined ? undefined : options.repositoryReasoningEfforts?.get(repository),
+      ),
       provider: options.providers[selection.provider],
     }
   }

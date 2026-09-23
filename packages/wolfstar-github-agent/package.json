@@ -33,7 +33,10 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "catalog:",
+    "@coldtea/pr-lens-renderer": "catalog:",
+    "@coldtea/pr-lens-schema": "catalog:",
     "@openai/codex-sdk": "catalog:",
+    "advocaat": "workspace:*",
     "citty": "catalog:",
     "consola": "catalog:",
     "h3": "catalog:",
@@ -50,9 +53,11 @@
     "@types/node": "catalog:",
     "@vueuse/nuxt": "catalog:",
     "nuxt": "catalog:",
+    "nuxt-skew-protection": "catalog:",
     "obuild": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:",
+    "vue": "catalog:",
     "vue-tsc": "catalog:"
   },
   "engines": {

@@ -19,7 +19,13 @@ import {
   useNow,
 } from '@vueuse/core'
 import { CODEX_AGENT_PROFILE } from '../../../src/agent-profile.ts'
-import { agentStartState, decisionEntries, incidentEntries, isSnapshotStale, taskNumber } from '../utils/dashboard.ts'
+import {
+  agentStartState,
+  humanDecisionEntries,
+  incidentEntries,
+  isSnapshotStale,
+  taskNumber,
+} from '../utils/dashboard.ts'
 import { ejectRecoveryFromError, ejectSessionCommand } from '../utils/eject.ts'
 
 function emptySnapshot(): DashboardSnapshot {
@@ -29,6 +35,7 @@ function emptySnapshot(): DashboardSnapshot {
     mutationsEnabled: false,
     agentControl: { _tag: 'Running' },
     restartRequest: null,
+    serviceUpdate: { _tag: 'Checking', deployedCommit: '' },
     selectionMode: 'auto',
     openPullRequests: 0,
     maxOpenPullRequests: 8,
@@ -48,6 +55,7 @@ function emptySnapshot(): DashboardSnapshot {
     tasks: [],
     routines: [],
     routineRuns: [],
+    batches: [],
   }
 }
 
@@ -100,7 +108,7 @@ function createDashboard() {
     snapshot.value.agents.filter((agent): agent is ReviewAgent => agent._tag === 'ReviewAgent'),
   )
   const agentStart = computed(() => agentStartState(snapshot.value))
-  const decisions = computed(() => decisionEntries(snapshot.value.queue))
+  const decisions = computed(() => humanDecisionEntries(snapshot.value))
   /** Errors first, then newest. The chip, the Incident row, and the pane all read this one order. */
   const incidents = computed(() => incidentEntries(snapshot.value.incidents))
   const unhealthyRepositories = computed(
@@ -177,9 +185,16 @@ function createDashboard() {
   const requestRestart = (): Promise<void> =>
     control(() => $fetch('/api/service/restart', { method: 'POST', body: { source: 'dashboard' } }))
 
+  const requestUpdate = (): Promise<void> =>
+    control(() => $fetch('/api/service/update', { method: 'POST', body: { source: 'dashboard' } }))
+
   /** A switch starts the next agent turn. Work already running keeps its model. */
   const selectAgent = (selection: AgentSelection): Promise<void> =>
     control(() => $fetch('/api/agents/select', { method: 'POST', body: selection }))
+
+  /** Agent slots apply to the next turn. Running Agents finish. */
+  const setAgentSlots = (host: 'hogwild' | 'desktop', slots: number): Promise<void> =>
+    control(() => $fetch('/api/agents/slots', { method: 'POST', body: { host, slots } }))
 
   async function setRepositoryPaused(repository: string, paused: boolean): Promise<void> {
     repositoryPending.value = repository
@@ -297,7 +312,7 @@ function createDashboard() {
     approvalPending.value = `${key}:${entry.state.kind}`
     approvalErrors.value = without(approvalErrors.value, key)
     const request =
-      entry.state.kind === 'issue_work'
+      entry.state.kind !== 'review'
         ? $fetch('/api/issues/approve', {
             method: 'POST',
             body: { repository: entry.repository, issueNumber: entry.number, revisionId: entry.revisionId },
@@ -465,8 +480,10 @@ function createDashboard() {
     start,
     setAgentControl,
     requestRestart,
+    requestUpdate,
     setSelectionMode,
     selectAgent,
+    setAgentSlots,
     setRepositoryPaused,
     setRepositoryWritesEnabled,
     rerunReview,

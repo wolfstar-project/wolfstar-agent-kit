@@ -15,6 +15,7 @@ const {
   ejectedSession,
   clearEjectedSession,
   requestRestart,
+  requestUpdate,
   controlPending,
 } = useDashboard()
 
@@ -57,9 +58,9 @@ const restart = computed(() => restartNotice(snapshot.value.restartRequest))
         color="neutral"
         variant="outline"
         :disabled="controlPending"
-        @click="requestRestart"
+        @click="snapshot.restartRequest?.operation._tag === 'Update' ? requestUpdate() : requestRestart()"
       >
-        Restart again
+        {{ snapshot.restartRequest?.operation._tag === 'Update' ? 'Update after current work' : 'Restart again' }}
       </UButton>
     </div>
 

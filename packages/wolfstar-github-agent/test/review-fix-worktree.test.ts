@@ -79,11 +79,30 @@ function fixture(): { remote: string; root: string; task: ClaimedReviewFixTask }
       state: { _tag: 'Running', workerId: 'worker-1', fence: 1, leaseExpiresAt: '2026-08-13T01:10:00.000Z' },
       repositoryMapping: mapping,
       pullRequest: pullRequestItem({ number: 1, baseSha, headSha, headRef: 'fix/review', mergeState: 'clean' }),
+      rounds: { number: 1, limit: 3, prior: [] },
     },
   }
 }
 
 describe('review fix worktree', () => {
+  it('reports an unchanged worktree without losing the Agent result', async () => {
+    const { root, task, remote } = fixture()
+    const manager = createReviewFixWorktreeManager({
+      gitIdentity: { name: 'Test Author', email: 'author@example.com' },
+      remoteUrl: () => remote,
+      root,
+      tokens: {
+        getToken: async () => ok({ token: 'unused', expiresAt: '2126-01-01T00:00:00Z' }),
+        invalidate: () => undefined,
+      },
+    })
+    const signal = new AbortController().signal
+    const prepared = await manager.prepare(task, signal)
+    if (prepared._tag === 'Err') throw new Error(prepared.error)
+    expect(await manager.verify(task, prepared.value, signal)).toEqual(ok(expect.objectContaining({ changedFiles: 0 })))
+    expect(git(prepared.value.path, 'status', '--porcelain')).toBe('')
+  })
+
   it('rejects any file change made during read only Review', async () => {
     const { remote, root, task } = fixture()
     const reviewTask: ClaimedAdversarialReviewTask = {
@@ -142,8 +161,18 @@ describe('review fix worktree', () => {
     })
   })
 
-  it('pins a verified repair commit with the configured Git identity', async () => {
+  it.each([false, true])('publishes a verified Repair with merged=%s', async (merged) => {
     const { remote, root, task } = fixture()
+    if (merged) {
+      const checkout = task.repositoryMapping.checkout
+      git(checkout, 'checkout', 'main')
+      git(checkout, 'merge', '--ff-only', 'fix/review')
+      writeFileSync(join(checkout, 'later.ts'), 'export const later = true\n')
+      git(checkout, 'add', 'later.ts')
+      git(checkout, 'commit', '-m', 'later change')
+      git(checkout, 'push', 'origin', 'main', ':fix/review')
+      task.pullRequest = { ...task.pullRequest, state: 'closed', mergedAt: '2026-08-13T01:00:00.000Z' }
+    }
     const profile = signingProfile(root)
     const manager = createReviewFixWorktreeManager({
       gitIdentity: { name: 'Wolfstar Project', email: 'contact@wolfstar.rocks' },
@@ -197,7 +226,7 @@ describe('review fix worktree', () => {
         '--format=%G?',
       ),
     ).toBe('G')
-    expect(git(prepared.value.path, 'show', '--no-patch', '--format=%P')).toBe(task.pullRequest.headSha)
+    expect(git(prepared.value.path, 'show', '--no-patch', '--format=%P')).toBe(prepared.value.headSha)
     const publisher = createGitPublicationRemote({
       github: {
         getPullRequest: () => Promise.resolve(ok(task.pullRequest)),
@@ -212,7 +241,13 @@ describe('review fix worktree', () => {
       },
     })
     const command = {
-      _tag: 'UpdatePullRequest' as const,
+      ...(merged
+        ? {
+            _tag: 'OpenPullRequest' as const,
+            pullRequestTitle: 'fix: preserve bytes',
+            pullRequestBody: 'Fix findings after merge.',
+          }
+        : { _tag: 'UpdatePullRequest' as const }),
       id: 'publication-1',
       taskId: task.id,
       taskKind: 'review_fix' as const,
@@ -221,8 +256,8 @@ describe('review fix worktree', () => {
       commitSha: committed.value.commitSha,
       baseSha: committed.value.baseSha,
       baseRef: 'main',
-      expectedHeadSha: task.pullRequest.headSha,
-      headRef: task.pullRequest.headRef,
+      expectedHeadSha: merged ? prepared.value.baseSha : task.pullRequest.headSha,
+      headRef: merged ? 'fix/merged-review-1' : task.pullRequest.headRef,
       artifactRef: committed.value.artifactRef,
       patchDigest: committed.value.digest,
       changedFiles: committed.value.changedFiles,
@@ -235,6 +270,11 @@ describe('review fix worktree', () => {
 
     expect(await publisher.validateAuthority(command, new AbortController().signal)).toEqual(ok(undefined))
     expect(await publisher.push(command, new AbortController().signal)).toEqual(ok(undefined))
-    expect(git(remote, 'rev-parse', 'refs/heads/fix/review')).toBe(committed.value.commitSha)
+    expect(git(remote, 'rev-parse', `refs/heads/${command.headRef}`)).toBe(committed.value.commitSha)
+    if (merged) {
+      expect(git(remote, 'rev-parse', 'refs/heads/main')).toBe(prepared.value.baseSha)
+      expect(git(remote, 'branch', '--list', 'fix/review')).toBe('')
+      expect(readFileSync(join(prepared.value.path, 'later.ts'), 'utf8')).toContain('later = true')
+    }
   })
 })

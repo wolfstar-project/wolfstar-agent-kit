@@ -1,6 +1,6 @@
 import { createHmac } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
-import { createReconcileHint, createWebhookApp, verifyWebhookSignature, webhookHint } from '../src/webhook.ts'
+import { createReconcileHint, createWebhookApp, verifyWebhookSignature, webhookHint } from '../src/index.ts'
 
 const secret = 'a'.repeat(40)
 
@@ -12,11 +12,15 @@ function deliver(
   app: ReturnType<typeof createWebhookApp>,
   input: {
     body: string
+    delivery?: string
     event?: string
     signature?: string | null
   },
 ): Promise<Response> {
-  const headers = new Headers({ 'content-type': 'application/json' })
+  const headers = new Headers({
+    'content-type': 'application/json',
+    'x-github-delivery': input.delivery ?? 'delivery-1',
+  })
   if (input.event !== undefined) headers.set('x-github-event', input.event)
   if (input.signature !== null && input.signature !== undefined) headers.set('x-hub-signature-256', input.signature)
   return Promise.resolve(
@@ -176,6 +180,92 @@ describe('the webhook listener', () => {
   })
 })
 
+describe('repository-scoped reconciliation', () => {
+  it('refreshes only distinct repositories named by a burst', async () => {
+    vi.useFakeTimers()
+    try {
+      const reads: string[][] = []
+      const hint = createReconcileHint({
+        onError: (error) => {
+          throw error
+        },
+        run: async (repositories) => {
+          reads.push([...repositories])
+        },
+      })
+      hint.hint('wolfstar-project/first')
+      hint.hint('wolfstar-project/first')
+      hint.hint('wolfstar-project/second')
+      await vi.advanceTimersByTimeAsync(3_000)
+      expect(reads).toEqual([['wolfstar-project/first', 'wolfstar-project/second']])
+      await hint.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps deliveries received during a read for the next pass', async () => {
+    vi.useFakeTimers()
+    try {
+      const reads: string[][] = []
+      let finish!: () => void
+      const pending = new Promise<void>((resolve) => {
+        finish = resolve
+      })
+      const hint = createReconcileHint({
+        onError: (error) => {
+          throw error
+        },
+        run: async (repositories) => {
+          reads.push([...repositories])
+          if (reads.length === 1) await pending
+        },
+      })
+      hint.hint('wolfstar-project/first')
+      await vi.advanceTimersByTimeAsync(3_000)
+      hint.hint('wolfstar-project/second')
+      hint.hint('wolfstar-project/first')
+      finish()
+      await vi.advanceTimersByTimeAsync(3_000)
+      expect(reads).toEqual([['wolfstar-project/first'], ['wolfstar-project/second', 'wolfstar-project/first']])
+      await hint.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('stopping repository reads', () => {
+  it('discards pending repositories while waiting for an active read to finish', async () => {
+    vi.useFakeTimers()
+    try {
+      const reads: string[][] = []
+      let finish!: () => void
+      const pending = new Promise<void>((resolve) => {
+        finish = resolve
+      })
+      const hint = createReconcileHint({
+        onError: () => undefined,
+        run: async (repositories) => {
+          reads.push([...repositories])
+          await pending
+        },
+      })
+      hint.hint('wolfstar-project/first')
+      await vi.advanceTimersByTimeAsync(3_000)
+      hint.hint('wolfstar-project/second')
+      const stopped = hint.stop()
+      finish()
+      await stopped
+      hint.hint('wolfstar-project/third')
+      await vi.advanceTimersByTimeAsync(6_000)
+      expect(reads).toEqual([['wolfstar-project/first']])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
 describe('coalescing a burst of deliveries', () => {
   it('runs one reconciliation for many hints', async () => {
     vi.useFakeTimers()
@@ -189,7 +279,7 @@ describe('coalescing a burst of deliveries', () => {
         },
       })
 
-      for (let index = 0; index < 12; index += 1) coalescer.hint()
+      for (let index = 0; index < 12; index += 1) coalescer.hint('wolfstar-project/example')
       await vi.advanceTimersByTimeAsync(3_000)
 
       expect(runs).toBe(1)
@@ -210,9 +300,9 @@ describe('coalescing a burst of deliveries', () => {
         },
       })
 
-      coalescer.hint()
+      coalescer.hint('wolfstar-project/example')
       await vi.advanceTimersByTimeAsync(1_000)
-      coalescer.hint()
+      coalescer.hint('wolfstar-project/example')
       await vi.advanceTimersByTimeAsync(1_000)
 
       expect(runs).toBe(2)
@@ -234,10 +324,111 @@ describe('coalescing a burst of deliveries', () => {
       })
 
       await coalescer.stop()
-      coalescer.hint()
+      coalescer.hint('wolfstar-project/example')
       await vi.advanceTimersByTimeAsync(5_000)
 
       expect(runs).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('delivery recovery', () => {
+  it('acknowledges a repeated delivery without requesting another read', async () => {
+    const hints: string[] = []
+    const app = createWebhookApp({
+      allowedOwners: ['wolfstar-project'],
+      logger: { info: () => undefined },
+      onHint: (repository) => hints.push(repository),
+      secret,
+    })
+    const body = JSON.stringify({ repository: { full_name: 'wolfstar-project/example' } })
+    const input = { body, event: 'check_run', signature: sign(body) }
+
+    expect((await deliver(app, input)).status).toBe(204)
+    expect((await deliver(app, input)).status).toBe(204)
+    expect(hints).toEqual(['wolfstar-project/example'])
+  })
+
+  it('accepts another delivery and permits redelivery after retention expires', async () => {
+    const hints: string[] = []
+    let now = 0
+    const app = createWebhookApp({
+      allowedOwners: ['wolfstar-project'],
+      logger: { info: () => undefined },
+      onHint: (repository) => hints.push(repository),
+      secret,
+      now: () => now,
+    })
+    const body = JSON.stringify({ repository: { full_name: 'wolfstar-project/example' } })
+    const input = { body, event: 'check_suite', signature: sign(body) }
+
+    await deliver(app, input)
+    await deliver(app, { ...input, delivery: 'delivery-2' })
+    now = 60 * 60_000
+    await deliver(app, input)
+    expect(hints).toEqual(['wolfstar-project/example', 'wolfstar-project/example', 'wolfstar-project/example'])
+  })
+
+  it('does not let a rejected signature consume a delivery', async () => {
+    const hints: string[] = []
+    const app = createWebhookApp({
+      allowedOwners: ['wolfstar-project'],
+      logger: { info: () => undefined },
+      onHint: (repository) => hints.push(repository),
+      secret,
+    })
+    const body = JSON.stringify({ repository: { full_name: 'wolfstar-project/example' } })
+
+    expect((await deliver(app, { body, event: 'status', signature: sign(body, 'wrong') })).status).toBe(401)
+    expect((await deliver(app, { body, event: 'status', signature: sign(body) })).status).toBe(204)
+    expect(hints).toEqual(['wolfstar-project/example'])
+  })
+
+  it('rejects a signed delivery without an identity', async () => {
+    const hints: string[] = []
+    const app = createWebhookApp({
+      allowedOwners: ['wolfstar-project'],
+      logger: { info: () => undefined },
+      onHint: (repository) => hints.push(repository),
+      secret,
+    })
+    const body = JSON.stringify({ repository: { full_name: 'wolfstar-project/example' } })
+
+    expect((await deliver(app, { body, event: 'status', delivery: '', signature: sign(body) })).status).toBe(400)
+    expect(hints).toEqual([])
+  })
+
+  it('coalesces all hints during an active read into one later read', async () => {
+    vi.useFakeTimers()
+    try {
+      let finish = () => {}
+      const blocked = new Promise<void>((resolve) => {
+        finish = resolve
+      })
+      let runs = 0
+      const coalescer = createReconcileHint({
+        delayMilliseconds: 100,
+        onError: (error) => {
+          throw error
+        },
+        run: async () => {
+          runs += 1
+          if (runs === 1) await blocked
+        },
+      })
+      coalescer.hint('wolfstar-project/example')
+      await vi.advanceTimersByTimeAsync(100)
+      for (let n = 0; n < 10; n += 1) {
+        coalescer.hint('wolfstar-project/example')
+        await vi.advanceTimersByTimeAsync(100)
+      }
+      expect(runs).toBe(1)
+      finish()
+      await vi.advanceTimersByTimeAsync(100)
+      await coalescer.stop()
+      expect(runs).toBe(2)
     } finally {
       vi.useRealTimers()
     }

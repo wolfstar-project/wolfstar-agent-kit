@@ -5,6 +5,7 @@ describe('review rerun command', () => {
   it.each([
     '/wolfstar-agent rerun',
     ' /wolfstar-agent rerun ',
+    '@wolfstar-agent rerun',
     '@wolfstar-github-agent rerun',
     '@wolfstar-github-agent[bot] rerun',
   ])('accepts %s', (body) => {
@@ -14,6 +15,9 @@ describe('review rerun command', () => {
   it.each([
     '/wolfstar-agent',
     '/wolfstar-agent rerun this',
+    '@wolfstar-agent',
+    '@wolfstar-agent review',
+    '@wolfstar-agents rerun',
     '@wolfstar-github-agent review',
     'Please /wolfstar-agent rerun',
   ])('rejects %s', (body) => {

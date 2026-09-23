@@ -283,7 +283,7 @@ nuxt.config.ts             # Modules, fonts, colorMode
 
 ---
 
-## MCP Available
+## Component docs
 
 Use `nuxt-ui-remote` MCP for component docs:
 

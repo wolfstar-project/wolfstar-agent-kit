@@ -35,7 +35,7 @@ describe('persistent Agent provider circuits', () => {
       externalId: 'provider-paused-task',
       observedAt: '2026-08-13T01:00:00.000Z',
       source: 'poll',
-      subject: issueItem(),
+      subject: issueItem({ author: 'wolfstar-project' }),
     })
 
     for (let index = 0; index < 5; index += 1) {
@@ -67,7 +67,7 @@ describe('persistent Agent provider circuits', () => {
       externalId: 'provider-canary-worker-task',
       observedAt: '2026-08-13T01:00:00.000Z',
       source: 'poll',
-      subject: issueItem(),
+      subject: issueItem({ author: 'wolfstar-project' }),
     })
     journal.recordObservation({
       externalId: 'provider-canary-mutation-task',
@@ -98,8 +98,8 @@ describe('persistent Agent provider circuits', () => {
 
     for (let index = 0; index < 5; index += 1) {
       const second = 10 + index
-      const workerTask = journal.claimNextIssueTriageTask(`worker-${index}`, `2026-08-13T01:05:${second}.000Z`, 30_000)
       const mutationTask = journal.claimNextConflictTask(`mutation-${index}`, `2026-08-13T01:05:${second}.000Z`, 30_000)
+      const workerTask = journal.claimNextIssueTriageTask(`worker-${index}`, `2026-08-13T01:05:${second}.000Z`, 30_000)
       if (workerTask === null || mutationTask === null)
         throw new Error('Expected provider-gated Tasks to remain queued.')
       expect(

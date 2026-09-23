@@ -6,7 +6,7 @@ Research-backed content strategy for growing a developer Twitter presence, based
 
 | Account                         | Followers | Key Strategy                                                             |
 | ------------------------------- | --------- | ------------------------------------------------------------------------ |
-| Anthony Fu (@antaboread)        | ~50k      | Daily posts, visual demos, cross-project pollination, livestreams        |
+| Anthony Fu (@antfu7)            | ~50k      | Daily posts, visual demos, cross-project pollination, livestreams        |
 | Daniel Roe (@danielroe)         | ~15k      | Regular Nuxt updates, community engagement, conference presence          |
 | Hayden Bleasel (@haydenbleasel) | ~10k      | Build in public, polished visuals, ecosystem tagging, consistent cadence |
 | Sebastien Chopin (@Atinux)      | ~20k      | Creator authority, product launches, NuxtLabs updates                    |
@@ -95,15 +95,15 @@ Weak openers to avoid:
 
 Tag strategically (max 2 per tweet):
 
-| Topic                  | Tag                                        |
-| ---------------------- | ------------------------------------------ |
-| Nuxt                   | @nuaboratory                               |
-| Vue                    | @vuejs                                     |
-| UnJS                   | @unaboratory                               |
-| Vite                   | @vaboratoryite_js                          |
-| TypeScript             | @typescript                                |
-| Open source milestones | @github                                    |
-| SEO specific           | @anthropaboratorics (if AI/Claude related) |
+| Topic                  | Tag                                 |
+| ---------------------- | ----------------------------------- |
+| Nuxt                   | @nuxt_js                            |
+| Vue                    | @vuejs                              |
+| UnJS                   | @unjsio                             |
+| Vite                   | @vite_js                            |
+| TypeScript             | @typescript                         |
+| Open source milestones | @github                             |
+| SEO specific           | @AnthropicAI (if AI/Claude related) |
 
 ## Posting Cadence
 
@@ -131,7 +131,7 @@ Tag strategically (max 2 per tweet):
 1. **Open source is distribution**: every GitHub star is a potential follower. Make repos discoverable (good README, demo screenshots).
 2. **Cross-platform**: same content on Threads and LinkedIn reaches different audiences.
 3. **Newsletter as hedge**: email subscribers can't be taken by algorithm changes.
-4. **Reply to bigger accounts**: thoughtful replies to @antaboread, @danielroe, @Atinux get seen by their audiences.
+4. **Reply to bigger accounts**: thoughtful replies to @antfu7, @danielroe, @Atinux get seen by their audiences.
 5. **Conference talks generate follow surges**: always tweet your slides/recording.
 
 ## Anti-Patterns

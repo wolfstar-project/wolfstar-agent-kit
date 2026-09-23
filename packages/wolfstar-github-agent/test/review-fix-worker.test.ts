@@ -7,7 +7,7 @@ import { createReviewFixWorker } from '../src/review-fix-worker.ts'
 import { agentRuntime, pullRequestItem, repositoryMapping, stubProvider, turnEvents } from './fixtures.ts'
 
 describe('review fix Worker', () => {
-  it('starts a fresh Repair Agent with the exact stored findings', async () => {
+  it('preserves the next action when Repair returns no file changes', async () => {
     const pullRequest = pullRequestItem({ mergeState: 'clean' })
     const mapping = repositoryMapping({ ownership: 'maintained' })
     const task: ClaimedReviewFixTask = {
@@ -20,6 +20,7 @@ describe('review fix Worker', () => {
       updatedAt: '2026-08-13T01:00:00.000Z',
       repositoryMapping: mapping,
       pullRequest,
+      rounds: { number: 1, limit: 3, prior: [] },
     }
     const findings: ReviewFinding[] = [
       {
@@ -39,6 +40,7 @@ describe('review fix Worker', () => {
 
     const result = await createReviewFixWorker({
       github: {
+        findOpenPullRequestForBranch: () => Promise.resolve(ok(null)),
         getPullRequestReviewSnapshot: () =>
           Promise.resolve(
             ok({
@@ -59,8 +61,8 @@ describe('review fix Worker', () => {
         stubProvider(
           turnEvents({
             outcome: 'repaired',
-            summary: 'Preserved buffered bytes.',
-            checks: ['pnpm vitest run test/parser.test.ts'],
+            summary: 'Update the pull request description to match the severity routing.',
+            checks: ['Compared the description with the head diff.'],
             commitMessage: 'fix(parser): preserve buffered bytes',
           }),
           capture,
@@ -69,6 +71,7 @@ describe('review fix Worker', () => {
       status: { publishRepair: () => Promise.resolve(ok(undefined)) },
       store: {
         getReviewFixFindings: () => findings,
+        recordRepairReport: () => true,
         getWorkerSession: () => 'review-session-must-not-resume',
         requestReviewRerun: () => {
           throw new Error('A successful Repair must not queue another Review.')
@@ -82,7 +85,7 @@ describe('review fix Worker', () => {
           Promise.resolve(
             ok({ path: '/tmp/repair-worktree', baseSha: pullRequest.baseSha, headSha: pullRequest.headSha }),
           ),
-        verify: () => Promise.resolve(ok({ digest: 'patch-digest', changedFiles: 2 })),
+        verify: () => Promise.resolve(ok({ digest: 'patch-digest', changedFiles: 0 })),
         commit: (_task, _workspace, _patch, message) => {
           committedMessage = message
           return Promise.resolve(
@@ -100,9 +103,140 @@ describe('review fix Worker', () => {
 
     expect(result).toEqual(
       ok({
+        _tag: 'ActionRequired',
+        reason: 'Repair produced no file changes. Update the pull request description to match the severity routing.',
+        evidence: JSON.stringify({ findings, checks: ['Compared the description with the head diff.'] }),
+        usage: { _tag: 'Unavailable' },
+      }),
+    )
+    expect(committedMessage).toBe('')
+  })
+
+  it.each([
+    { merged: false, outcome: 'repaired', existing: false },
+    { merged: true, outcome: 'repaired', existing: false },
+    { merged: true, outcome: 'disputed', existing: false },
+    { merged: true, outcome: 'blocked', existing: false },
+    { merged: true, outcome: 'repaired', existing: true },
+  ])('repairs stored findings: %j', async ({ merged, outcome, existing }) => {
+    const pullRequest = pullRequestItem({
+      mergeState: 'clean',
+      ...(merged ? ({ state: 'closed', mergedAt: '2026-08-13T00:59:00.000Z' } as const) : {}),
+    })
+    const mapping = repositoryMapping({ ownership: 'maintained' })
+    const task: ClaimedReviewFixTask = {
+      id: 'repair-task',
+      kind: 'review_fix',
+      repository: mapping.github,
+      pullRequestNumber: pullRequest.number,
+      revisionId: 'revision-1',
+      state: { _tag: 'Running', workerId: 'repair-worker', fence: 1, leaseExpiresAt: '2026-08-13T02:00:00.000Z' },
+      updatedAt: '2026-08-13T01:00:00.000Z',
+      repositoryMapping: mapping,
+      pullRequest,
+      rounds: { number: 1, limit: 3, prior: [] },
+    }
+    const findings: ReviewFinding[] = [
+      {
+        _tag: 'Open',
+        summary: 'The parser drops buffered bytes.',
+        nextAction: 'Preserve all buffered bytes.',
+        details: {
+          fingerprint: 'f'.repeat(64),
+          location: { path: 'src/parser.ts', line: 42 },
+          proof: 'A split UTF-8 sequence loses its first byte.',
+          regressionTest: 'Split one UTF-8 sequence across two chunks and assert the original string.',
+        },
+      },
+    ]
+    const capture: ProviderCapture = { requests: [] }
+    let committedMessage = ''
+
+    const result = await createReviewFixWorker({
+      github: {
+        findOpenPullRequestForBranch: () =>
+          Promise.resolve(
+            ok(existing ? { number: 25, url: 'https://github.com/wolfstar-project/example/pull/25' } : null),
+          ),
+        getPullRequestReviewSnapshot: () =>
+          Promise.resolve(
+            ok({
+              baseChecks: { _tag: 'Available', checks: [] },
+              body: '',
+              checks: { _tag: 'Available', checks: [] },
+              comments: [],
+              priorAutomatedReview: { _tag: 'None' },
+              pullRequest,
+              requiredChecks: { _tag: 'None' },
+              reviews: [],
+            }),
+          ),
+      },
+      now: () => new Date('2026-08-13T01:00:00.000Z'),
+      runtime: agentRuntime(
+        CODEX_AGENT_PROFILE,
+        stubProvider(
+          turnEvents({
+            outcome,
+            summary: 'Preserved buffered bytes.',
+            checks: ['pnpm vitest run test/parser.test.ts'],
+            commitMessage: 'fix(parser): preserve buffered bytes',
+          }),
+          capture,
+        ),
+      ),
+      status: { publishRepair: () => Promise.resolve(ok(undefined)) },
+      store: {
+        getReviewFixFindings: () => findings,
+        recordRepairReport: () => true,
+        getWorkerSession: () => 'review-session-must-not-resume',
+        requestReviewRerun: () => {
+          throw new Error('A successful Repair must not queue another Review.')
+        },
+        saveWorkerSession: () => undefined,
+        updateAgentProgress: () => true,
+      },
+      validateMapping: () => Promise.resolve(ok(mapping)),
+      worktrees: {
+        prepare: () =>
+          Promise.resolve(
+            ok({
+              path: '/tmp/repair-worktree',
+              baseSha: pullRequest.baseSha,
+              headSha: merged ? pullRequest.baseSha : pullRequest.headSha,
+            }),
+          ),
+        verify: () => Promise.resolve(ok({ digest: 'patch-digest', changedFiles: 2 })),
+        commit: (_task, _workspace, _patch, message) => {
+          committedMessage = message
+          return Promise.resolve(
+            ok({
+              commitSha: 'repair-commit',
+              baseSha: pullRequest.baseSha,
+              artifactRef: 'artifact-ref',
+              digest: 'patch-digest',
+              changedFiles: 2,
+            }),
+          )
+        },
+      },
+    }).run(task, new AbortController().signal)
+
+    if (existing || outcome !== 'repaired') {
+      expect(result).toMatchObject(ok({ _tag: outcome === 'blocked' ? 'ActionRequired' : 'Completed' }))
+      expect(committedMessage).toBe('')
+      if (existing) expect(capture.requests).toEqual([])
+      return
+    }
+    expect(result).toEqual(
+      ok({
         _tag: 'Publish',
         usage: { _tag: 'Unavailable' },
-        publication: expect.objectContaining({ taskKind: 'review_fix', expectedHeadSha: pullRequest.headSha }),
+        publication: expect.objectContaining({
+          _tag: merged ? 'OpenPullRequest' : 'UpdatePullRequest',
+          taskKind: 'review_fix',
+          expectedHeadSha: merged ? pullRequest.baseSha : pullRequest.headSha,
+        }),
       }),
     )
     expect(committedMessage).toBe('fix(parser): preserve buffered bytes')
@@ -112,6 +246,127 @@ describe('review fix Worker', () => {
         model: 'gpt-5.6-terra',
         prompt: expect.stringContaining('Split one UTF-8 sequence across two chunks'),
       }),
+    ])
+    expect(capture.requests[0]?.prompt).toContain('Capture and inspect the repaired view before returning repaired')
+    expect(capture.requests[0]?.prompt).toContain('Download images only from GitHub-hosted media URLs')
+  })
+
+  it('hands a later round the earlier rounds and stores its own report', async () => {
+    const pullRequest = pullRequestItem({ mergeState: 'clean' })
+    const mapping = repositoryMapping({ ownership: 'maintained' })
+    const task: ClaimedReviewFixTask = {
+      id: 'repair-task-2',
+      kind: 'review_fix',
+      repository: mapping.github,
+      pullRequestNumber: pullRequest.number,
+      revisionId: 'revision-2',
+      state: { _tag: 'Running', workerId: 'repair-worker', fence: 1, leaseExpiresAt: '2026-08-13T02:00:00.000Z' },
+      updatedAt: '2026-08-13T01:00:00.000Z',
+      repositoryMapping: mapping,
+      pullRequest,
+      rounds: {
+        number: 2,
+        limit: 3,
+        prior: [
+          {
+            number: 1,
+            revisionId: 'revision-1',
+            commitSha: 'a'.repeat(40),
+            summary: 'Widened the parser guard.',
+            checks: ['pnpm vitest run test/parser.test.ts'],
+            findings: ['The parser drops buffered bytes.'],
+          },
+        ],
+      },
+    }
+    const findings: ReviewFinding[] = [
+      {
+        _tag: 'Open',
+        summary: 'The parser drops buffered bytes.',
+        nextAction: 'Preserve all buffered bytes.',
+        details: {
+          fingerprint: 'f'.repeat(64),
+          location: { path: 'src/parser.ts', line: 42 },
+          proof: 'A split UTF-8 sequence still loses its first byte after the widened guard.',
+          regressionTest: 'Split one UTF-8 sequence across two chunks and assert the original string.',
+        },
+      },
+    ]
+    const capture: ProviderCapture = { requests: [] }
+    const reports: Array<{ summary: string; checks: string[] }> = []
+
+    const result = await createReviewFixWorker({
+      github: {
+        findOpenPullRequestForBranch: () => Promise.resolve(ok(null)),
+        getPullRequestReviewSnapshot: () =>
+          Promise.resolve(
+            ok({
+              baseChecks: { _tag: 'Available', checks: [] },
+              body: '',
+              checks: { _tag: 'Available', checks: [] },
+              comments: [],
+              priorAutomatedReview: { _tag: 'None' },
+              pullRequest,
+              requiredChecks: { _tag: 'None' },
+              reviews: [],
+            }),
+          ),
+      },
+      now: () => new Date('2026-08-13T01:00:00.000Z'),
+      runtime: agentRuntime(
+        CODEX_AGENT_PROFILE,
+        stubProvider(
+          turnEvents({
+            outcome: 'repaired',
+            summary: 'Buffered the partial sequence across chunks.',
+            checks: ['pnpm vitest run test/parser.test.ts'],
+            commitMessage: 'fix(parser): buffer partial sequences',
+          }),
+          capture,
+        ),
+      ),
+      status: { publishRepair: () => Promise.resolve(ok(undefined)) },
+      store: {
+        getReviewFixFindings: () => findings,
+        getWorkerSession: () => null,
+        recordRepairReport: (input) => {
+          reports.push({ summary: input.summary, checks: input.checks })
+          return true
+        },
+        requestReviewRerun: () => {
+          throw new Error('A successful Repair must not queue another Review.')
+        },
+        saveWorkerSession: () => undefined,
+        updateAgentProgress: () => true,
+      },
+      validateMapping: () => Promise.resolve(ok(mapping)),
+      worktrees: {
+        prepare: () =>
+          Promise.resolve(
+            ok({ path: '/tmp/repair-worktree', baseSha: pullRequest.baseSha, headSha: pullRequest.headSha }),
+          ),
+        verify: () => Promise.resolve(ok({ digest: 'patch-digest', changedFiles: 2 })),
+        commit: () =>
+          Promise.resolve(
+            ok({
+              commitSha: 'repair-commit-2',
+              baseSha: pullRequest.baseSha,
+              artifactRef: 'artifact-ref',
+              digest: 'patch-digest',
+              changedFiles: 2,
+            }),
+          ),
+      },
+    }).run(task, new AbortController().signal)
+
+    expect(result).toMatchObject({ _tag: 'Ok', value: { _tag: 'Publish' } })
+    const prompt = capture.requests[0]?.prompt ?? ''
+    expect(prompt).toContain('This is Repair round 2 of 3.')
+    expect(prompt).toContain(`Round 1 published commit ${'a'.repeat(40)}.`)
+    expect(prompt).toContain('Its Repair Agent reported: Widened the parser guard.')
+    expect(prompt).toContain('Treat every earlier approach as rejected.')
+    expect(reports).toEqual([
+      { summary: 'Buffered the partial sequence across chunks.', checks: ['pnpm vitest run test/parser.test.ts'] },
     ])
   })
 
@@ -128,6 +383,7 @@ describe('review fix Worker', () => {
       updatedAt: '2026-08-13T01:00:00.000Z',
       repositoryMapping: mapping,
       pullRequest,
+      rounds: { number: 1, limit: 3, prior: [] },
     }
     const findings: ReviewFinding[] = [
       {
@@ -146,6 +402,7 @@ describe('review fix Worker', () => {
 
     const result = await createReviewFixWorker({
       github: {
+        findOpenPullRequestForBranch: () => Promise.resolve(ok(null)),
         getPullRequestReviewSnapshot: () =>
           Promise.resolve(
             ok({
@@ -175,6 +432,7 @@ describe('review fix Worker', () => {
       status: { publishRepair: () => Promise.resolve(ok(undefined)) },
       store: {
         getReviewFixFindings: () => findings,
+        recordRepairReport: () => true,
         getWorkerSession: () => null,
         requestReviewRerun: (input) => {
           reruns.push(input)
@@ -232,6 +490,7 @@ describe('review fix Worker', () => {
       updatedAt: '2026-08-13T01:00:00.000Z',
       repositoryMapping: mapping,
       pullRequest,
+      rounds: { number: 1, limit: 3, prior: [] },
     }
     const openFinding = (fingerprint: string): ReviewFinding => ({
       _tag: 'Open',
@@ -260,7 +519,10 @@ describe('review fix Worker', () => {
     const run = async (findings: ReviewFinding[]) => {
       const reruns: string[] = []
       await createReviewFixWorker({
-        github: { getPullRequestReviewSnapshot: snapshot },
+        github: {
+          findOpenPullRequestForBranch: () => Promise.resolve(ok(null)),
+          getPullRequestReviewSnapshot: snapshot,
+        },
         now: () => new Date('2026-08-13T01:00:00.000Z'),
         runtime: agentRuntime(
           CODEX_AGENT_PROFILE,
@@ -276,6 +538,7 @@ describe('review fix Worker', () => {
         status: { publishRepair: () => Promise.resolve(ok(undefined)) },
         store: {
           getReviewFixFindings: () => findings,
+          recordRepairReport: () => true,
           getWorkerSession: () => null,
           requestReviewRerun: (input) => {
             reruns.push(input.requestId)
@@ -323,6 +586,7 @@ describe('review fix Worker', () => {
       updatedAt: '2026-08-13T01:00:00.000Z',
       repositoryMapping: mapping,
       pullRequest,
+      rounds: { number: 1, limit: 3, prior: [] },
     }
     const findings: ReviewFinding[] = [
       {
@@ -340,6 +604,7 @@ describe('review fix Worker', () => {
 
     const result = await createReviewFixWorker({
       github: {
+        findOpenPullRequestForBranch: () => Promise.resolve(ok(null)),
         getPullRequestReviewSnapshot: () =>
           Promise.resolve(
             ok({
@@ -369,6 +634,7 @@ describe('review fix Worker', () => {
       status: { publishRepair: () => Promise.resolve(ok(undefined)) },
       store: {
         getReviewFixFindings: () => findings,
+        recordRepairReport: () => true,
         getWorkerSession: () => null,
         requestReviewRerun: () => ({ _tag: 'Rejected', reason: { _tag: 'DisputeCapReached' } }),
         saveWorkerSession: () => undefined,
@@ -412,6 +678,7 @@ describe('review fix Worker', () => {
       updatedAt: '2026-08-13T01:00:00.000Z',
       repositoryMapping: mapping,
       pullRequest,
+      rounds: { number: 1, limit: 3, prior: [] },
     }
     const findings: ReviewFinding[] = [
       {
@@ -430,6 +697,7 @@ describe('review fix Worker', () => {
 
     const result = await createReviewFixWorker({
       github: {
+        findOpenPullRequestForBranch: () => Promise.resolve(ok(null)),
         getPullRequestReviewSnapshot: () =>
           Promise.resolve(
             ok({
@@ -460,6 +728,7 @@ describe('review fix Worker', () => {
       status: { publishRepair: () => Promise.resolve(ok(undefined)) },
       store: {
         getReviewFixFindings: () => findings,
+        recordRepairReport: () => true,
         getWorkerSession: () => null,
         requestReviewRerun: () => {
           throw new Error('An invalid result must not queue another Review.')

@@ -4,16 +4,17 @@ import {
   activeStatsPreset,
   coverageText,
   hasStatsResults,
+  outcomeStats,
   statsDateRange,
   statsPresets,
   statsRequestRange,
 } from '../utils/stats.ts'
 import StatsDailyChart from './_StatsDailyChart.vue'
-import StatsOutcomeChart from './_StatsOutcomeChart.vue'
+import StatsRepositoryTable from './_StatsRepositoryTable.vue'
 import StatsWorkTable from './_StatsWorkTable.vue'
 
 /**
- * What the work produced over a range. Two small charts and one table.
+ * What the work produced over a range. A stats strip, one chart, one table.
  *
  * The URL query is the source of truth for the range: the form writes it,
  * and every change of it refetches. The page never scores or ranks.
@@ -37,6 +38,9 @@ const activePreset = computed(() =>
 const hasResults = computed(() => snapshot.value !== undefined && hasStatsResults(snapshot.value))
 const coverageLine = computed(() =>
   snapshot.value === undefined ? undefined : coverageText(snapshot.value.coverage.pullRequestTriage),
+)
+const strip = computed(() =>
+  snapshot.value === undefined ? [] : outcomeStats(snapshot.value.summary, snapshot.value.days),
 )
 
 function queryDate(value: unknown): string | undefined {
@@ -137,7 +141,7 @@ useHead({
 
 <template>
   <div class="flex flex-col gap-6">
-    <ColumnHeading label="Stats" :level="1" />
+    <h1 class="sr-only">Stats</h1>
 
     <div class="flex flex-wrap items-center justify-between gap-x-6 gap-y-3">
       <form class="flex flex-wrap items-center gap-2" aria-label="Date range" @submit.prevent="applyRange">
@@ -189,17 +193,21 @@ useHead({
 
     <template v-else-if="snapshot">
       <div v-if="hasResults" class="grid min-w-0 gap-10">
-        <div class="grid min-w-0 gap-10 md:grid-cols-2">
-          <StatsOutcomeChart :summary="snapshot.summary" />
-          <StatsDailyChart :days="snapshot.days" />
-        </div>
+        <UiStats :data="strip" variant="card" wrap class="gap-y-4" />
+        <StatsDailyChart :days="snapshot.days" />
+        <StatsRepositoryTable :repositories="snapshot.repositories" />
         <StatsWorkTable :work="snapshot.work" :from="from" :to="to" />
       </div>
 
-      <p v-else class="flex flex-wrap items-center gap-3 text-sm text-muted">
-        <span>No completed work exists in this range.</span>
+      <UiEmptyState
+        v-else
+        compact
+        icon="chart"
+        title="Nothing in this range"
+        description="No completed work exists in this range."
+      >
         <UButton size="xs" color="neutral" variant="outline" @click="choosePreset(90)"> Show 90 days </UButton>
-      </p>
+      </UiEmptyState>
     </template>
   </div>
 </template>

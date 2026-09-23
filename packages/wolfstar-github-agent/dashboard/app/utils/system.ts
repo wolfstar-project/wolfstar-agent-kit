@@ -2,11 +2,14 @@ import type { AgentProviderName } from '../../../src/agent-provider.ts'
 import type { CronExpression } from '../../../src/routine-schedule.ts'
 import type {
   AgentStartState,
+  Batch,
+  BatchUnit,
   DashboardSnapshot,
   ProviderCapacityStatus,
   ProviderCircuit,
   RestartRequest,
   Routine,
+  ServiceUpdateStatus,
 } from '../../../src/types.ts'
 import { hasSpendableCapacity } from '../../../src/capacity.ts'
 import { matchesCron, parseCron, wallClockParts } from '../../../src/routine-schedule.ts'
@@ -67,10 +70,22 @@ function manualHoldsQueue(snapshot: DashboardSnapshot): boolean {
 export function systemChipState(snapshot: DashboardSnapshot): SystemChipState {
   if (snapshot.generatedAt.length === 0) return { _tag: 'Loading' }
   const active = snapshot.agents.filter((agent) => agent._tag === 'ActiveAgent').length
-  const counts: SystemChipCounts = { active, maximum: snapshot.agentProfile.maximumActiveAgents, live: active > 0 }
+  // Agent slots are a control, so the chip counts the hosts rather than the
+  // configured ceiling the schedulers are sized for.
+  const capacity = snapshot.hostCapacity
+  const maximum =
+    capacity === undefined
+      ? snapshot.agentProfile.maximumActiveAgents
+      : capacity.localMaximum + (capacity.desktopConnected ? capacity.desktopMaximum : 0)
+  const counts: SystemChipCounts = { active, maximum, live: active > 0 }
   if (snapshot.incidents.length > 0) return { _tag: 'Incident', incidents: snapshot.incidents.length, ...counts }
-  if (snapshot.agentStart._tag !== 'Available')
-    return { _tag: 'CannotStart', reason: cannotStartReasons[snapshot.agentStart._tag], ...counts }
+  if (snapshot.agentStart._tag !== 'Available') {
+    const reason =
+      snapshot.agentStart._tag === 'RestartRequested' && snapshot.restartRequest?.operation._tag === 'Update'
+        ? 'Updating after current work'
+        : cannotStartReasons[snapshot.agentStart._tag]
+    return { _tag: 'CannotStart', reason, ...counts }
+  }
   if (manualHoldsQueue(snapshot)) return { _tag: 'CannotStart', reason: 'Manual', ...counts }
   return { _tag: 'Normal', ...counts }
 }
@@ -143,9 +158,47 @@ export type RestartNotice =
 /** A Completed request is history, so it renders nothing. */
 export function restartNotice(request: RestartRequest | null): RestartNotice | undefined {
   if (request === null || request._tag === 'Completed') return undefined
-  if (request._tag === 'Requested') return { _tag: 'Requested', text: 'Restart requested. Active work finishes first.' }
-  if (request._tag === 'Restarting') return { _tag: 'Restarting', text: 'Restarting.' }
-  return { _tag: 'ActionRequired', text: `Restart did not complete: ${request.reason}` }
+  const updating = request.operation._tag === 'Update'
+  if (request._tag === 'Requested')
+    return {
+      _tag: 'Requested',
+      text: updating
+        ? 'Update requested. Active work finishes first.'
+        : 'Restart requested. Active work finishes first.',
+    }
+  if (request._tag === 'Restarting')
+    return { _tag: 'Restarting', text: updating ? 'Starting the updated service.' : 'Restarting.' }
+  return { _tag: 'ActionRequired', text: `${updating ? 'Update' : 'Restart'} did not complete: ${request.reason}` }
+}
+
+export interface ServiceUpdatePresentation {
+  label: string
+  tone: 'neutral' | 'warning'
+  deployedCommit: string
+  latestCommit?: string
+  checkedAt: string | null
+  detail?: string
+}
+
+export function serviceUpdatePresentation(status: ServiceUpdateStatus): ServiceUpdatePresentation {
+  const deployedCommit = status.deployedCommit.slice(0, 7)
+  if (status._tag === 'Checking') return { label: 'Checking', tone: 'neutral', deployedCommit, checkedAt: null }
+  if (status._tag === 'Unavailable') {
+    return {
+      label: 'Check failed',
+      tone: 'warning',
+      deployedCommit,
+      checkedAt: status.checkedAt,
+      detail: status.reason,
+    }
+  }
+  return {
+    label: status._tag === 'Available' ? 'Update available' : 'Current',
+    tone: status._tag === 'Available' ? 'warning' : 'neutral',
+    deployedCommit,
+    latestCommit: status.latestCommit.slice(0, 7),
+    checkedAt: status.checkedAt,
+  }
 }
 
 const MINUTE = 60_000
@@ -193,6 +246,80 @@ export function nextRoutineInstant(
     return undefined
   }
   return expressions.flatMap((expression) => firstMatch(expression) ?? []).sort((a, b) => a.getTime() - b.getTime())[0]
+}
+
+export interface BatchUnitRow {
+  id: string
+  /** `#101, #102` */
+  issues: string
+  label: string
+  tone: 'success' | 'warning' | 'error' | 'neutral'
+  /** `on #7` for a stacked unit whose base published, `on unit 1` before that. */
+  stack: string | null
+  rationale: string
+  pullRequestNumber: number | null
+}
+
+export interface BatchRow {
+  id: string
+  repository: string
+  label: string
+  tone: 'success' | 'warning' | 'error' | 'neutral'
+  /** The reserved issues before the plan exists, so the pane names them from the first poll. */
+  issues: string
+  units: BatchUnitRow[]
+  createdAt: string
+  reason: string | null
+}
+
+function unitLabel(unit: BatchUnit): { label: string; tone: BatchUnitRow['tone'] } {
+  switch (unit.state._tag) {
+    case 'Waiting':
+      return { label: 'Waiting', tone: 'neutral' }
+    case 'Running':
+      return { label: 'Running', tone: 'neutral' }
+    case 'Published':
+      return { label: `Opened #${unit.state.pullRequestNumber}`, tone: 'success' }
+    case 'ActionRequired':
+      return { label: 'Action required', tone: 'warning' }
+    case 'Failed':
+      return { label: 'Failed', tone: 'error' }
+  }
+}
+
+/** One Batch as the System pane shows it. Pure, so the pane and its test read the same rows. */
+export function batchRow(batch: Batch): BatchRow {
+  const units = batch.units ?? []
+  const byId = new Map(units.map((unit) => [unit.id, unit]))
+  const state = batch.state
+  const label = state._tag === 'Running' ? (batch.units === null ? 'Planning' : 'Running') : state._tag
+  const tone: BatchRow['tone'] = state._tag === 'Failed' ? 'error' : state._tag === 'Completed' ? 'success' : 'neutral'
+  return {
+    id: batch.id,
+    repository: batch.repository,
+    label,
+    tone,
+    issues: batch.issues.map((issue) => `#${issue.issueNumber}`).join(', '),
+    createdAt: batch.createdAt,
+    reason: state._tag === 'Failed' ? state.reason : null,
+    units: units.map((unit) => {
+      const base = unit.dependsOnUnitId === null ? undefined : byId.get(unit.dependsOnUnitId)
+      const stack =
+        base === undefined
+          ? null
+          : base.state._tag === 'Published'
+            ? `on #${base.state.pullRequestNumber}`
+            : `on unit ${base.position + 1}`
+      return {
+        id: unit.id,
+        issues: unit.issueNumbers.map((number) => `#${number}`).join(', '),
+        ...unitLabel(unit),
+        stack,
+        rationale: unit.rationale,
+        pullRequestNumber: unit.state._tag === 'Published' ? unit.state.pullRequestNumber : null,
+      }
+    }),
+  }
 }
 
 /** The tab icon has 16 pixels, so it carries one signal: colour. */

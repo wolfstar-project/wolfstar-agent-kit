@@ -1,16 +1,21 @@
 import type { Octokit } from 'octokit'
 import type { AgentLabelState } from './agent-label.ts'
 import type { GitHubTokenProvider } from './github-auth.ts'
+import type { PullRequestFile } from './merge-risk.ts'
 import type { Result } from './result.ts'
+import type { ReviewCheckRunPublisher, ReviewCheckRunUpdate } from './review-check-run.ts'
 import type { PriorAutomatedReview } from './review-comment.ts'
 import type { GitHubPullRequestItem, GitHubRepositoryAccess, RepositoryMapping } from './types.ts'
 import { AGENT_LABELS, planAgentLabels, staleAgentLabels } from './agent-label.ts'
+import { approvalLabels } from './approval-labels.ts'
 import { hasAutoMergeLabel } from './auto-merge.ts'
 import { isControllerOwned, pullRequestPurpose } from './baseline-repair-state.ts'
 import { createAuthenticatedClient } from './github-auth.ts'
-import { currentBaseSha } from './github-base.ts'
+import { currentBaseChecks, currentBaseSha } from './github-base.ts'
 import { AUTOMATED_ISSUE_TRIAGE_MARKER } from './issue-triage-comment.ts'
 import { err, ok } from './result.ts'
+import { normalizeReviewControl } from './review-cancel.ts'
+import { REVIEW_CHECK_RUN_NAME } from './review-check-run.ts'
 import { AUTOMATED_REVIEW_MARKER, automatedReviewHead, priorAutomatedReviewForHead } from './review-comment.ts'
 
 /**
@@ -82,6 +87,50 @@ export function currentGitHubChecks(checks: GitHubCheck[]): GitHubCheck[] {
     if (previous === undefined || check.id > previous.id) current.set(context, check)
   }
   return [...current.values()]
+}
+
+/**
+ * Workflow run events whose check suites say nothing about the commit.
+ *
+ * `workflow_run`: GitHub attaches such a run to the default branch tip, not to
+ * the commit whose workflow finished. A bundle-size comment job on `main`
+ * therefore appears as a running base check every time any pull request's CI
+ * ends, and the base gate read that as "the default branch has not passed"
+ * while Repair waited.
+ *
+ * `schedule`: a cron run also lands on the default branch tip, and a stalled
+ * one holds the base gate at PENDING while Repair waits: a queued cleanup
+ * sweep on nuxtseo.com `main` held the gate for a day while its runner fleet
+ * was down. GitHub reports an unfinished run with more statuses than the two
+ * everyone remembers, and one more added later must not reopen the stall, so
+ * only a run already reported `completed` counts as concluded. A concluded
+ * cron run executed on the base commit tip and its result is real evidence, so
+ * a failed one must keep the base red and queue a Baseline repair.
+ *
+ * `dynamic`: Dependabot's updater workflow runs with this event on the branch
+ * tip. Its `Dependabot` check fails when an update was not possible, such as a
+ * security update with no compatible version. That is a fact about the
+ * dependency, not the commit, and a failed base would queue a pointless
+ * Baseline repair.
+ *
+ * `workflow_dispatch` stays. A person starts it on purpose, often to rerun the
+ * real checks, so its result is evidence about the commit.
+ */
+const DERIVED_RUN_EVENTS = new Set(['workflow_run', 'schedule', 'dynamic'])
+
+/** The check suites of workflow runs that answer for a timer or another commit. */
+export function derivedCheckSuiteIds(
+  runs: ReadonlyArray<{ event: string; status?: string | null; check_suite_id?: number | null }>,
+): Set<number> {
+  return new Set(
+    runs.flatMap((run) =>
+      DERIVED_RUN_EVENTS.has(run.event) &&
+      typeof run.check_suite_id === 'number' &&
+      !(run.event === 'schedule' && run.status === 'completed')
+        ? [run.check_suite_id]
+        : [],
+    ),
+  )
 }
 
 export function chronologicalPullRequestComments(entries: Array<{ body: string; createdAt: string }>): string[] {
@@ -161,12 +210,113 @@ export interface PublishedReviewStatus {
  * `Missing` means a person deleted the comment, so there is nothing to correct.
  * `Changed` means somebody wrote it after the caller last read it.
  */
+/**
+ * Why a stored comment id names a comment this service must never edit.
+ *
+ * Neither reason changes on a later pass, so a caller retires the publication
+ * that holds the id instead of asking GitHub the same question every pass.
+ */
+export type ForeignReviewCommentReason =
+  | 'The stored automated review comment belongs to another pull request.'
+  | 'The stored automated review comment belongs to another GitHub actor.'
+
 export type EditedReviewStatus =
   | { _tag: 'Edited'; commentId: number; url: string }
   | { _tag: 'Changed' }
   | { _tag: 'Missing' }
+  | { _tag: 'Foreign'; reason: ForeignReviewCommentReason }
+
+/** One open pull request found by its head branch. */
+export interface OpenPullRequestReference {
+  number: number
+  url: string
+}
+
+/**
+ * What one failed GitHub Actions job can tell an Agent before it starts.
+ *
+ * Every Baseline repair session used to spend its first minutes finding the
+ * run, and four found the log already expired. The controller reads it once.
+ */
+export interface FailedJobContext {
+  runId: number
+  jobName: string
+  /** The name of the first failed step, or null when no step reports failure. */
+  failedStep: string | null
+  /** The last lines of the job log, oldest first. */
+  logTail: string[]
+}
+
+export const FAILED_JOB_LOG_TAIL_LINES = 80
+
+export interface ExistingReviewLabel extends PublishedReviewStatus {
+  label: 'READY' | 'PENDING' | 'BLOCKED' | 'ADVERSARIAL_REVIEW_SKIPPED'
+}
+
+/**
+ * Why the trusted comment stopped yielding its outcome label.
+ *
+ * `Permanent` says the comment no longer carries the review its command is
+ * pinned to: it was deleted or edited past recognition, or the pull request
+ * moved off the pinned head. No retry restores it, so the caller retires the
+ * command instead of asking GitHub the same question every pass. `Transient`
+ * covers transport trouble a retry can outlive.
+ */
+export type ExistingReviewLabelFailure = { _tag: 'Permanent'; message: string } | { _tag: 'Transient'; message: string }
+
+export interface ExistingReviewLabelSource {
+  /** Reads the latest trusted review for the pinned head and base branch without editing its comment. */
+  readExistingReviewLabel: (
+    repository: RepositoryMapping,
+    pullRequestNumber: number,
+    commentId: number,
+    headSha: string,
+    baseRef: string,
+    signal: AbortSignal,
+  ) => Promise<Result<ExistingReviewLabel, ExistingReviewLabelFailure>>
+}
+
+/** Synchronous, so no await separates current authority from the GitHub write. */
+export type ReviewPublicationAuthority = () => Result<void, string>
+
+/** Review publishers must supply current authority to every mutation helper. */
+export interface ReviewPublicationSource {
+  stampAgentLabel: (
+    repository: RepositoryMapping,
+    itemNumber: number,
+    state: AgentLabelState,
+    signal: AbortSignal,
+    authorize: ReviewPublicationAuthority,
+  ) => Promise<Result<void, string>>
+  upsertReviewStatus: (
+    repository: RepositoryMapping,
+    pullRequestNumber: number,
+    commentId: number | null,
+    body: string,
+    replacePriorReview: boolean,
+    signal: AbortSignal,
+    authorize: ReviewPublicationAuthority,
+  ) => Promise<Result<PublishedReviewStatus, string>>
+}
 
 export interface GitHubAgentSource {
+  /** Finds the open pull request whose head is `headRef`, if one exists. */
+  findOpenPullRequestForBranch: (
+    repository: RepositoryMapping,
+    headRef: string,
+    signal: AbortSignal,
+  ) => Promise<Result<OpenPullRequestReference | null, string>>
+  /**
+   * Reads one failed Actions job: its run, its failed step, and its log tail.
+   *
+   * For a GitHub Actions check run, the check run id is also the job id. An
+   * expired log answers `Err`, and the caller says so instead of guessing.
+   */
+  getFailedJobContext: (
+    repository: RepositoryMapping,
+    jobId: number,
+    signal: AbortSignal,
+  ) => Promise<Result<FailedJobContext, string>>
   consumeApprovalLabel: (
     repository: RepositoryMapping,
     subjectKind: 'issue' | 'pull_request',
@@ -193,6 +343,7 @@ export interface GitHubAgentSource {
     itemNumber: number,
     state: AgentLabelState,
     signal: AbortSignal,
+    authorize?: ReviewPublicationAuthority,
   ) => Promise<Result<void, string>>
   /**
    * Takes the verdict off a pull request no Review has answered for.
@@ -230,7 +381,7 @@ export interface GitHubAgentSource {
     repository: RepositoryMapping,
     pullRequestNumber: number,
     signal: AbortSignal,
-  ) => Promise<Result<string[], string>>
+  ) => Promise<Result<PullRequestFile[], string>>
   upsertIssueTriageComment: (
     repository: RepositoryMapping,
     issueNumber: number,
@@ -270,7 +421,17 @@ export interface GitHubAgentSource {
     body: string,
     replacePriorReview: boolean,
     signal: AbortSignal,
+    authorize?: ReviewPublicationAuthority,
   ) => Promise<Result<PublishedReviewStatus, string>>
+  /**
+   * Mirrors one Review publication onto the Review check run for that head.
+   *
+   * The check run reports visibility, never a verdict: `success` for a READY
+   * Review and `neutral` for every other outcome, so branch protection cannot
+   * gate on this service's own opinion. `reviewCheckRunUpdate` decides what
+   * one publication owes; this write lands it.
+   */
+  upsertReviewCheckRun: ReviewCheckRunPublisher['upsertReviewCheckRun']
 }
 
 export interface GitHubAgentSourceOptions {
@@ -282,6 +443,12 @@ export interface GitHubAgentSourceOptions {
     login: string
     tokens: GitHubTokenProvider
   }
+  /**
+   * This app's own GitHub App id. Check runs the app writes report the Review,
+   * so reading them back as CI would make the Review gate on itself, and every
+   * checks read drops them.
+   */
+  ownAppId: number
   tokens: GitHubTokenProvider
   userAgent?: string
 }
@@ -363,7 +530,10 @@ function pullRequestItem(
   const labels = pull.labels.flatMap((label) => (label.name === undefined ? [] : [label.name]))
   return {
     kind: 'pull_request',
-    approvalLabels: [],
+    // The poller reads the same labels. An empty list here let the manual
+    // Review label survive every Review, and each new Revision then reviewed
+    // the same head commit again as a fresh manual request.
+    approvalLabels: approvalLabels(labels),
     autoMerge: hasAutoMergeLabel(labels),
     repository: repository.github,
     number: pull.number,
@@ -396,7 +566,9 @@ function pullRequestItem(
   }
 }
 
-export function createGitHubAgentSource(options: GitHubAgentSourceOptions): GitHubAgentSource {
+export function createGitHubAgentSource(
+  options: GitHubAgentSourceOptions,
+): GitHubAgentSource & ExistingReviewLabelSource {
   const clientWith = async (
     tokens: GitHubTokenProvider,
     repository: string,
@@ -425,20 +597,69 @@ export function createGitHubAgentSource(options: GitHubAgentSourceOptions): GitH
   ): Promise<Result<Octokit, string>> => clientWith(options.tokens, repository, access, signal)
 
   return {
+    async findOpenPullRequestForBranch(repository, headRef, signal) {
+      const octokit = await client(repository.github, 'read', signal)
+      if (octokit._tag === 'Err') return octokit
+      const { owner, repo } = repositoryParts(repository.github)
+      return octokit.value.rest.pulls
+        .list({ owner, repo, state: 'open', head: `${owner}:${headRef}`, per_page: 1, request: { signal } })
+        .then((response): Result<OpenPullRequestReference | null, string> => {
+          const pull = response.data[0]
+          return ok(pull === undefined ? null : { number: pull.number, url: pull.html_url })
+        })
+        .catch((error: unknown): Result<OpenPullRequestReference | null, string> => err(message(error)))
+    },
+
+    async getFailedJobContext(repository, jobId, signal) {
+      const octokit = await client(repository.github, 'checks_read', signal)
+      if (octokit._tag === 'Err') return octokit
+      const { owner, repo } = repositoryParts(repository.github)
+      return Promise.all([
+        octokit.value.rest.actions.getJobForWorkflowRun({ owner, repo, job_id: jobId, request: { signal } }),
+        octokit.value.rest.actions.downloadJobLogsForWorkflowRun({ owner, repo, job_id: jobId, request: { signal } }),
+      ])
+        .then(([job, log]): Result<FailedJobContext, string> => {
+          if (typeof log.data !== 'string') return err(`GitHub returned no log text for job ${jobId}.`)
+          const lines = log.data.split(/\r?\n/)
+          while (lines.length > 0 && lines[lines.length - 1]?.trim() === '') lines.pop()
+          return ok({
+            runId: job.data.run_id,
+            jobName: job.data.name,
+            failedStep: job.data.steps?.find((step) => step.conclusion === 'failure')?.name ?? null,
+            logTail: lines.slice(-FAILED_JOB_LOG_TAIL_LINES),
+          })
+        })
+        .catch((error: unknown): Result<FailedJobContext, string> => err(message(error)))
+    },
+
     async listPullRequestFiles(repository, pullRequestNumber, signal) {
       const octokit = await client(repository.github, 'read', signal)
       if (octokit._tag === 'Err') return octokit
       const { owner, repo } = repositoryParts(repository.github)
-      return octokit.value
-        .paginate(octokit.value.rest.pulls.listFiles, {
-          owner,
-          repo,
-          pull_number: pullRequestNumber,
-          per_page: 100,
-          request: { signal },
-        })
-        .then((files) => ok(files.map((file) => file.filename)))
-        .catch((error: unknown): Result<string[], string> => err(message(error)))
+      return (
+        octokit.value
+          .paginate(octokit.value.rest.pulls.listFiles, {
+            owner,
+            repo,
+            pull_number: pullRequestNumber,
+            per_page: 100,
+            request: { signal },
+          })
+          // Merge risk reads the counts and the status beside the name, so this
+          // keeps what GitHub already returned instead of fetching it twice.
+          .then((files) =>
+            ok(
+              files.map((file): PullRequestFile => ({
+                additions: file.additions,
+                deletions: file.deletions,
+                path: file.filename,
+                previousFilename: file.previous_filename ?? null,
+                status: file.status,
+              })),
+            ),
+          )
+          .catch((error: unknown): Result<PullRequestFile[], string> => err(message(error)))
+      )
     },
 
     async consumeApprovalLabel(repository, _subjectKind, itemNumber, label, signal) {
@@ -531,7 +752,69 @@ export function createGitHubAgentSource(options: GitHubAgentSourceOptions): GitH
         )
     },
 
-    async stampAgentLabel(repository, itemNumber, state, signal) {
+    async readExistingReviewLabel(repository, pullRequestNumber, commentId, headSha, baseRef, signal) {
+      const octokit = await client(repository.github, 'read', signal)
+      if (octokit._tag === 'Err') return err({ _tag: 'Transient', message: octokit.error })
+      const { owner, repo } = repositoryParts(repository.github)
+      return octokit.value
+        .paginate(octokit.value.rest.issues.listComments, {
+          owner,
+          repo,
+          issue_number: pullRequestNumber,
+          per_page: 100,
+          request: { signal },
+        })
+        .then(async (comments): Promise<Result<ExistingReviewLabel, ExistingReviewLabelFailure>> => {
+          const prior = priorAutomatedReviewForHead(
+            comments.flatMap((comment) =>
+              comment.body === undefined || comment.body === null || comment.user?.login === undefined
+                ? []
+                : [
+                    {
+                      authorAssociation: comment.author_association,
+                      authorLogin: comment.user.login,
+                      body: comment.body,
+                      url: comment.html_url,
+                    },
+                  ],
+            ),
+            headSha,
+            options.actorLogin(repository),
+          )
+          const comment = comments.find((comment) => comment.id === commentId)
+          if (prior._tag !== 'Found' || prior.state !== 'complete' || comment?.html_url !== prior.url)
+            return err({ _tag: 'Permanent', message: 'The completed review changed before its label was restored.' })
+          const body = comment.body ?? ''
+          const outcome =
+            body.match(/^### 🤖 (READY|BLOCKED|REVIEW SKIPPED)\b/m)?.[1] ??
+            body.match(/^\*\*(PASS|PENDING|BLOCKED)\b/m)?.[1]
+          const label =
+            outcome === 'PASS' || outcome === 'READY'
+              ? 'READY'
+              : outcome === 'REVIEW SKIPPED'
+                ? 'ADVERSARIAL_REVIEW_SKIPPED'
+                : outcome === 'PENDING' || outcome === 'BLOCKED'
+                  ? outcome
+                  : null
+          if (label === null)
+            return err({ _tag: 'Permanent', message: 'The completed review has no recognized outcome.' })
+          // Read the head and base branch after the comments, immediately before the label write.
+          const pull = await octokit.value.rest.pulls.get({
+            owner,
+            repo,
+            pull_number: pullRequestNumber,
+            request: { signal },
+          })
+          if (pull.data.state !== 'open' || pull.data.head.sha !== headSha || pull.data.base.ref !== baseRef)
+            return err({ _tag: 'Permanent', message: 'The pull request changed before its review label was restored.' })
+          return ok({ commentId: comment.id, url: comment.html_url, label })
+        })
+        .catch((error: unknown): Result<ExistingReviewLabel, ExistingReviewLabelFailure> =>
+          err({ _tag: 'Transient', message: message(error) }),
+        )
+    },
+
+    async stampAgentLabel(repository, itemNumber, state, signal, authorize) {
       const octokit = await client(repository.github, 'item_write', signal)
       if (octokit._tag === 'Err') return octokit
       const { owner, repo } = repositoryParts(repository.github)
@@ -549,6 +832,8 @@ export function createGitHubAgentSource(options: GitHubAgentSourceOptions): GitH
       // reported a failed write for a write that had landed.
       let held = current.value
       if (plan.add !== null) {
+        const creationAuthority = authorize?.()
+        if (creationAuthority?._tag === 'Err') return creationAuthority
         const created = await octokit.value.rest.issues
           .createLabel({
             owner,
@@ -563,6 +848,8 @@ export function createGitHubAgentSource(options: GitHubAgentSourceOptions): GitH
             errorStatus(error) === 422 ? ok(undefined) : err(message(error)),
           )
         if (created._tag === 'Err') return created
+        const additionAuthority = authorize?.()
+        if (additionAuthority?._tag === 'Err') return additionAuthority
         const added = await octokit.value.rest.issues
           .addLabels({ ...request, labels: [plan.add.name] })
           .then((response): Result<string[], string> => ok(labelNames(response.data)))
@@ -572,6 +859,8 @@ export function createGitHubAgentSource(options: GitHubAgentSourceOptions): GitH
       }
       // One at a time, so the last answer names every label GitHub still holds.
       for (const label of plan.remove) {
+        const removalAuthority = authorize?.()
+        if (removalAuthority?._tag === 'Err') return removalAuthority
         // A label another writer already removed answers this call.
         const removed = await octokit.value.rest.issues
           .removeLabel({ ...request, name: label })
@@ -786,17 +1075,48 @@ export function createGitHubAgentSource(options: GitHubAgentSourceOptions): GitH
                     per_page: 100,
                     request: { signal },
                   }),
+                  checksClient.value.paginate(checksClient.value.rest.actions.listWorkflowRunsForRepo, {
+                    owner,
+                    repo,
+                    head_sha: ref,
+                    per_page: 100,
+                    request: { signal },
+                  }),
                 ])
-                  .then(async ([runs, statuses]): Promise<GitHubChecksSnapshot> => {
+                  .then(async ([allRuns, statuses, workflowRuns]): Promise<GitHubChecksSnapshot> => {
+                    const derivedSuites = derivedCheckSuiteIds(workflowRuns)
+                    const completedWorkflows = new Map(
+                      workflowRuns.flatMap((run) =>
+                        run.status === 'completed' && run.conclusion && run.check_suite_id
+                          ? [[run.check_suite_id, run.conclusion] as const]
+                          : [],
+                      ),
+                    )
+                    // This app's own check runs report the Review, so reading them
+                    // as CI would make a Review gate on its own progress and stall.
+                    const runs = allRuns.filter(
+                      (check) =>
+                        check.app?.id !== options.ownAppId &&
+                        (check.check_suite?.id === undefined ||
+                          check.check_suite.id === null ||
+                          !derivedSuites.has(check.check_suite.id)),
+                    )
                     const current = currentGitHubChecks([
-                      ...runs.map((check) => ({
-                        id: check.id,
-                        failure: { _tag: 'NotAsked' as const },
-                        source: { _tag: 'CheckRun' as const, appId: check.app?.id ?? null },
-                        name: check.name,
-                        status: check.status,
-                        conclusion: check.conclusion,
-                      })),
+                      ...runs.map((check) => {
+                        // GitHub can leave jobs queued after their workflow has finished.
+                        const workflowConclusion =
+                          check.status !== 'completed' && check.check_suite?.id
+                            ? completedWorkflows.get(check.check_suite.id)
+                            : undefined
+                        return {
+                          id: check.id,
+                          failure: { _tag: 'NotAsked' as const },
+                          source: { _tag: 'CheckRun' as const, appId: check.app?.id ?? null },
+                          name: check.name,
+                          status: workflowConclusion ? 'completed' : check.status,
+                          conclusion: workflowConclusion || check.conclusion,
+                        }
+                      }),
                       ...statuses.data.statuses.map((status) => ({
                         id: status.id,
                         failure: { _tag: 'NotAsked' as const },
@@ -842,10 +1162,20 @@ export function createGitHubAgentSource(options: GitHubAgentSourceOptions): GitH
                 return contexts.length === 0 ? { _tag: 'None' } : { _tag: 'Declared', contexts }
               })
               .catch((error: unknown): RequiredChecks => ({ _tag: 'Unavailable', reason: message(error) }))
-          const liveBaseSha = await currentBaseSha(octokit.value, owner, repo, pull.data.base.ref, signal)
+          const liveBaseSha = await currentBaseSha(
+            octokit.value,
+            owner,
+            repo,
+            pull.data.merged_at === null ? pull.data.base.ref : repository.defaultBranch,
+            signal,
+          )
+          const baseCommits = (sha: string, count: number): Promise<string[]> =>
+            octokit.value.rest.repos
+              .listCommits({ owner, repo, sha, per_page: count, request: { signal } })
+              .then((response) => response.data.map((commit) => commit.sha))
           const [checks, baseChecks, requiredChecks] = await Promise.all([
             checksFor(pull.data.head.sha),
-            checksFor(liveBaseSha),
+            currentBaseChecks(liveBaseSha, checksFor, baseCommits),
             requiredChecksFor(pull.data.base.ref),
           ])
           return ok({
@@ -910,7 +1240,10 @@ export function createGitHubAgentSource(options: GitHubAgentSourceOptions): GitH
         .getComment({ owner, repo, comment_id: commentId, ...requestOptions })
         .then(async (existing) => {
           if (existing.data.issue_url !== undefined && !existing.data.issue_url.endsWith(`/${pullRequestNumber}`))
-            return err('The stored automated review comment belongs to another pull request.')
+            return ok({
+              _tag: 'Foreign' as const,
+              reason: 'The stored automated review comment belongs to another pull request.' as const,
+            })
           const legacyActor = options.legacyActor
           const existingHead = automatedReviewHead(existing.data.body ?? '')?.toLowerCase()
           const expectedHead = automatedReviewHead(expectedBody)?.toLowerCase()
@@ -925,10 +1258,14 @@ export function createGitHubAgentSource(options: GitHubAgentSourceOptions): GitH
             existingHead === expectedHead &&
             existingHead === nextHead
           if (existing.data.user?.login.toLowerCase() !== actor && !legacyOwned)
-            return err('The stored automated review comment belongs to another GitHub actor.')
+            return ok({
+              _tag: 'Foreign' as const,
+              reason: 'The stored automated review comment belongs to another GitHub actor.' as const,
+            })
           if (existing.data.body === body && existing.data.html_url !== undefined)
             return ok({ _tag: 'Edited' as const, commentId: existing.data.id, url: existing.data.html_url })
-          if (existing.data.body !== expectedBody) return ok({ _tag: 'Changed' as const })
+          if (normalizeReviewControl(existing.data.body ?? '') !== normalizeReviewControl(expectedBody))
+            return ok({ _tag: 'Changed' as const })
           const writer =
             legacyOwned && legacyActor !== undefined
               ? await clientWith(legacyActor.tokens, repository.github, 'item_write', signal)
@@ -953,7 +1290,7 @@ export function createGitHubAgentSource(options: GitHubAgentSourceOptions): GitH
         .catch((error: unknown) => (isMissingComment(error) ? ok({ _tag: 'Missing' as const }) : err(message(error))))
     },
 
-    async upsertReviewStatus(repository, pullRequestNumber, commentId, body, replacePriorReview, signal) {
+    async upsertReviewStatus(repository, pullRequestNumber, commentId, body, replacePriorReview, signal, authorize) {
       const octokit = await client(repository.github, 'item_write', signal)
       if (octokit._tag === 'Err') return octokit
       const { owner, repo } = repositoryParts(repository.github)
@@ -1022,6 +1359,14 @@ export function createGitHubAgentSource(options: GitHubAgentSourceOptions): GitH
           const adopted = existing !== undefined && existing.id === adoptablePrior?.id
           if (existing !== undefined && existing.user?.login.toLowerCase() !== actor && !adopted)
             return err('The stored automated review comment belongs to another GitHub actor.')
+          if (
+            existing?.body !== undefined &&
+            existing.body !== null &&
+            automatedReviewHead(existing.body) === headSha &&
+            normalizeReviewControl(existing.body) !== existing.body
+          ) {
+            return err('Review cancellation is pending.')
+          }
           if (existing !== undefined && existing.body === body && existing.html_url !== undefined)
             return ok({ commentId: existing.id, url: existing.html_url })
           const writer =
@@ -1029,6 +1374,8 @@ export function createGitHubAgentSource(options: GitHubAgentSourceOptions): GitH
               ? await clientWith(legacyActor.tokens, repository.github, 'item_write', signal)
               : octokit
           if (writer._tag === 'Err') return writer
+          const authorization = authorize?.()
+          if (authorization?._tag === 'Err') return authorization
           const written =
             existing === undefined
               ? await writer.value.rest.issues.createComment({
@@ -1063,5 +1410,126 @@ export function createGitHubAgentSource(options: GitHubAgentSourceOptions): GitH
         })
         .catch((error: unknown) => err(message(error)))
     },
+
+    async upsertReviewCheckRun(repository, headSha, update, signal, authorize) {
+      // The Review check run belongs to the App bot's identity, which the
+      // read side then filters by app id. A user credential would create a
+      // check run this service can never recognise as its own, so a
+      // user-token repository publishes its comment alone.
+      if (repository.authentication !== 'app') return ok(undefined)
+      const octokit = await client(repository.github, 'check_write', signal)
+      if (octokit._tag === 'Err') return octokit
+      const { owner, repo } = repositoryParts(repository.github)
+      // One publication at a time per head: two first publications that both
+      // read "no check run yet" would both create one, and the loser stays in
+      // progress forever. The whole read-then-write section sits behind the
+      // gate, so the second publication sees the first one's check run.
+      const gateKey = `${repository.github.toLowerCase()}:${headSha.toLowerCase()}`
+      const queued = (checkRunWriteGates.get(gateKey) ?? Promise.resolve()).then(() =>
+        writeReviewCheckRun(octokit.value, owner, repo, headSha, update, options.ownAppId, signal, authorize),
+      )
+      const tail = queued.then(
+        () => undefined,
+        () => undefined,
+      )
+      checkRunWriteGates.set(gateKey, tail)
+      // One publication at a time per head, and the entry leaves when the
+      // head goes quiet, so the map never grows past the busy heads.
+      void tail.then(() => {
+        if (checkRunWriteGates.get(gateKey) === tail) checkRunWriteGates.delete(gateKey)
+      })
+      return queued
+    },
   }
+}
+
+/** Chains Review check run writes for one head, so the map never grows past the busy heads. */
+const checkRunWriteGates = new Map<string, Promise<void>>()
+
+async function writeReviewCheckRun(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  headSha: string,
+  update: ReviewCheckRunUpdate,
+  ownAppId: number,
+  signal: AbortSignal,
+  authorize: ReviewPublicationAuthority | undefined,
+): Promise<Result<void, string>> {
+  const requestOptions = { request: { signal } }
+  const listed = await octokit
+    .paginate(octokit.rest.checks.listForRef, {
+      owner,
+      repo,
+      ref: headSha,
+      app_id: ownAppId,
+      per_page: 100,
+      ...requestOptions,
+    })
+    .then((runs) =>
+      ok(
+        runs
+          .filter((check) => check.app?.id === ownAppId && check.name === REVIEW_CHECK_RUN_NAME)
+          // A race before the gate existed can leave two check runs for one head.
+          // The newest carries the Review; an older one is a stranded duplicate.
+          .sort((left, right) => right.id - left.id),
+      ),
+    )
+    .catch((error: unknown): Result<Array<{ id: number; status: string }>, string> => err(message(error)))
+  if (listed._tag === 'Err') return listed
+  const authorization = authorize?.()
+  if (authorization?._tag === 'Err') return authorization
+  // The name plus the app id is the identity, so a foreign check run that
+  // borrows the name never takes this service's write.
+  const output = { title: update.title, summary: 'The review comment on this pull request carries the detail.' }
+  const payload =
+    update._tag === 'Running'
+      ? { status: 'in_progress' as const, output }
+      : { status: 'completed' as const, conclusion: update.conclusion, completed_at: update.completedAt, output }
+  const newest = listed.value[0]
+  const written = await (
+    newest === undefined
+      ? octokit.rest.checks.create({
+          owner,
+          repo,
+          head_sha: headSha,
+          name: REVIEW_CHECK_RUN_NAME,
+          ...payload,
+          ...requestOptions,
+        })
+      : octokit.rest.checks.update({
+          owner,
+          repo,
+          check_run_id: newest.id,
+          ...payload,
+          ...requestOptions,
+        })
+  )
+    .then((response) =>
+      typeof response.data?.id === 'number' ? ok(undefined) : err('GitHub did not confirm the Review check run write.'),
+    )
+    .catch((error: unknown): Result<void, string> => err(message(error)))
+  if (written._tag === 'Err') return written
+  // Only a completing publication closes strays, because only it arrives with
+  // a timestamp. That still guarantees every head that settles leaves no
+  // check run in progress behind it.
+  if (update._tag !== 'Completed') return ok(undefined)
+  for (const stray of listed.value.slice(1)) {
+    if (stray.status === 'completed') continue
+    const closed = await octokit.rest.checks
+      .update({
+        owner,
+        repo,
+        check_run_id: stray.id,
+        status: 'completed',
+        conclusion: 'neutral',
+        completed_at: update.completedAt,
+        output,
+        ...requestOptions,
+      })
+      .then((): Result<void, string> => ok(undefined))
+      .catch((error: unknown): Result<void, string> => err(message(error)))
+    if (closed._tag === 'Err') return closed
+  }
+  return ok(undefined)
 }

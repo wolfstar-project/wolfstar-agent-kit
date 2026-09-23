@@ -1,10 +1,10 @@
 ---
 name: ts-design-patterns
-description: "Apply Wolfstar's Effect-inspired TypeScript design principles. Use for non-trivial state, errors, dependencies, module boundaries, or API design."
+description: "Apply Wolfstar's Effect-inspired TypeScript design principles. Use for non-trivial state, errors, dependencies, module boundaries, or API design, and after a production error, where a guard at the failure site would leave the category open."
 user_invocable: true
 ---
 
-<!-- The six principles below are mirrored verbatim in ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md. Run scripts/check-agent-context.sh after editing them. -->
+<!-- The six principles below are mirrored in agent-context/context.md. Run scripts/check-agent-context.sh after editing them. -->
 
 # TypeScript Design Patterns
 

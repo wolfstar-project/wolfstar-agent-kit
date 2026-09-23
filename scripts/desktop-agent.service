@@ -1,0 +1,22 @@
+[Unit]
+Description=Wolfstar desktop Agents for Hogwild congestion
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/wolfstar-github-agent/service
+# pnpm installs its shim in bin/ and its managed node beside it, and the
+# Worktrunk pre-start hook runs pnpm. Both directories belong here.
+Environment=PATH=%h/.local/share/pnpm/bin:%h/.local/share/pnpm:%h/.cargo/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=WOLFSTAR_GITHUB_AGENT=1
+Environment=WOLFSTAR_GITHUB_AGENT_CONTROLLER_URL=https://hogwild.tailcad325.ts.net
+EnvironmentFile=-%h/.config/wolfstar-github-agent/desktop.env
+ExecStart=%h/.local/share/pnpm/node --experimental-strip-types packages/wolfstar-github-agent/src/desktop-client.ts
+Restart=always
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=60
+
+[Install]
+WantedBy=default.target

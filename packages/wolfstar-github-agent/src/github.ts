@@ -1,8 +1,16 @@
 import type { Octokit } from 'octokit'
 import type { AutoMergeMethod } from './auto-merge.ts'
 import type { GitHubTokenProvider } from './github-auth.ts'
+import type { UploadUserAsset } from './github-user-assets.ts'
 import type { Result } from './result.ts'
-import type { GitHubItem, GitHubPullRequestItem, RepositoryMapping, RoutineName } from './types.ts'
+import type {
+  GitHubIssueItem,
+  GitHubItem,
+  GitHubPullRequestItem,
+  PullRequestDiagram,
+  RepositoryMapping,
+  RoutineName,
+} from './types.ts'
 import { Buffer } from 'node:buffer'
 import { createHash } from 'node:crypto'
 import { approvalLabels } from './approval-labels.ts'
@@ -11,6 +19,7 @@ import { isControllerOwned, pullRequestPurpose } from './baseline-repair-state.t
 import { candidateFingerprintMarker, hasRoutineIssueLabel } from './candidate-issue-controller.ts'
 import { createAuthenticatedClient } from './github-auth.ts'
 import { currentBaseSha } from './github-base.ts'
+import { createGitHubResponseCache } from './github-response-cache.ts'
 import { AUTOMATED_ISSUE_TRIAGE_MARKER } from './issue-triage-comment.ts'
 import { err, ok } from './result.ts'
 import { priorAutomatedReviewForHead } from './review-comment.ts'
@@ -42,6 +51,11 @@ export interface GitHubSource {
     headRef: string,
     signal?: AbortSignal,
   ) => Promise<Result<boolean, GitHubReadError>>
+  getIssue: (
+    repository: RepositoryMapping,
+    number: number,
+    signal?: AbortSignal,
+  ) => Promise<Result<GitHubIssueItem, GitHubReadError>>
   getPullRequest: (
     repository: RepositoryMapping,
     number: number,
@@ -79,7 +93,14 @@ export interface GitHubSourceOptions {
 export interface PublishedPullRequest {
   number: number
   url: string
+  diagram: PullRequestDiagramOutcome
 }
+
+/** What became of the diagram a publication carried. */
+export type PullRequestDiagramOutcome =
+  | { _tag: 'None' }
+  | { _tag: 'Attached'; url: string }
+  | { _tag: 'Skipped'; reason: string }
 
 export interface GitHubPullRequestPublisher {
   ensurePullRequest: (
@@ -92,6 +113,8 @@ export interface GitHubPullRequestPublisher {
       title: string
       body: string
       labels?: Array<{ name: string; color: string; description: string }>
+      /** A drawn picture to upload and place in the body before the AI disclosure. */
+      diagram?: PullRequestDiagram
     },
     signal?: AbortSignal,
   ) => Promise<Result<PublishedPullRequest, GitHubReadError>>
@@ -99,6 +122,25 @@ export interface GitHubPullRequestPublisher {
 
 export interface GitHubPullRequestPublisherOptions extends Pick<GitHubSourceOptions, 'tokens' | 'userAgent'> {
   createClient?: (token: string) => Octokit
+  /** Uploads one image for a description. Absent means every diagram is skipped with a reason. */
+  uploadAsset?: UploadUserAsset
+}
+
+const disclosureLine = /^>\s*🤖 AI disclosure:/
+
+/**
+ * The body with its picture where a reviewer looks first.
+ *
+ * The pr skill puts a diagram after the why and before the AI disclosure, and
+ * every controller body ends with that disclosure, so the image goes right
+ * above it. A body without the line gets the image at the end.
+ */
+export function withPullRequestDiagram(body: string, diagram: { alt: string; url: string }): string {
+  const image = `![${diagram.alt.replaceAll(/[\r\n]+/g, ' ').replaceAll(']', ')')}](${diagram.url})`
+  const lines = body.trimEnd().split(/\r?\n/)
+  const disclosure = lines.findIndex((line) => disclosureLine.test(line))
+  if (disclosure === -1) return `${lines.join('\n')}\n\n${image}`
+  return [...lines.slice(0, disclosure), image, '', ...lines.slice(disclosure)].join('\n').replaceAll(/\n{3,}/g, '\n\n')
 }
 
 function repositoryParts(repository: string): { owner: string; repo: string } {
@@ -137,6 +179,9 @@ function labelNames(labels: Array<string | { name?: string }>): string[] {
   return labels.flatMap((label) => (typeof label === 'string' ? [label] : label.name === undefined ? [] : [label.name]))
 }
 
+type GitHubIssue = Awaited<ReturnType<Octokit['rest']['issues']['get']>>['data']
+type GitHubIssueComment = Awaited<ReturnType<Octokit['rest']['issues']['listComments']>>['data'][number]
+
 function issueContentDigest(input: {
   body: string
   comments: readonly { id: number; author: string; body: string; updatedAt: string }[]
@@ -153,6 +198,52 @@ function issueContentDigest(input: {
       }),
     )
     .digest('hex')
+}
+
+function issueItem(
+  repository: RepositoryMapping,
+  issue: GitHubIssue,
+  comments: GitHubIssueComment[],
+  labels: string[],
+  routineFiled: boolean,
+  routineTracking: boolean,
+  actorLogin: string,
+): GitHubIssueItem {
+  const controllerLogin = actorLogin.toLowerCase()
+  return {
+    kind: 'issue',
+    approvalLabels: approvalLabels(labels),
+    contentDigest: issueContentDigest({
+      title: issue.title,
+      body: issue.body ?? '',
+      comments: comments.flatMap((comment) =>
+        comment.user?.login === undefined ||
+        comment.body === undefined ||
+        comment.body === null ||
+        (comment.user.login.toLowerCase() === controllerLogin && comment.body.includes(AUTOMATED_ISSUE_TRIAGE_MARKER))
+          ? []
+          : [
+              {
+                id: comment.id,
+                author: comment.user.login,
+                body: comment.body,
+                updatedAt: comment.updated_at,
+              },
+            ],
+      ),
+      labels: labels.filter((label) => !label.toLowerCase().startsWith('wolfstar-agent-')),
+    }),
+    repository: repository.github,
+    number: issue.number,
+    state: issue.state === 'closed' ? 'closed' : 'open',
+    title: issue.title,
+    author: issue.user?.login ?? 'ghost',
+    url: issue.html_url,
+    createdAt: issue.created_at,
+    updatedAt: issue.updated_at,
+    routineFiled,
+    routineTracking,
+  }
 }
 
 function pullRequestItem(
@@ -220,6 +311,7 @@ async function mapConcurrent<Input, Output>(
 }
 
 export function createGitHubSource(options: GitHubSourceOptions): GitHubSource {
+  const responseCache = createGitHubResponseCache()
   const client = async (repository: string, signal?: AbortSignal): Promise<Result<Octokit, GitHubReadError>> => {
     const token = await options.tokens.getToken(repository, 'read', signal)
     if (token._tag === 'Err') return err(token.error)
@@ -227,6 +319,7 @@ export function createGitHubSource(options: GitHubSourceOptions): GitHubSource {
       options.createClient?.(token.value.token) ??
         createAuthenticatedClient({
           access: 'read',
+          responseCache,
           repository,
           signal,
           token: token.value.token,
@@ -309,6 +402,49 @@ export function createGitHubSource(options: GitHubSourceOptions): GitHubSource {
         })
         .then((response) => ok(response.data.length > 0))
         .catch((error: unknown): Result<boolean, GitHubReadError> => {
+          const status = errorStatus(error)
+          return err({
+            repository: repository.github,
+            message: error instanceof Error ? error.message : 'GitHub request failed.',
+            ...(status === undefined ? {} : { status }),
+          })
+        })
+    },
+    getIssue: async (repository, number, signal) => {
+      const { owner, repo } = repositoryParts(repository.github)
+      const octokit = await client(repository.github, signal)
+      if (octokit._tag === 'Err') return octokit
+      const request = signal === undefined ? {} : { request: { signal } }
+      return Promise.all([
+        octokit.value.rest.issues.get({ owner, repo, issue_number: number, ...request }),
+        octokit.value.paginate(octokit.value.rest.issues.listComments, {
+          owner,
+          repo,
+          issue_number: number,
+          per_page: 100,
+          ...request,
+        }),
+      ])
+        .then(([response, comments]) => {
+          const labels = labelNames(response.data.labels)
+          return ok(
+            issueItem(
+              repository,
+              response.data,
+              comments,
+              labels,
+              hasRoutineIssueLabel(labels),
+              isRoutineTrackingIssue({
+                repository: repository.github,
+                title: response.data.title,
+                body: response.data.body,
+                labels,
+              }),
+              options.actorLogin(repository),
+            ),
+          )
+        })
+        .catch((error: unknown): Result<GitHubIssueItem, GitHubReadError> => {
           const status = errorStatus(error)
           return err({
             repository: repository.github,
@@ -435,7 +571,6 @@ export function createGitHubSource(options: GitHubSourceOptions): GitHubSource {
           eligibleIssueRows,
           4,
           async ({ issue, labels, routineFiled, routineTracking }) => {
-            const controllerLogin = options.actorLogin(repository).toLowerCase()
             const comments = await octokit.value.paginate(octokit.value.rest.issues.listComments, {
               owner,
               repo,
@@ -443,42 +578,15 @@ export function createGitHubSource(options: GitHubSourceOptions): GitHubSource {
               per_page: 100,
               ...requestOptions,
             })
-            const contentDigest = issueContentDigest({
-              title: issue.title,
-              body: issue.body ?? '',
-              comments: comments.flatMap((comment) =>
-                comment.user?.login === undefined ||
-                comment.body === undefined ||
-                comment.body === null ||
-                (comment.user.login.toLowerCase() === controllerLogin &&
-                  comment.body.includes(AUTOMATED_ISSUE_TRIAGE_MARKER))
-                  ? []
-                  : [
-                      {
-                        id: comment.id,
-                        author: comment.user.login,
-                        body: comment.body,
-                        updatedAt: comment.updated_at,
-                      },
-                    ],
-              ),
-              labels: labels.filter((label) => !label.toLowerCase().startsWith('wolfstar-agent-')),
-            })
-            return {
-              kind: 'issue',
-              approvalLabels: approvalLabels(labels),
-              contentDigest,
-              repository: repository.github,
-              number: issue.number,
-              state: issue.state === 'closed' ? 'closed' : 'open',
-              title: issue.title,
-              author: issue.user?.login ?? 'ghost',
-              url: issue.html_url,
-              createdAt: issue.created_at,
-              updatedAt: issue.updated_at,
+            return issueItem(
+              repository,
+              issue,
+              comments,
+              labels,
               routineFiled,
               routineTracking,
-            }
+              options.actorLogin(repository),
+            )
           },
         )
 
@@ -568,11 +676,12 @@ export interface GitHubIssuePublisher {
     },
     signal?: AbortSignal,
   ) => Promise<Result<{ number: number; url: string } | null, GitHubReadError>>
-  /** Finds the canonical Routine log, including a closed one. */
+  /** Finds a Routine log or one exact daily check-in, including closed issues. */
   findRoutineTrackingIssue: (
     input: {
       repository: RepositoryMapping
       routineName: RoutineName
+      runId?: string
     },
     signal?: AbortSignal,
   ) => Promise<Result<{ number: number; url: string } | null, GitHubReadError>>
@@ -670,14 +779,18 @@ export function createGitHubIssuePublisher(options: GitHubPullRequestPublisherOp
         .paginate(octokit.value.rest.issues.listForRepo, {
           owner,
           repo,
-          state: 'all',
+          state: 'open',
           per_page: 100,
           ...requestOptions,
         })
         .then((rows): Result<{ number: number; url: string } | null, GitHubReadError> => {
           const marker = candidateFingerprintMarker(input.fingerprint)
           const row = rows.find(
-            (row) => row.pull_request === undefined && typeof row.body === 'string' && row.body.includes(marker),
+            (row) =>
+              row.state === 'open' &&
+              row.pull_request === undefined &&
+              typeof row.body === 'string' &&
+              row.body.includes(marker),
           )
           return ok(row === undefined ? null : { number: row.number, url: row.html_url })
         })
@@ -715,7 +828,10 @@ export function createGitHubIssuePublisher(options: GitHubPullRequestPublisherOp
               }) &&
               row.labels.some(
                 (label) => (typeof label === 'string' ? label : label.name) === `routine:${input.routineName}`,
-              ),
+              ) &&
+              (input.runId === undefined
+                ? !row.body?.startsWith('<!-- routine-run:')
+                : row.body?.startsWith(`<!-- routine-run: ${input.runId} -->\n`)),
           )
           return ok(row === undefined ? null : { number: row.number, url: row.html_url })
         })
@@ -791,6 +907,45 @@ export function createGitHubPullRequestPublisher(
           ...request,
         })
       }
+      // The picture is worth an upload, never a refusal: a description without
+      // it still says why the change exists, and the evidence names the reason.
+      const attachDiagram = async (): Promise<{ body: string; diagram: PullRequestDiagramOutcome }> => {
+        if (input.diagram === undefined) return { body: input.body, diagram: { _tag: 'None' } }
+        if (options.uploadAsset === undefined)
+          return { body: input.body, diagram: { _tag: 'Skipped', reason: 'No asset uploader is configured.' } }
+        const picture = input.diagram
+        const uploadAsset = options.uploadAsset
+        // The repository read is part of the picture too, so a transient
+        // failure there skips the picture exactly like a failed upload does.
+        return octokit.rest.repos
+          .get({ owner, repo, ...request })
+          .then((repository) =>
+            uploadAsset(
+              {
+                repositoryId: repository.data.id,
+                name: `pr-lens-${input.headRef.replaceAll(/[^\w.-]+/g, '-')}.svg`,
+                contentType: 'image/svg+xml',
+                body: picture.svg,
+              },
+              signal,
+            ),
+          )
+          .then((uploaded): { body: string; diagram: PullRequestDiagramOutcome } => {
+            return uploaded._tag === 'Err'
+              ? { body: input.body, diagram: { _tag: 'Skipped', reason: uploaded.error } }
+              : {
+                  body: withPullRequestDiagram(input.body, { alt: picture.alt, url: uploaded.value }),
+                  diagram: { _tag: 'Attached', url: uploaded.value },
+                }
+          })
+          .catch((error: unknown): { body: string; diagram: PullRequestDiagramOutcome } => ({
+            body: input.body,
+            diagram: {
+              _tag: 'Skipped',
+              reason: `could not read the repository for the diagram upload: ${error instanceof Error ? error.message : 'GitHub request failed.'}`,
+            },
+          }))
+      }
       return octokit.rest.pulls
         .list({
           owner,
@@ -811,8 +966,9 @@ export function createGitHubPullRequestPublisher(
           }
           if (existing !== undefined) {
             await applyLabels(existing.number)
-            return ok({ number: existing.number, url: existing.html_url })
+            return ok({ number: existing.number, url: existing.html_url, diagram: { _tag: 'None' } })
           }
+          const attached = await attachDiagram()
           return octokit.rest.pulls
             .create({
               owner,
@@ -820,13 +976,13 @@ export function createGitHubPullRequestPublisher(
               head: input.headRef,
               base: input.baseRef,
               title: input.title,
-              body: input.body,
+              body: attached.body,
               draft: false,
               ...request,
             })
             .then(async (created) => {
               await applyLabels(created.data.number)
-              return ok({ number: created.data.number, url: created.data.html_url })
+              return ok({ number: created.data.number, url: created.data.html_url, diagram: attached.diagram })
             })
         })
         .catch((error: unknown): Result<PublishedPullRequest, GitHubReadError> => {
@@ -851,12 +1007,26 @@ export function createGitHubPullRequestPublisher(
 export type MergeHandoff = { _tag: 'AutoMergeEnabled' } | { _tag: 'Merged'; sha: string }
 
 export interface GitHubPullRequestMerger {
+  /** Moves a stack to the default branch only after its exact parent merged there. */
+  retargetMergedParent: (
+    input: {
+      repository: RepositoryMapping
+      number: number
+      expectedHeadSha: string
+      expectedBaseRef: string
+      /** Synchronous current authority, checked immediately before each GitHub mutation. */
+      authorize: (autoMerge: boolean) => Result<void, string>
+    },
+    signal?: AbortSignal,
+  ) => Promise<Result<boolean, GitHubReadError>>
   merge: (
     input: {
       repository: RepositoryMapping
       number: number
       expectedHeadSha: string
       method: AutoMergeMethod
+      /** Synchronous current authority, checked again before a fallback merge. */
+      authorize: (autoMerge: boolean) => Result<void, string>
     },
     signal?: AbortSignal,
   ) => Promise<Result<MergeHandoff, GitHubReadError>>
@@ -891,16 +1061,108 @@ const enableAutoMergeMutation = `
   }
 `
 
+function autoMergePullRequestRefusal(
+  repository: RepositoryMapping,
+  expectedHeadSha: string,
+  expectedBaseRef: string,
+  pullRequest: Awaited<ReturnType<Octokit['rest']['pulls']['get']>>['data'],
+): string | null {
+  if (pullRequest.head.sha !== expectedHeadSha) return 'The head commit moved before the merge was handed to GitHub.'
+  if (pullRequest.base.ref !== expectedBaseRef) return 'The pull request no longer targets the default branch.'
+  if (
+    !repository.enabled ||
+    repository.ownership !== 'owned' ||
+    pullRequest.state !== 'open' ||
+    pullRequest.draft ||
+    pullRequest.merged_at !== null ||
+    pullRequest.head.repo?.full_name.toLowerCase() !== repository.github.toLowerCase() ||
+    pullRequest.base.repo.full_name.toLowerCase() !== repository.github.toLowerCase() ||
+    !repository.writablePullRequestAuthors.some(
+      (author) => author.toLowerCase() === pullRequest.user?.login.toLowerCase(),
+    )
+  ) {
+    return 'The pull request no longer permits Auto merge.'
+  }
+  return null
+}
+
 export function createGitHubPullRequestMerger(options: GitHubPullRequestPublisherOptions): GitHubPullRequestMerger {
   return {
-    async merge(input, signal) {
-      const { owner, repo } = repositoryParts(input.repository.github)
-      const credential = await options.tokens.getToken(input.repository.github, 'item_write', signal)
+    async retargetMergedParent(input, signal) {
+      const mapping = input.repository
+      if (!mapping.enabled || mapping.ownership !== 'owned' || input.expectedBaseRef === mapping.defaultBranch)
+        return ok(false)
+      const credential = await options.tokens.getToken(mapping.github, 'pull_request_merge', signal)
       if (credential._tag === 'Err') return credential
       const octokit =
         options.createClient?.(credential.value.token) ??
         createAuthenticatedClient({
-          access: 'item_write',
+          access: 'pull_request_merge',
+          repository: mapping.github,
+          signal,
+          token: credential.value.token,
+          tokens: options.tokens,
+          userAgent: options.userAgent ?? 'wolfstar-github-agent/0.0.0',
+        })
+      const { owner, repo } = repositoryParts(mapping.github)
+      const request = signal === undefined ? {} : { request: { signal } }
+      const failure = (error: unknown): Result<never, GitHubReadError> =>
+        err({
+          repository: mapping.github,
+          message: error instanceof Error ? error.message : 'GitHub could not retarget the stack.',
+        })
+      const current = await octokit.rest.pulls
+        .get({ owner, repo, pull_number: input.number, ...request })
+        .then((response) => ok(response.data))
+        .catch(failure)
+      if (current._tag === 'Err') return current
+      const pullRequest = current.value
+      if (autoMergePullRequestRefusal(mapping, input.expectedHeadSha, input.expectedBaseRef, pullRequest) !== null)
+        return ok(false)
+      const parents = await octokit.rest.pulls
+        .list({ owner, repo, head: `${owner}:${input.expectedBaseRef}`, state: 'all', per_page: 100, ...request })
+        .then((response) => ok(response.data))
+        .catch(failure)
+      if (parents._tag === 'Err') return parents
+      const integrated = parents.value.some(
+        (parent) =>
+          parent.merged_at !== null &&
+          parent.base.ref === mapping.defaultBranch &&
+          parent.head.sha === pullRequest.base.sha &&
+          parent.head.repo?.full_name.toLowerCase() === mapping.github.toLowerCase(),
+      )
+      if (!integrated) return ok(false)
+      const latest = await octokit.rest.pulls
+        .get({ owner, repo, pull_number: input.number, ...request })
+        .then((response) => ok(response.data))
+        .catch(failure)
+      if (latest._tag === 'Err') return latest
+      if (
+        autoMergePullRequestRefusal(mapping, input.expectedHeadSha, input.expectedBaseRef, latest.value) !== null ||
+        latest.value.base.sha !== pullRequest.base.sha
+      ) {
+        return ok(false)
+      }
+      // GitHub stores this idempotent change. A restart resumes from the live base ref.
+      const authorization = input.authorize(hasAutoMergeLabel(labelNames(latest.value.labels)))
+      if (authorization._tag === 'Err') return err({ repository: mapping.github, message: authorization.error })
+      return octokit.rest.pulls
+        .update({ owner, repo, pull_number: input.number, base: mapping.defaultBranch, ...request })
+        .then((response) =>
+          response.data.base.ref === mapping.defaultBranch
+            ? ok(true)
+            : err({ repository: mapping.github, message: 'GitHub did not confirm the new stack base.' }),
+        )
+        .catch(failure)
+    },
+    async merge(input, signal) {
+      const { owner, repo } = repositoryParts(input.repository.github)
+      const credential = await options.tokens.getToken(input.repository.github, 'pull_request_merge', signal)
+      if (credential._tag === 'Err') return credential
+      const octokit =
+        options.createClient?.(credential.value.token) ??
+        createAuthenticatedClient({
+          access: 'pull_request_merge',
           repository: input.repository.github,
           signal,
           token: credential.value.token,
@@ -925,8 +1187,23 @@ export function createGitHubPullRequestMerger(options: GitHubPullRequestPublishe
        * about. GitHub rejects the call when `sha` is not the current head, so a
        * head that moved after the review can still never be merged here.
        */
-      const mergeNow = (): Promise<Result<MergeHandoff, GitHubReadError>> =>
-        octokit.rest.pulls
+      const mergeNow = async (): Promise<Result<MergeHandoff, GitHubReadError>> => {
+        const latest = await octokit.rest.pulls
+          .get({ owner, repo, pull_number: input.number, ...request })
+          .then((response) => ok(response.data))
+          .catch(failure)
+        if (latest._tag === 'Err') return latest
+        const refusal = autoMergePullRequestRefusal(
+          input.repository,
+          input.expectedHeadSha,
+          input.repository.defaultBranch,
+          latest.value,
+        )
+        if (refusal !== null) return err({ repository: input.repository.github, message: refusal })
+        const authorization = input.authorize(hasAutoMergeLabel(labelNames(latest.value.labels)))
+        if (authorization._tag === 'Err')
+          return err({ repository: input.repository.github, message: authorization.error })
+        return octokit.rest.pulls
           .merge({
             owner,
             repo,
@@ -941,22 +1218,28 @@ export function createGitHubPullRequestMerger(options: GitHubPullRequestPublishe
               : err({ repository: input.repository.github, message: response.data.message }),
           )
           .catch(failure)
+      }
 
       const pullRequest = await octokit.rest.pulls
         .get({ owner, repo, pull_number: input.number, ...request })
         .then((response) => ok(response.data))
         .catch(failure)
       if (pullRequest._tag === 'Err') return pullRequest
-      if (pullRequest.value.head.sha !== input.expectedHeadSha) {
-        return err({
-          repository: input.repository.github,
-          message: 'The head commit moved before the merge was handed to GitHub.',
-        })
-      }
+      const refusal = autoMergePullRequestRefusal(
+        input.repository,
+        input.expectedHeadSha,
+        input.repository.defaultBranch,
+        pullRequest.value,
+      )
+      if (refusal !== null) return err({ repository: input.repository.github, message: refusal })
 
       // GitHub owns the merge decision from here. `expectedHeadOid` makes GitHub
       // cancel its own auto-merge when a new commit lands, so a review can never
       // merge a commit it did not read.
+      const autoMerge = hasAutoMergeLabel(labelNames(pullRequest.value.labels))
+      const authorization = input.authorize(autoMerge)
+      if (authorization._tag === 'Err')
+        return err({ repository: input.repository.github, message: authorization.error })
       return octokit
         .graphql(enableAutoMergeMutation, {
           pullRequestId: pullRequest.value.node_id,

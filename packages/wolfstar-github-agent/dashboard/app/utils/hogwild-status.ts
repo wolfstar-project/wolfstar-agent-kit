@@ -1,3 +1,6 @@
+import type { RunnerJobs } from '../../../src/runner-jobs.ts'
+import { parseRunnerJobs } from '../../../src/runner-jobs.ts'
+
 export interface HogwildServiceMetrics {
   cpuTimeSeconds: number
   memoryBytes: number
@@ -15,6 +18,7 @@ export type HogwildRunnerStatus =
   | { _tag: 'Unavailable' }
   | {
       _tag: 'Available'
+      jobs?: RunnerJobs
       budgets: {
         cpu: number
         memoryBytes: number
@@ -281,6 +285,7 @@ function parseRunners(value: unknown): HogwildRunnerStatus | undefined {
       memoryHeadroomBytes,
     },
     pools: pools as Extract<HogwildRunnerStatus, { _tag: 'Available' }>['pools'],
+    jobs: parseRunnerJobs(value, updatedAt),
     updatedAt,
   }
 }

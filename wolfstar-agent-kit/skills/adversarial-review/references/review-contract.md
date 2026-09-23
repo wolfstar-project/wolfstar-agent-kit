@@ -7,6 +7,7 @@ Review the entire base-to-head diff and its surrounding code. Disprove correctne
 Check:
 
 - Behavior against the linked issue and PR description.
+- Every image in the PR description, with visual inspection for UI defects.
 - Boundary inputs, malformed data, empty states, and unexpected ordering.
 - Error propagation, silent catches, partial writes, retries, and cleanup.
 - Security boundaries, secrets, injection, authorization, and unsafe parsing.
@@ -18,7 +19,9 @@ Check:
 - Code comments against `../../../references/code-comments.md`.
 - Repository architecture and local instructions.
 
-Treat style-only preferences as non-blocking. Treat correctness, security, data loss, public API breakage, and missing regression coverage as material.
+Treat style-only preferences as non-blocking. Treat visible UI defects as material. This includes clipping, overlap, overflow, unreadable contrast, and missing content.
+
+Treat a clearly labelled `Before` image as historical evidence. Verify the current head before recording a finding.
 
 ## Outcome gates
 
@@ -99,6 +102,8 @@ Next: SHORT_ACTION
 
 Use the controller's phase percentage. Update only at a phase transition or changed blocker. Keep findings out until verified.
 
+The controller reads the Agent's own `▓▓▓░░ NN% next-step` line and publishes that text as the phase. So the line a review prints during its work becomes the line a reader sees on the pull request. Without one, the controller guesses the phase from the shape of each shell command.
+
 Keep the reviewed SHA in hidden metadata. Render one robot emoji. Put disclosure,
 policy, waiting state, and human ownership in one blockquoted line. The visible
 review body only reports material issues found or fixed.
@@ -171,6 +176,33 @@ gh api --method PATCH "repos/$repo/issues/comments/$comment_id" --input payload.
 ```
 
 Build `payload.json` from the final body with `jq`; do not interpolate JSON manually. Never modify another author's marked comment.
+
+## Review outcome labels
+
+A terminal status needs both its confirmed comment and one matching Review outcome label.
+Apply this contract during standalone reviews and when reusing a trusted terminal comment.
+For controller-dispatched Review, the controller owns publication. Its Agents must never write GitHub comments or labels.
+The controller requires stored Review evidence for the current Revision before publishing. A trusted comment alone cannot replace that evidence.
+
+| Outcome   | Label                    | Color    |
+| --------- | ------------------------ | -------- |
+| `READY`   | `wolfstar-agent-ready`   | `0e8a16` |
+| `PENDING` | `wolfstar-agent-pending` | `fbca04` |
+| `BLOCKED` | `wolfstar-agent-blocked` | `d73a4a` |
+
+1. Establish mutation authority before writing labels. If authority is missing, report incomplete publication.
+2. Refetch the pull request before writing. Require an open pull request whose head matches the comment's reviewed SHA.
+3. If the head changed, restart Review. Never apply the previous outcome to the new head.
+4. If the repository lacks the matching label, create it with the listed color. Surface creation failures.
+5. Add the matching label. Remove the other Review outcome labels, `wolfstar-agent-running`, `wolfstar-agent-review-required`, and `wolfstar-agent-review-skipped`.
+6. Preserve all other labels, including `wolfstar-agent-review` and `wolfstar-agent-auto-merge`. Review publication never grants merge authority.
+7. Refetch the pull request and comment. Confirm the head, open state, comment outcome, and matching label. Confirm the conflicting labels are absent.
+
+If confirmation finds a changed head or closed pull request, remove the outcome label this publication added. Report any cleanup failure.
+If the head changed, restart from Snapshot. If the pull request closed, stop Review.
+If a write fails on the same head, retain the confirmed comment and retry label publication alone.
+Do not rerun Review or create another comment to repair a missing label.
+Return completion only after both the comment and labels pass confirmation.
 
 ## Local journal
 

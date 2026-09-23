@@ -6,9 +6,11 @@ import { ok } from '../src/result.ts'
 describe('gitHub App authentication', () => {
   it.each([
     ['read', { contents: 'read', issues: 'read', metadata: 'read', pull_requests: 'read' }],
-    ['checks_read', { checks: 'read', metadata: 'read', statuses: 'read' }],
+    ['checks_read', { actions: 'read', checks: 'read', metadata: 'read', statuses: 'read' }],
+    ['check_write', { checks: 'write', metadata: 'read' }],
     ['contents_write', { contents: 'write', metadata: 'read' }],
     ['item_write', { contents: 'read', issues: 'write', metadata: 'read', pull_requests: 'write' }],
+    ['pull_request_merge', { contents: 'write', metadata: 'read', pull_requests: 'write' }],
     ['workflows_write', { contents: 'write', metadata: 'read', workflows: 'write' }],
   ] as const)('mints one repository-scoped %s token', async (access, permissions) => {
     const requests: unknown[] = []
@@ -286,5 +288,55 @@ describe('createAuthenticatedClient', () => {
       /not accessible/,
     )
     expect(seen).toHaveLength(2)
+  })
+
+  it.each([
+    { name: 'primary quota', status: 403, message: 'Forbidden', headers: { 'x-ratelimit-remaining': '0' } },
+    { name: 'secondary retry delay', status: 403, message: 'Forbidden', headers: { 'retry-after': '60' } },
+    {
+      name: 'secondary response message',
+      status: 403,
+      message: 'You have exceeded a secondary rate limit.',
+      headers: {},
+    },
+    {
+      name: 'abuse detection response',
+      status: 403,
+      message: 'You have triggered an abuse detection mechanism.',
+      headers: {},
+    },
+    { name: 'explicit rate limit status', status: 429, message: 'Too many requests', headers: {} },
+  ])('preserves the credential when GitHub reports $name', async ({ status, message, headers }) => {
+    const tokens = tokenProvider(['replacement-token'])
+    let requests = 0
+    const octokit = createAuthenticatedClient({
+      access: 'read',
+      repository: 'wolfstar-project/example',
+      token: 'valid-token',
+      tokens: tokens.provider,
+      userAgent: 'test',
+      createClient: (clientOptions) =>
+        new Octokit({
+          ...clientOptions,
+          retry: { enabled: false },
+          throttle: { enabled: false },
+          request: {
+            fetch: async () => {
+              requests += 1
+              return new Response(JSON.stringify({ message }), {
+                status,
+                headers: { 'content-type': 'application/json', ...headers },
+              })
+            },
+          },
+        }),
+    })
+
+    await expect(octokit.rest.pulls.list({ owner: 'wolfstar-project', repo: 'example' })).rejects.toMatchObject({
+      status,
+      message,
+    })
+    expect(tokens.invalidated).toEqual([])
+    expect(requests).toBe(1)
   })
 })

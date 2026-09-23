@@ -19,19 +19,27 @@ Require an explicit configuration file. Start from `config.example.yml` only whe
 
 Use `github.allowed_owners` before GitHub access. Ignore installations and personal-account repositories from every other GitHub owner. Scan only immediate directories under `~/pkg` and `~/sites` to find trusted local checkouts. Treat configured repositories as policy overrides. Never act on a checkout without matching its GitHub origin and discovered authentication.
 
-Skip a tracked pull request with a conventional non-breaking `chore:` title before starting an Agent.
-For every other tracked pull request authored by `wolfstar-project`, run low-cost Pull request triage.
-Require an adversarial Review for code, tests, configuration, dependencies, workflows, schemas, generated runtime output, security boundaries, public APIs, performance-sensitive files, behavior claims, or uncertainty.
-Skip only clearly judgment-free prose, formatting, or comment-only changes.
+For every tracked pull request authored by `wolfstar-project`, run Pull request triage at observation time, before any Task is queued. The path rule decides first.
+If one changed path is outside the prose set, require an adversarial Review without a model call. The prose set is `*.md`, `*.mdx`, `*.txt`, `LICENSE*`, `CHANGELOG*`, and `docs/**`.
+Treat `SKILL.md`, `AGENTS.md`, `CLAUDE.md`, `.github/**`, `.claude/**`, and `.codex*/**` as behaviour, not prose. They always require Review.
+If every changed path is prose, reuse the stored decision for the same head commit. If none exists, ask the Classification service with the title and changed paths only.
+Classification skips only clearly judgment-free prose, formatting, or comment-only changes, and a skip needs confidence at or above 0.7. Uncertainty or failure requires Review.
+Store the decision source in the reason. A stored reason starts with `rule: ` or `model: `.
 Stamp `wolfstar-agent-review-skipped` when Review is skipped.
 Stamp `wolfstar-agent-review-required` when Pull request triage requires Review.
 Replace that route label with exactly one Review outcome label when Review finishes.
 
 Treat `wolfstar-agent-review` as a manual override that always requires adversarial Review for the exact current head commit. For an outside contributor, create one fixed, self-identified instruction comment. Name the exact head commit. Require `wolfstar-agent-review` before review. Bind Approval to the exact head commit; never let the label approve a head commit twice.
 
-Review every tracked pull request, whatever its labels. Merge one pull request automatically only when it carries `wolfstar-agent-auto-merge`, `auto_merge.enabled` is true, the repository is owned, the author is trusted, and review returned `READY` at or above `auto_merge.minimum_confidence`. Recheck the head commit at merge time. Everything else waits for Wolfstar.
+Review every tracked pull request, whatever its labels. Merge one pull request automatically only when it carries `wolfstar-agent-auto-merge`, `auto_merge.enabled` is true, the repository is owned, the author is trusted, and review returned `READY` at or above `auto_merge.minimum_confidence`. A repository block with `auto_merge.pull_requests: every` drops the label condition and uses its own `minimum_confidence`. Recheck the head commit at merge time. Everything else waits for Wolfstar.
+
+Auto merge targets the default branch only. If a stack's exact parent merged there, retarget the child before the next observation.
+Keep independent Issue work on the default branch, even when another pull request changes the same file.
+If the default branch advances normally, publish the existing verified patch. Fresh Review and GitHub checks evaluate the current base.
 
 Start no new issue work above `max_open_pull_requests` open pull requests. Keep review, repair, and conflict fixes running.
+
+Plan Ready Routine-filed issues as one Batch per repository when two or more wait. The Batch reserves their Issue work Tasks, runs one Batch planning turn over every reserved issue, and stores units: the issues one pull request closes, and the unit each one stacks on. Units run as Issue work Agents under the Batch's one permit, three at a time, each in its own worktree. A unit publishes the moment its Agent finishes; a stacked unit waits only for its base pull request to open, then falls back to the default branch after ten minutes. A planning turn that fails or returns an invalid plan runs every issue alone. `issue_batches: false` turns planning off. Issue triage names fix-together partners as `Fix with #N`, and the planning turn reads them as hints.
 
 Enable issue triage by default on owned repositories. Keep it disabled on maintained repositories unless explicit policy enables it.
 
@@ -67,23 +75,54 @@ pnpm --filter wolfstar-github-agent dashboard:build
 pnpm --filter wolfstar-github-agent exec node --experimental-strip-types src/cli.ts --config /absolute/path/to/wolfstar-github-agent.yml
 ```
 
-Use `https://wolfstar-github-agent.localhost/`. Inspect `/health` first, then `/api/state`.
+Use `https://wolfstar-github-agent.localhost/` for visual inspection.
+Agents should use `wolfstar-github-agent control` for monitoring and supported service controls.
+Call the Control API directly only when no matching subcommand exists.
+The command reads the URL and password from the configuration file by default.
+
+```bash
+wolfstar-github-agent control status --config /absolute/path/to/wolfstar-github-agent.yml
+wolfstar-github-agent control tasks --config /absolute/path/to/wolfstar-github-agent.yml
+wolfstar-github-agent control incidents --config /absolute/path/to/wolfstar-github-agent.yml
+wolfstar-github-agent control activity --task TASK_ID --config /absolute/path/to/wolfstar-github-agent.yml
+wolfstar-github-agent control events --limit 50 --config /absolute/path/to/wolfstar-github-agent.yml
+wolfstar-github-agent control routine-run --routine OWNER/REPOSITORY:NAME --config /absolute/path/to/wolfstar-github-agent.yml
+```
+
+`routine-run` opens one Routine run for the current minute, ahead of its cron.
+On the service host, pass `--url http://127.0.0.1:3210`. That host may not resolve its own public name.
+
+For daily check-ins, apply [daily-checkin](../daily-checkin/SKILL.md). It owns collection, interpretation, storage, and reporting.
+
+A `daily-checkin` Routine runs the central daily-checkin Skill against the site's `@harlan-zw/nuxt-checkin` module. Sites declare checks and prompt items in module configuration. They do not need `.claude/skills/daily-checkin/SKILL.md`. Credentials remain in the repository environment or private credential files.
+
+Each `daily-checkin` run opens a separate issue, including clear, failed, and skipped runs.
+Use `[CLEAR]`, `[ACTION NEEDED]`, or `[BLOCKED]` before `Daily check-in: YYYY-MM-DD`, using the scheduled UTC date.
+Retries find the same run by its marker, including closed issues. Other Routines keep their shared tracking issue.
+Link existing issues for ongoing actions. Update the title status when findings change.
+Close the daily issue when its actions are resolved or tracked in linked issues.
+
+Use `pause`, `resume`, `restart`, `update`, or `cancel --task TASK_ID` for the matching durable control.
+Every command prints one JSON value. A tagged JSON error exits with status 1.
 
 Workers run as normal local agent sessions inside disposable Git worktrees. They inherit Wolfstar's global agent context, installed skills, environment, provider login, and authenticated `gh` client.
 
 `agent.provider` names the Agent provider the service starts with. It defaults to `codex`.
 
-A pinned Agent selection overrides it. Wolfstar switches the Agent provider, model, and Reasoning effort from the dashboard header or the tray, and the switch survives a restart. Read it from `/api/state` as `agentSelection`, which is `{"_tag":"FollowsConfiguration"}`, `{"_tag":"Pinned", ...}`, or `{"_tag":"Automatic","order":[...]}`.
+A pinned Agent selection overrides it. Wolfstar switches the Agent provider, model, and Reasoning effort from the dashboard header or the tray, and the switch survives a restart. Read it from `wolfstar-github-agent control status` as `state.agentSelection`, which is `{"_tag":"FollowsConfiguration"}`, `{"_tag":"Pinned", ...}`, or `{"_tag":"Automatic","order":[...]}`.
 
 Automatic selection picks the Agent provider by remaining capacity. It walks `order` and takes the first provider whose window has more than its own Reserve left. `order` defaults to opencode first, because opencode answers on the GLM Coding Plan. Codex publishes a seven-day window. opencode publishes the GLM Coding Plan five-hour and weekly windows, and the fuller window decides. When no provider may spend, the service stops claiming new agent Tasks and shows `Reserve reached` in the System pane. Active agents and Publications finish. Reaching a Reserve is normal state, not an Incident.
 
-For `codex`, use `gpt-5.6-luna` with low reasoning for Pull request triage. Use `gpt-5.6-sol` with high reasoning for adversarial review. Use `gpt-5.6-terra` with medium reasoning for Repair, conflict resolution, issue triage, issue work, and Baseline repair.
+For `codex`, use `gpt-5.6-sol` with high reasoning for adversarial review. Use `gpt-5.6-terra` with medium reasoning for Repair, conflict resolution, issue triage, issue work, and Baseline repair. Pull request triage needs no Agent: Classification answers it through the `advocaat` package over the Cloudflare AI endpoint.
 
-For `opencode`, use `zai-coding-plan/glm-5.3-flash` at the `high` Reasoning effort for every role.
+For `opencode`, use `zai-coding-plan/glm-5.3-flash` at the `high` Reasoning effort for every role. `agent.reasoning_effort.<provider>.<role>` in the configuration replaces one role's default, for example `agent.reasoning_effort.opencode.review_fix: medium`. A pinned Agent selection with an explicit Reasoning effort still wins over the file.
+
+Use `repositories[].reasoning_effort.<provider>.<role>` to override Reasoning effort for one repository.
+Unlisted roles keep their global setting. An explicit pinned Reasoning effort wins over both scopes.
 
 A saved session belongs to the Agent provider that created it. Switching providers starts new sessions.
 
-Switch the Agent selection with an authenticated request. Send the whole selection. A null model or Reasoning effort keeps that provider's own per-role default. A switch starts the next agent turn, and an agent already running keeps the model it started with.
+Agent selection has no matching CLI subcommand. Switch it with an authenticated Control API request. Send the whole selection. A null model or Reasoning effort keeps that provider's own per-role default. A switch starts the next agent turn, and an agent already running keeps the model it started with.
 
 ```bash
 curl --fail --silent --user "agent:$agent_password" --header 'Origin: https://wolfstar-github-agent.localhost' --header 'Content-Type: application/json' --request POST https://wolfstar-github-agent.localhost/api/agents/select --data '{"_tag":"Pinned","provider":"opencode","model":null,"reasoningEffort":null}'
@@ -106,6 +145,13 @@ It also seeds ignored `.data` and `.wrangler/state` from the Repository mapping.
 Each worktree receives a private writable copy.
 If the Repository mapping has an open state file, setup fails before the Agent starts.
 
+The committed Worktrunk configuration also seeds the ignored files in
+`scripts/repository-env-files`. The Hogwild update copies those files one way
+from the desktop checkouts before the service restarts. Use
+`pnpm service:hogwild:sync-env` to run that sync without updating the service.
+Missing files, unsafe symlinks, untrusted paths, and files that Git does not
+ignore must stop the sync or worktree creation.
+
 If setup fails, start no Agent.
 Keep the Task failure and its Incident visible with the exact Worktrunk error.
 
@@ -115,7 +161,7 @@ Nuxt's current build cache remains local to one worktree path.
 
 Limit reviews, issue triage, and conflict fixes to three active agents in total. Show that limit in the dashboard profile.
 
-Inspect one pull request's review Attempts and Publications through
+The CLI does not expose Review runs yet. Inspect them through
 `/api/reviews?repository=OWNER%2FREPOSITORY&pull_request=NUMBER`.
 
 Use `Eject` to cancel one active automated Task and open its saved agent session in Ghostty. The terminal resumes after the active turn stops.
@@ -130,18 +176,12 @@ Restart through a durable Restart request. The service stops new Task claims, le
 
 ```bash
 agent_config=/absolute/path/to/wolfstar-github-agent.yml
-agent_password=$(< "$(dirname "$agent_config")/dashboard-password")
-curl --fail --silent --user "agent:$agent_password" \
-  --header 'Origin: https://wolfstar-github-agent.localhost' \
-  --header 'Content-Type: application/json' \
-  --request POST \
-  --data '{"source":"helper"}' \
-  https://wolfstar-github-agent.localhost/api/service/restart
-curl --fail --silent --user "agent:$agent_password" \
-  https://wolfstar-github-agent.localhost/api/state | jq '.restartRequest'
+wolfstar-github-agent control restart --config "$agent_config"
+wolfstar-github-agent control status --config "$agent_config" | jq '.state.restartRequest'
 ```
 
 `conflict_resolution: true` permits a repository to queue conflict work. `mutations_enabled: true` lets the controller run and publish it.
+Maintained repositories may enable conflict resolution explicitly. Keep author, branch, and Approval checks in place.
 
 Prefer a GitHub App installation for selected repositories. If a maintained repository has no installation, require an explicit Repository mapping before Issue work. Use Wolfstar's authenticated GitHub account for that repository. Workers may use the authenticated `gh` client for research.
 
@@ -185,9 +225,19 @@ If Review records `Repair` findings, queue all findings immediately under the ex
 
 Available empty base and head check sets with no declared required checks mean the repository has no CI. This passes the CI Review gate and permits Repair. An unavailable, running, or failed base check set does not permit Repair.
 
+Ignore a base check run that a `workflow_run`, `dynamic`, or an unfinished `schedule` event attached to the base commit. The first reports on another commit's workflow. The second is Dependabot's updater, which fails when an update is not possible. A cron run GitHub has not reported `completed` stalls the base gate on a timer, in any of its unfinished statuses, so drop it too. A cron run reported `completed` executed on the base commit tip: keep it as base evidence, so a failed one holds the gate red and queues a Baseline repair.
+
+When the gate refresh of a settled review finds the default branch failed, queue one Baseline repair for that exact base commit. Report Existing on every later pass.
+
+Raise one `ci_gate_pending` Incident when a CI Review gate reads PENDING past its bound. Allow a check run with no conclusion 6 hours, because GitHub stops a job then. Allow a gate with nothing in flight 4 hours. Name the repository, the pull request, the cause, and when the gate last moved. Resolve the Incident when the gate moves. Report only. Never cancel, re-run, or repair a check run because of this Incident.
+
+Raise no Incident when the repository has no CI, when another Review gate holds the pull request, or when a runner lost its job. The last one raises `runner_lost` instead.
+
 If Review recommends Dismissal, queue no Repair. Use this only when the premise is wrong and Repair would replace the pull request intent. Wolfstar decides whether to Dismiss.
 
-If fresh Review repeats one finding fingerprint after Repair, stop with Action required. Do not attempt a root architecture rewrite.
+If fresh Review of a Repair commit still records a Repair finding, queue the next Repair round. Give that round every earlier round's commit, report, and target findings. Never repeat a rejected approach.
+
+Allow 3 Repair rounds per contributor commit. A contributor push starts a fresh count. When the rounds are spent, stop with Action required and list every round in the canonical comment. Do not attempt a root architecture rewrite.
 
 If Repair returns Action required or exhausts retries, replace its progress comment with `BLOCKED`. Include every stored finding and its exact next action.
 
@@ -205,17 +255,54 @@ If GitHub closes a pull request, publish `MERGED` or `CLOSED`. Clear every Agent
 
 Before trusting a locally inferred close, read that exact pull request from GitHub. Store comment and label cleanup separately from the Task that last owned the comment. Resume incomplete cleanup after restart.
 
-Before dispatch, detect trusted marked comments for the current head commit. A terminal comment completes the queued review unless Wolfstar explicitly requests a rerun. An active comment is status only. Use local Task ownership to decide whether an Agent still runs.
+Treat trusted marked comments as status only. Complete queued Review only when stored Review evidence matches the current head commit, target branch, and repository policy. If Wolfstar requests a rerun, dispatch fresh Review. Use local Task ownership to decide whether an Agent still runs.
 
-Allow Wolfstar to rerun the current head commit from the dashboard or with the exact pull request comment `/wolfstar-agent rerun`. GitHub does not autocomplete regular GitHub Apps as native agents. Reject GitHub rerun commands from every other author. Store the command identity before queueing work. Repeated polls must not queue it twice.
+Allow Wolfstar to rerun the current head commit from the dashboard or with the exact pull request comment `@wolfstar-agent rerun`. The App bot's own logins and the slash form `/wolfstar-agent rerun` also queue it, because GitHub's mention picker does not offer regular GitHub App bots the way it offers `@claude` or `@coderabbitai`; `@wolfstar-agent` is an Organization that authenticates nothing and exists as the summon handle. Reject GitHub rerun commands from every other author. Store the command identity before queueing work. Repeated polls must not queue it twice.
 
 If GitHub closes the pull request unmerged, revoke its running task. Stop the agent within five seconds.
 
-If GitHub merges without active ownership, revoke the review task. With active ownership, continue the same worker through delivery verification.
+If GitHub merges during an active Review, let that Review finish and store every finding.
+If Wolfstar needs to merge now, leave Review running.
+If Wolfstar decides Review is unnecessary, select Stop Review in the automated comment before merging.
+The checkbox cancels Review and follow-up Repair for its exact head commit.
+Show the checkbox only when signed GitHub webhooks are enabled. The dashboard Cancel control also remains available.
+Cancel queued Reviews that never started. Keep explicit Cancel and Dismissal effective.
+Recheck Repair findings on the current default branch in a fresh worktree.
+If confirmed bugs remain, open one linked Repair pull request and start fresh Review there.
+If no findings remain, record completion without opening a pull request.
+Deduplicate Repair work by the original pull request and reviewed head commit.
+Never push Repair to the merged branch. Surface unsafe fixes as Action required.
+With active Take Ownership, continue delivery verification.
 
 Use the dashboard `Cancel` control for active or queued tasks. Store that cancellation for the current commit. A later poll must not queue it again. Closing a pull request must use the same durable cancellation path.
 
 When required CI fails on the current base of an owned repository, dispatch a separate baseline repair task. Use a fresh worktree and `../pr/SKILL.md`. Keep the original review waiting until the repair merges, then resume its existing review worker.
+
+## Package releases
+
+Use an explicit `repositories[].release` policy for stable patch and minor npm releases.
+Require an owned repository, enabled writes, signed webhooks, and pull request Review.
+Only Wolfstar's checkbox click or new `do release` comment authorizes publication.
+Feature pull requests offer minor. Fix and performance pull requests offer patch.
+Never offer patch when the unreleased range contains features.
+Suppress controls for known breaking changes, incomplete evidence, and already released merges.
+
+Offer the release checkbox on eligible open pull requests and unreleased merged pull requests.
+Bind a selection before merge to the exact pull request head, package version, and policy.
+Allow Wolfstar to clear the checkbox before merge. Keep selections across service restarts.
+A changed head or release version clears the selection. Never promote patch to minor automatically.
+After merge, recheck the full release range and pin the default branch commit.
+Require passing checks from a default branch push before preparing the release.
+Passing pull request checks cannot satisfy that requirement.
+Prepare configured JSON version files through a separate pull request.
+Merge only that exact revision after current Review, required checks, and branch protection pass.
+This release authority does not permit merging unrelated pull requests.
+Publish a tag through the controller, then verify the existing GitHub Actions workflow and npm version.
+Keep progress in one self-identified release comment. Resume the same version after failures.
+Workers gain no GitHub or npm publication authority.
+
+Read the [package README](../../../packages/wolfstar-github-agent/README.md) for repository setup and adapter limits.
+Do not enable this adapter for custom version generators or non-npm publishing destinations.
 
 ## Resolve conflicts
 
@@ -237,7 +324,12 @@ After the push, invalidate old evidence and run `adversarial-review` again again
 
 Use fenced leases and durable Publication commands for every GitHub write.
 
-Route controller credentials by Repository mapping. Use repository-scoped GitHub App tokens when installed. Use Wolfstar's authenticated GitHub account only for an explicitly configured maintained repository.
+Route controller credentials by Repository mapping. Use repository-scoped GitHub App tokens when installed.
+For an explicitly configured maintained repository without the App, use Wolfstar's authenticated GitHub account.
+
+For an approved contributor fork conflict merge containing workflow files, use Wolfstar's authenticated GitHub account.
+Require the contributor's current permission for maintainer edits and Approval for the exact head commit.
+The controller rechecks the saved commit and both remote branches before pushing.
 
 Mint read and write App tokens separately.
 

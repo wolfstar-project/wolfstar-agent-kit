@@ -1,4 +1,6 @@
 import type { AgentActivityLog } from './agent-activity.ts'
+import type { DesktopBroker } from './desktop-broker.ts'
+import type { AgentHost, AgentSlotLimits, HostAgentPool, HostCapacity } from './host-capacity.ts'
 import type { StatsRangeError } from './stats.ts'
 import type { JournalStore } from './store.ts'
 import type { DashboardSnapshot, WorkflowEventStream } from './types.ts'
@@ -12,18 +14,28 @@ import { fileURLToPath } from 'node:url'
 import { createError, createEventStream, H3, setResponseStatus } from 'h3'
 import { parseAgentFeedback } from './agent-feedback.ts'
 import { parseAgentSelection } from './agent-profile.ts'
+import { parseDesktopEvents, parseDesktopMemory, parseDesktopReport, parseDesktopWorktree } from './desktop-protocol.ts'
+import { parseAgentSlots } from './host-capacity.ts'
 import { parseStatsRange } from './stats.ts'
 
 export interface AgentAppOptions {
+  desktop?: DesktopBroker
+  hostCapacity?: () => HostCapacity
+  hostTasks?: HostAgentPool['tasks']
+  /** The bounds of the Agent slot control. Absent means the control is unavailable. */
+  agentSlots?: AgentSlotLimits
+  setAgentSlots?: (host: AgentHost, slots: number) => HostCapacity
   store: Pick<
     JournalStore,
-    | 'approveIssueWork'
+    | 'approveIssue'
     | 'approvePullRequest'
     | 'cancelTask'
     | 'getDashboardSnapshot'
     | 'getStats'
     | 'listReviewRuns'
     | 'listWorkflowEvents'
+    | 'listRoutines'
+    | 'openRoutineRun'
     | 'pauseAgents'
     | 'recordAgentFeedback'
     | 'requestRestart'
@@ -39,7 +51,15 @@ export interface AgentAppOptions {
   settleTask?: (taskId: string) => Promise<boolean>
   ejectSettlementTimeoutMilliseconds?: number
   allowedOrigin: string
+  /**
+   * The service's own listen address, such as `http://127.0.0.1:3210`. The
+   * service host may not resolve its public name, so the control CLI there
+   * reaches this address instead. Each address accepts only its own origin.
+   */
+  listenOrigin?: string
   dashboardPassword: string
+  /** Origins allowed to frame the dashboard, such as a talk deck. Empty denies framing. */
+  frameAncestors?: readonly string[]
   dashboardRoot?: string
   now: () => Date
   eventIntervalMilliseconds?: number
@@ -48,14 +68,23 @@ export interface AgentAppOptions {
 }
 
 /** Prerendered dashboard routes below `/`, each with its own payload. */
-const DASHBOARD_PAGES = ['history', 'watching', 'flow', 'stats'] as const
+const DASHBOARD_PAGES = ['history', 'watching', 'routines', 'flow', 'stats'] as const
 const EJECT_SETTLEMENT_TIMEOUT_MILLISECONDS = 12_000
 
 const securityHeaders = {
   'cache-control': 'no-store',
   'referrer-policy': 'no-referrer',
   'x-content-type-options': 'nosniff',
-  'x-frame-options': 'DENY',
+}
+
+/** Framing headers: `frame-ancestors` is the source of truth; `x-frame-options` only backs up the default deny. */
+function framingHeaders(frameAncestors: readonly string[]): {
+  securityHeaders: Record<string, string>
+  frameAncestors: string
+} {
+  if (frameAncestors.length === 0)
+    return { securityHeaders: { ...securityHeaders, 'x-frame-options': 'DENY' }, frameAncestors: "'none'" }
+  return { securityHeaders, frameAncestors: ["'self'", ...frameAncestors].join(' ') }
 }
 
 const contentTypes: Record<string, string> = {
@@ -81,8 +110,14 @@ function defaultDashboardRoot(): string {
  * They only meet here, on the way out to the dashboard.
  */
 function dashboardSnapshot(options: AgentAppOptions): DashboardSnapshot {
-  const snapshot = options.store.getDashboardSnapshot(options.now().toISOString())
+  const snapshot: DashboardSnapshot = {
+    ...options.store.getDashboardSnapshot(options.now().toISOString()),
+    ...(options.hostCapacity === undefined ? {} : { hostCapacity: options.hostCapacity() }),
+    ...(options.agentSlots === undefined ? {} : { agentSlots: options.agentSlots }),
+    ...(options.desktop === undefined ? {} : { desktop: options.desktop.read() }),
+  }
   const activityLog = options.activityLog
+  if (options.hostTasks !== undefined) snapshot.hostTasks = options.hostTasks()
   if (activityLog === undefined) return snapshot
   return {
     ...snapshot,
@@ -331,12 +366,43 @@ async function changeDismissal(options: AgentAppOptions, event: { req: Request }
   return result
 }
 
+async function desktopBody(event: { req: { json: () => Promise<unknown> } }): Promise<Record<string, unknown>> {
+  const body = await event.req.json().catch(() => {
+    throw createError({ status: 400, statusText: 'Bad Request', message: 'Desktop requests must contain valid JSON.' })
+  })
+  if (typeof body !== 'object' || body === null || Array.isArray(body))
+    throw createError({
+      status: 400,
+      statusText: 'Bad Request',
+      message: 'Desktop requests must contain a JSON object.',
+    })
+  return body as Record<string, unknown>
+}
+
+function desktopInput<Value>(parse: (value: unknown) => Value, value: unknown): Value {
+  try {
+    return parse(value)
+  } catch (error) {
+    throw createError({
+      status: 400,
+      statusText: 'Bad Request',
+      message: error instanceof Error ? error.message : 'Desktop input is invalid.',
+    })
+  }
+}
+
 export function createAgentApp(options: AgentAppOptions): H3 {
   const dashboardRoot = options.dashboardRoot ?? defaultDashboardRoot()
-  const allowedHost = new URL(options.allowedOrigin).host
+  const originByHost = new Map(
+    [options.allowedOrigin, options.listenOrigin]
+      .filter((origin) => origin !== undefined)
+      .map((origin) => [new URL(origin).host, new URL(origin).origin]),
+  )
+  const framing = framingHeaders(options.frameAncestors ?? [])
   const app = new H3({
     onRequest(event) {
-      if (event.req.headers.get('host') !== allowedHost)
+      const expectedOrigin = originByHost.get(event.req.headers.get('host') ?? '')
+      if (expectedOrigin === undefined)
         throw createError({ status: 421, statusText: 'Misdirected Request', message: 'Host is not allowed.' })
       if (!hasDashboardAccess(event.req, options.dashboardPassword)) {
         throw createError({
@@ -349,18 +415,18 @@ export function createAgentApp(options: AgentAppOptions): H3 {
       if (
         event.req.method !== 'GET' &&
         event.req.method !== 'HEAD' &&
-        event.req.headers.get('origin') !== options.allowedOrigin
+        event.req.headers.get('origin') !== expectedOrigin
       )
         throw createError({ status: 403, statusText: 'Forbidden', message: 'Request origin is not allowed.' })
       event.context.dashboardNonce = randomBytes(18).toString('base64')
     },
     onResponse(response, event) {
-      Object.entries(securityHeaders).forEach(([name, value]) => response.headers.set(name, value))
+      Object.entries(framing.securityHeaders).forEach(([name, value]) => response.headers.set(name, value))
       const nonce = String(event.context.dashboardNonce)
       // GitHub avatars come from github.com and redirect to avatars.githubusercontent.com.
       response.headers.set(
         'content-security-policy',
-        `default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; img-src 'self' data: https://github.com https://avatars.githubusercontent.com; object-src 'none'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'`,
+        `default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; frame-ancestors ${framing.frameAncestors}; img-src 'self' data: https://github.com https://avatars.githubusercontent.com; object-src 'none'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'`,
       )
     },
   })
@@ -382,6 +448,71 @@ export function createAgentApp(options: AgentAppOptions): H3 {
 
   app.get('/api/state', () => dashboardSnapshot(options))
 
+  app.post('/api/desktop/capacity', async (event) => {
+    if (options.desktop === undefined)
+      throw createError({ statusCode: 503, message: 'Desktop execution is unavailable.' })
+    const memoryGiB = desktopInput(parseDesktopMemory, await desktopBody(event))
+    options.desktop.setMemory(memoryGiB)
+    return { memoryGiB }
+  })
+  app.post('/api/desktop/report', async (event) => {
+    if (options.desktop === undefined)
+      throw createError({ statusCode: 503, message: 'Desktop execution is unavailable.' })
+    return options.desktop.report(desktopInput(parseDesktopReport, await desktopBody(event)))
+  })
+  app.post('/api/desktop/claim', () => options.desktop?.claim() ?? null)
+  app.post('/api/desktop/defer', async (event) => {
+    const body = await desktopBody(event)
+    return { accepted: typeof body.id === 'string' && options.desktop?.defer(body.id) === true }
+  })
+  app.post('/api/desktop/heartbeat', async (event) => {
+    const body = await desktopBody(event)
+    return { active: typeof body.id === 'string' && options.desktop?.active(body.id) === true }
+  })
+  app.post('/api/desktop/events', async (event) => {
+    const body = await desktopBody(event)
+    return {
+      accepted:
+        typeof body.id === 'string' &&
+        options.desktop?.events(body.id, desktopInput(parseDesktopEvents, body.events)) === true,
+    }
+  })
+  app.post('/api/desktop/complete', async (event) => {
+    const body = await desktopBody(event)
+    const result = body.result === null ? null : desktopInput(parseDesktopWorktree, body.result)
+    const failure = typeof body.failure === 'string' ? body.failure : null
+    return { accepted: typeof body.id === 'string' && options.desktop?.complete(body.id, result, failure) === true }
+  })
+
+  app.post('/api/agents/slots', async (event) => {
+    const limits = options.agentSlots
+    const write = options.setAgentSlots
+    if (limits === undefined || write === undefined)
+      throw createError({
+        status: 503,
+        statusText: 'Service Unavailable',
+        message: 'Agent slots cannot be set right now.',
+      })
+    const body = await event.req.json().catch(() => {
+      throw createError({
+        status: 400,
+        statusText: 'Bad Request',
+        message: 'An Agent slot request must contain valid JSON.',
+      })
+    })
+    let request: { host: AgentHost; slots: number }
+    try {
+      request = parseAgentSlots(body, limits)
+    } catch (error) {
+      throw createError({
+        status: 400,
+        statusText: 'Bad Request',
+        message: error instanceof Error ? error.message : 'The Agent slot request is invalid.',
+      })
+    }
+    return write(request.host, request.slots)
+  })
+
   app.post('/api/agents/pause', () => options.store.pauseAgents(options.now().toISOString()))
 
   app.post('/api/agents/resume', () => options.store.resumeAgents(options.now().toISOString()))
@@ -400,10 +531,71 @@ export function createAgentApp(options: AgentAppOptions): H3 {
     const request = options.store.requestRestart({
       id: randomUUID(),
       source: body.source,
+      operation: { _tag: 'Restart' },
       at: options.now().toISOString(),
     })
     setResponseStatus(event, 202)
     return request
+  })
+
+  app.post('/api/service/update', async (event) => {
+    const body = (await event.req.json().catch(() => {
+      // Validation below reports malformed JSON as a bad request.
+      return undefined
+    })) as { source?: unknown } | undefined
+    if (body?.source !== 'dashboard' && body?.source !== 'helper')
+      throw createError({
+        status: 400,
+        statusText: 'Bad Request',
+        message: 'Update source must be dashboard or helper.',
+      })
+    const update = options.store.getDashboardSnapshot(options.now().toISOString()).serviceUpdate
+    if (update._tag !== 'Available')
+      throw createError({ status: 409, statusText: 'Conflict', message: 'No service update is available.' })
+    const request = options.store.requestRestart({
+      id: randomUUID(),
+      source: body.source,
+      operation: { _tag: 'Update', targetCommit: update.latestCommit },
+      at: options.now().toISOString(),
+    })
+    setResponseStatus(event, 202)
+    return request
+  })
+
+  app.post('/api/routines/run', async (event) => {
+    const body = (await event.req.json().catch(() => {
+      // Validation below reports malformed JSON as a bad request.
+      return undefined
+    })) as { routineId?: unknown } | undefined
+    if (typeof body?.routineId !== 'string' || body.routineId === '')
+      throw createError({ status: 400, statusText: 'Bad Request', message: 'A Routine ID is required.' })
+    const routine = options.store.listRoutines().find((candidate) => candidate.id === body.routineId)
+    if (routine === undefined)
+      throw createError({ status: 404, statusText: 'Not Found', message: 'The Routine was not found.' })
+    if (!routine.enabled)
+      throw createError({
+        status: 409,
+        statusText: 'Conflict',
+        message: 'The Routine is disabled, so a run would never start.',
+      })
+    const at = options.now()
+    // A manual run answers the current minute. The cron instant that follows it
+    // today is newer, so it still opens on its own.
+    const scheduledFor = new Date(Math.floor(at.getTime() / 60_000) * 60_000).toISOString()
+    const run = options.store.openRoutineRun({
+      routineId: routine.id,
+      scheduledFor,
+      specSha: routine.specSha,
+      at: at.toISOString(),
+    })
+    if (run === null)
+      throw createError({
+        status: 409,
+        statusText: 'Conflict',
+        message: 'A run already exists for this minute. Try again in a minute.',
+      })
+    setResponseStatus(event, 202)
+    return run
   })
 
   app.post('/api/agents/selection-mode', async (event) => {
@@ -592,7 +784,7 @@ export function createAgentApp(options: AgentAppOptions): H3 {
     )
     if (body === undefined)
       throw createError({ status: 400, statusText: 'Bad Request', message: 'A valid issue Approval is required.' })
-    const result = options.store.approveIssueWork({ ...body, at: options.now().toISOString() })
+    const result = options.store.approveIssue({ ...body, at: options.now().toISOString() })
     if (result._tag !== 'Rejected') return result
     switch (result.reason._tag) {
       case 'ItemNotFound':
@@ -609,8 +801,12 @@ export function createAgentApp(options: AgentAppOptions): H3 {
           statusText: 'Conflict',
           message: 'This issue does not require local approval.',
         })
-      case 'TriageRequired':
-        throw createError({ status: 409, statusText: 'Conflict', message: 'Issue triage must finish before approval.' })
+      case 'NothingToStart':
+        throw createError({
+          status: 409,
+          statusText: 'Conflict',
+          message: 'Nothing on this issue is waiting for approval.',
+        })
       case 'NotAuthorized':
         throw createError({
           status: 409,
@@ -701,6 +897,7 @@ export function createAgentApp(options: AgentAppOptions): H3 {
   app.get('/_payload.json', () => staticAsset(dashboardRoot, '_payload.json'))
   app.get('/_nuxt/**', (event) => staticAsset(dashboardRoot, new URL(event.req.url).pathname.slice(1)))
   app.get('/_fonts/**', (event) => staticAsset(dashboardRoot, new URL(event.req.url).pathname.slice(1)))
+  app.get('/_nuxt-skew-sw.js', () => staticAsset(dashboardRoot, '_nuxt-skew-sw.js'))
   app.get('/', (event) => dashboardHtml(dashboardRoot, 'index.html', String(event.context.dashboardNonce)))
   DASHBOARD_PAGES.forEach((page) => {
     app.get(`/${page}`, (event) =>

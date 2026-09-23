@@ -136,6 +136,22 @@ describe('opencodeAgentEvent', () => {
     ).toEqual({ _tag: 'FileChanged', changes: [{ path: 'src/parser.ts', kind: 'update' }] })
   })
 
+  it.each(['', 'All green. Work complete.\n\n'])(
+    'keeps code fences inside an implemented result with prefix %j',
+    (prefix) => {
+      const response = JSON.stringify({
+        outcome: 'implemented',
+        summary: 'The regression failed before the fix and passed afterwards.',
+        pullRequestBody: "Before:\n```\ncurl -w '%{http_code} %{redirect_url}'\n```\nAfter:\n```\n301 /docs/intro\n```",
+      })
+
+      expect(opencodeAgentEvent({ type: 'text', part: { text: `${prefix}${response}` } })).toEqual({
+        _tag: 'Message',
+        text: response,
+      })
+    },
+  )
+
   it('strips the code fence from the final message', () => {
     expect(opencodeAgentEvent(textLine)).toEqual({ _tag: 'Message', text: '{"outcome":"resolved"}' })
   })
@@ -223,6 +239,28 @@ printf '%s\\n' '${JSON.stringify(textLine)}'
     await collect(provider.runTurn(request()))
 
     expect(launchedEnvironment).toBe(environment)
+  })
+
+  it('layers the worktree .env over the Agent environment', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'opencode-env-'))
+    await writeFile(join(workspace, '.env'), 'NUXTSEO_TOKEN=from-repo\n')
+    let launchedEnvironment: NodeJS.ProcessEnv | undefined
+    const provider = createOpencodeProvider({
+      environment: { PATH: '/bin', HOME: '/home/agent' },
+      spawnOpencode: (args, _workspace, receivedEnvironment) => {
+        launchedEnvironment = receivedEnvironment
+        return replay([textLine])(args)
+      },
+    })
+
+    await collect(provider.runTurn(request({ workspace, taskId: 'owner/site:daily-checkin:2026-09-15T07:00:00.000Z' })))
+
+    expect(launchedEnvironment).toEqual({
+      PATH: '/bin',
+      HOME: '/home/agent',
+      NUXTSEO_TOKEN: 'from-repo',
+      DAILY_CHECKIN_DIR: '/home/agent/.local/state/daily-checkin/owner/site',
+    })
   })
 
   it('reports the session before the events it produced', async () => {
@@ -317,6 +355,11 @@ describe('extractJsonObject', () => {
 
   it('takes the object out of surrounding prose', () => {
     expect(extractJsonObject('Here is the result: {"a":1} Done.')).toBe('{"a":1}')
+  })
+
+  it('keeps the complete explanation when braces do not contain JSON', () => {
+    const response = "The command was curl -w '%{http_code} %{redirect_url}'. No response arrived."
+    expect(extractJsonObject(response)).toBe(response)
   })
 
   it('returns the text unchanged when it holds no object', () => {

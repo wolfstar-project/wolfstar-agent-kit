@@ -23,6 +23,7 @@ describe('installedWithoutCheckout', () => {
       github: 'wolfstar-project/example',
       defaultBranch: 'main',
       archived: false,
+      fork: false,
       topics: [],
       authentication: 'app' as const,
       owner: { login: 'wolfstar-project', type: 'User' as const },
@@ -31,6 +32,7 @@ describe('installedWithoutCheckout', () => {
       github: 'wolfstar-project/unlighthouse.dev',
       defaultBranch: 'main',
       archived: false,
+      fork: false,
       topics: [],
       authentication: 'app' as const,
       owner: { login: 'wolfstar-project', type: 'User' as const },
@@ -39,6 +41,7 @@ describe('installedWithoutCheckout', () => {
       github: 'wolfstar-project/retired',
       defaultBranch: 'main',
       archived: true,
+      fork: false,
       topics: [],
       authentication: 'app' as const,
       owner: { login: 'wolfstar-project', type: 'User' as const },
@@ -47,6 +50,7 @@ describe('installedWithoutCheckout', () => {
       github: 'someone-else/tool',
       defaultBranch: 'main',
       archived: false,
+      fork: false,
       topics: [],
       authentication: 'app' as const,
       owner: { login: 'someone-else', type: 'User' as const },
@@ -109,6 +113,7 @@ describe('repository discovery', () => {
           github: 'wolfstar-project/example',
           defaultBranch: 'main',
           archived: false,
+          fork: false,
           topics: [],
           authentication: 'app' as const,
           owner: { login: 'wolfstar-project', type: 'User' },
@@ -117,6 +122,7 @@ describe('repository discovery', () => {
           github: 'skilld-dev/shared',
           defaultBranch: 'main',
           archived: false,
+          fork: false,
           topics: ['wolfstar-agent-issues', 'wolfstar-agent-conflicts'],
           authentication: 'app' as const,
           owner: { login: 'skilld-dev', type: 'Organization' },
@@ -125,6 +131,7 @@ describe('repository discovery', () => {
           github: 'wolfstar-project/remote-only',
           defaultBranch: 'main',
           archived: false,
+          fork: false,
           topics: [],
           authentication: 'app' as const,
           owner: { login: 'wolfstar-project', type: 'User' },
@@ -151,6 +158,27 @@ describe('repository discovery', () => {
     expect(mappings[0]?.writablePullRequestAuthors).toEqual(['wolfstar-project', 'wolfstar-github-agent[bot]'])
   })
 
+  it('does not map a fork', () => {
+    const mappings = buildRepositoryMappings(
+      [
+        {
+          github: 'wolfstar-project/skills',
+          defaultBranch: 'main',
+          archived: false,
+          fork: true,
+          topics: [],
+          authentication: 'app' as const,
+          owner: { login: 'wolfstar-project', type: 'User' },
+        },
+      ],
+      [{ github: 'wolfstar-project/skills', checkout: '/home/wolfstar/pkg/skills' }],
+      [],
+      ['wolfstar-project'],
+    )
+
+    expect(mappings).toEqual([])
+  })
+
   it('admits one repository without admitting its owner', () => {
     const allowed = ['wolfstar-project', 'nuxt/scripts']
 
@@ -169,6 +197,7 @@ describe('repository discovery', () => {
       github: `nuxt/${name}`,
       defaultBranch: 'main',
       archived: false,
+      fork: false,
       topics: [],
       authentication: 'user',
       owner: { login: 'nuxt', type: 'Organization' },
@@ -197,6 +226,7 @@ describe('repository discovery', () => {
           github: 'nuxt/scripts',
           defaultBranch: 'main',
           archived: false,
+          fork: false,
           topics: [],
           authentication: 'user' as const,
           owner: { login: 'nuxt', type: 'Organization' },
@@ -229,6 +259,7 @@ describe('repository discovery', () => {
           github: 'wolfstar-project/example',
           defaultBranch: 'main',
           archived: false,
+          fork: false,
           topics: [],
           authentication: 'app' as const,
           owner: { login: 'wolfstar-project', type: 'User' },
@@ -255,6 +286,7 @@ describe('repository discovery', () => {
           github: 'wolfstar-project/example',
           defaultBranch: 'main',
           archived: true,
+          fork: false,
           topics: [],
           authentication: 'app' as const,
           owner: { login: 'wolfstar-project', type: 'User' },
@@ -275,6 +307,7 @@ describe('repository discovery', () => {
           github: 'wolfstar-project/example',
           defaultBranch: 'main',
           archived: false,
+          fork: false,
           topics: [],
           authentication: 'app' as const,
           owner: { login: 'wolfstar-project', type: 'User' },

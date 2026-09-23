@@ -36,7 +36,7 @@ import {
   providerCapacityPresentation,
   queuedEntries,
   queueWork,
-  repositoryState,
+  repositoryName,
   repositoryWritesControl,
   reviewOutcomeDetail,
   reviewOutcomeLabel,
@@ -46,17 +46,21 @@ import {
   routineTrackingUrl,
   runningPhaseLine,
   scheduledRoutineRecords,
+  shortAge,
   stalledLabel,
   systemState,
   taskHistoryCategory,
   taskKindLabel,
   taskProgressDetail,
+  taskRowSummary,
   taskStateTone,
   taskSubjectUrl,
   waitingEntries,
 } from '../dashboard/app/utils/dashboard.ts'
+import { queueRecommendation } from '../dashboard/app/utils/recommendation.ts'
+import { batchRow } from '../dashboard/app/utils/system.ts'
 import { OPENCODE_AGENT_PROFILE } from '../src/agent-profile.ts'
-import { dashboardSnapshot } from './fixtures.ts'
+import { dashboardSnapshot, pullRequestItem } from './fixtures.ts'
 
 const now = new Date('2026-08-14T12:00:00.000Z')
 
@@ -146,6 +150,7 @@ function queueEntry(overrides: Partial<QueueEntry> = {}): QueueEntry {
 function reviewAgent(overrides: Partial<ReviewAgent> = {}): ReviewAgent {
   return {
     _tag: 'ReviewAgent',
+    baseRef: 'main',
     role: 'adversarial_review',
     id: 'attempt-1',
     repository: 'wolfstar-project/nuxt-seo',
@@ -174,6 +179,7 @@ function reviewAgent(overrides: Partial<ReviewAgent> = {}): ReviewAgent {
     findings: [],
     usage: { _tag: 'Unavailable' },
     feedback: null,
+    gatePublication: { _tag: 'Unpublished' as const },
     publications: [],
     ...overrides,
   } as ReviewAgent
@@ -272,6 +278,31 @@ describe('history outcome visibility', () => {
     expect(taskHistoryCategory(superseded)).toBe('superseded')
   })
 
+  it('summarises a clean merge as a sentence instead of the stored JSON', () => {
+    const merged = {
+      ...reviewTask,
+      state: {
+        _tag: 'Completed' as const,
+        evidence:
+          '{"_tag":"CleanMerge","headSha":"1f382edd47adec4c948b7e35211eaf7ca9d49946","baseSha":"1c281437935152622615e4f5e1a2b3c4d5e6f708","baseRef":"main"}',
+      },
+    }
+
+    expect(taskRowSummary(merged)).toBe('Merged main cleanly at 1c28143.')
+  })
+
+  it('shortens a published commit to seven characters and hides JSON it cannot read', () => {
+    const published = {
+      ...reviewTask,
+      state: { _tag: 'Completed' as const, evidence: 'Published 6f208efa6d2e70bc8ffe88bb581b9d7ce4625aa5.' },
+    }
+    const findings = { ...reviewTask, state: { _tag: 'Completed' as const, evidence: '{"findings":[],"checks":[]}' } }
+
+    expect(taskRowSummary(published)).toBe('Published 6f208ef.')
+    expect(taskRowSummary(findings)).toBeUndefined()
+    expect(taskRowSummary({ ...reviewTask, state: { _tag: 'Queued' } })).toBeUndefined()
+  })
+
   it('shows the last phase without presenting it as completion progress', () => {
     const failed = {
       ...triageTask,
@@ -279,6 +310,23 @@ describe('history outcome visibility', () => {
     }
 
     expect(taskProgressDetail(failed)).toBe('Last phase: Running tests and checks')
+  })
+})
+
+describe('repositoryName', () => {
+  it('drops the owner and keeps a name that has no owner', () => {
+    expect(repositoryName('harlan-zw/nuxt-seo')).toBe('nuxt-seo')
+    expect(repositoryName('nuxt-seo')).toBe('nuxt-seo')
+  })
+})
+
+describe('shortAge', () => {
+  it('picks the largest whole unit a dense row can afford', () => {
+    const now = new Date('2026-08-28T12:00:00.000Z')
+    expect(shortAge('2026-08-28T11:59:30.000Z', now)).toBe('now')
+    expect(shortAge('2026-08-28T11:54:00.000Z', now)).toBe('6m')
+    expect(shortAge('2026-08-28T09:10:00.000Z', now)).toBe('2h')
+    expect(shortAge('2026-08-25T12:00:00.000Z', now)).toBe('3d')
   })
 })
 
@@ -357,6 +405,197 @@ describe('queueWork', () => {
   })
 })
 
+describe('queueRecommendation', () => {
+  const blocked = queueEntry({ state: { _tag: 'ActionRequired', reason: 'Work needs a decision.' } })
+  const triage = (_tag: string): Extract<DashboardTask, { kind: 'issue_triage' }> => ({
+    ...triageTask,
+    repository: blocked.repository,
+    issueNumber: blocked.number,
+    revisionId: blocked.revisionId,
+    state: {
+      _tag: 'Completed',
+      evidence: JSON.stringify({
+        _tag,
+        difficulty: 2,
+        impact: 4,
+        hasReproduction: true,
+        needsCodebaseReview: false,
+        summary: 'Choose the change.',
+        nextAction: 'Read the logs.\nRecord the decision.',
+        relatedIssues: [],
+      }),
+    },
+  })
+
+  it.each([
+    ['READY_TO_SPEC', 'Write a short spec choosing a cache mechanism.', 'Agent'],
+    ['READY_TO_SPEC', 'Wolfstar picks option 1 versus option 2.', 'You'],
+    ['NEEDS_INFO', 'In Sentry, check each issue release and last-event timestamp.', 'Agent'],
+    ['NEEDS_INFO', 'Ask the operator for the exact 404 URL and an owner connection.', 'You'],
+    ['NEEDS_INFO', 'What URL failed?', 'You'],
+  ])('separates who acts next for %s: %s', (route, nextAction, owner) => {
+    const entry = { ...blocked, kind: 'issue' as const }
+    const task = triage(route)
+    task.state = {
+      _tag: 'Completed',
+      evidence: JSON.stringify({
+        ...JSON.parse(task.state._tag === 'Completed' ? task.state.evidence : '{}'),
+        nextAction,
+      }),
+    }
+    const snapshot = dashboardSnapshot({ queue: [entry], tasks: [task] })
+    expect(queueRecommendation(entry, snapshot)).toMatchObject({ owner })
+    const columns = boardColumns(snapshot)
+    expect(columns.needsYou.map((card) => card.key)).toEqual(owner === 'You' ? [expect.any(String)] : [])
+    expect(columns.agentTasks.map((card) => card.key)).toEqual(owner === 'Agent' ? [expect.any(String)] : [])
+  })
+
+  it('keeps agent spec tasks reachable when filtering by triage work', () => {
+    const entry = { ...blocked, kind: 'issue' as const }
+    const snapshot = dashboardSnapshot({ queue: [entry], tasks: [triage('READY_TO_SPEC')] })
+    expect(
+      boardColumns(snapshot, 'issue_triage').agentTasks.map((card) => card._tag === 'AgentTask' && card.entry.number),
+    ).toEqual([entry.number])
+  })
+
+  it('keeps an unknown blocker visible for human review', () => {
+    expect(queueRecommendation(blocked, dashboardSnapshot())).toMatchObject({ owner: 'You', label: 'View blocker' })
+  })
+
+  it('keeps implementation approval exclusive to an awaiting approval entry', () => {
+    expect(
+      queueRecommendation(queueEntry({ state: { _tag: 'AwaitingApproval', kind: 'issue_work' } }), dashboardSnapshot()),
+    ).toMatchObject({ _tag: 'Approve', label: 'Approve' })
+    expect(queueRecommendation(blocked, dashboardSnapshot())).toMatchObject({ _tag: 'Inspect', label: 'View blocker' })
+    expect(queueRecommendation(queueEntry(), dashboardSnapshot())).toBeUndefined()
+  })
+
+  it.each([
+    ['READY_TO_SPEC', 'Open spec task'],
+    ['NEEDS_INFO', 'Open investigation'],
+  ])('turns %s into a copyable task', (_tag, label) => {
+    const result = queueRecommendation({ ...blocked, kind: 'issue' }, dashboardSnapshot({ tasks: [triage(_tag)] }))
+    expect(result).toMatchObject({ _tag: 'Inspect', label, instructions: 'Read the logs.\nRecord the decision.' })
+  })
+
+  it('shows the work failure instead of repeating its old triage decision', () => {
+    const result = queueRecommendation(
+      { ...blocked, kind: 'issue' },
+      dashboardSnapshot({
+        tasks: [
+          triage('READY_TO_SPEC'),
+          {
+            ...triage('READY_TO_IMPLEMENT'),
+            kind: 'issue_work',
+            state: { _tag: 'ActionRequired', reason: 'Deployment could not be verified.' },
+          },
+        ],
+      }),
+    )
+    expect(result).toMatchObject({
+      _tag: 'Inspect',
+      label: 'Open recovery task',
+      instructions: 'Deployment could not be verified.',
+    })
+  })
+
+  it('shows checks when the newest review has repaired the old finding', () => {
+    const older = reviewAgent({
+      completedAt: '2026-08-14T11:00:00.000Z',
+      findings: [{ _tag: 'Open', resolution: 'Dismissal', summary: 'Old premise.', nextAction: 'Dismiss this.' }],
+    })
+    const newer = reviewAgent({
+      gates: { ...older.gates, ci: { _tag: 'Failed', reason: 'test failed.', evidence: [] } },
+    })
+    expect(queueRecommendation(blocked, dashboardSnapshot({ agents: [older, newer] }))).toMatchObject({
+      _tag: 'OpenGitHub',
+      label: 'View checks',
+      url: `${blocked.subjectUrl}/checks`,
+    })
+  })
+
+  it.each(['ReviewRequired', 'NotRequired'] as const)(
+    'opens a conflicting pull request with %s without granting approval',
+    (approval) => {
+      const item = {
+        ...pullRequestItem({ repository: blocked.repository, number: blocked.number, mergeState: 'conflicting' }),
+        revisionId: blocked.revisionId,
+        observedAt: blocked.updatedAt,
+        dismissed: false,
+        approval: { _tag: approval },
+      }
+      expect(queueRecommendation(blocked, dashboardSnapshot({ items: [item] }))).toMatchObject(
+        approval === 'ReviewRequired'
+          ? { _tag: 'OpenGitHub', label: 'Approve on GitHub', url: blocked.subjectUrl }
+          : { _tag: 'Inspect', label: 'View access steps' },
+      )
+      expect(
+        queueRecommendation(blocked, dashboardSnapshot({ items: [{ ...item, revisionId: 'old' }] })),
+      ).toMatchObject({ _tag: 'Inspect', label: 'View blocker' })
+    },
+  )
+
+  it('recommends Dismiss only from a current open Dismissal finding', () => {
+    const review = reviewAgent({
+      findings: [
+        { _tag: 'Open', resolution: 'Dismissal', summary: 'Wrong premise.', nextAction: 'Close this approach.' },
+      ],
+    })
+    expect(queueRecommendation(blocked, dashboardSnapshot({ agents: [review] }))).toMatchObject({
+      _tag: 'Dismiss',
+      label: 'Dismiss',
+    })
+    expect(
+      queueRecommendation(blocked, dashboardSnapshot({ agents: [{ ...review, revisionId: 'old' }] })),
+    ).toMatchObject({ _tag: 'Inspect', label: 'View blocker' })
+  })
+
+  it('carries every open repair into the task instructions', () => {
+    const result = queueRecommendation(
+      blocked,
+      dashboardSnapshot({
+        agents: [
+          reviewAgent({
+            findings: [
+              {
+                _tag: 'Open',
+                resolution: 'Repair',
+                summary: 'Shared state is stale.',
+                nextAction: 'Wrap every consumer.',
+              },
+              {
+                _tag: 'Open',
+                resolution: 'Repair',
+                summary: 'Save reports a false failure.',
+                nextAction: 'Catch the refresh separately.',
+              },
+            ],
+          }),
+        ],
+      }),
+    )
+    expect(result).toMatchObject({
+      _tag: 'Inspect',
+      label: 'Open repair task',
+      instructions: expect.stringContaining('Wrap every consumer.'),
+    })
+    expect(result).toMatchObject({ instructions: expect.stringContaining('Catch the refresh separately.') })
+  })
+
+  it('uses safe details when triage evidence is malformed or belongs to an older issue state', () => {
+    const entry = { ...blocked, kind: 'issue' as const }
+    expect(
+      queueRecommendation(entry, dashboardSnapshot({ tasks: [{ ...triage('READY_TO_SPEC'), revisionId: 'old' }] })),
+    ).toMatchObject({ _tag: 'Inspect', label: 'View blocker' })
+    expect(
+      queueRecommendation(
+        entry,
+        dashboardSnapshot({ tasks: [{ ...triage('READY_TO_SPEC'), state: { _tag: 'Completed', evidence: '{' } }] }),
+      ),
+    ).toMatchObject({ _tag: 'Inspect', label: 'View blocker' })
+  })
+})
+
 describe('decisionEntries', () => {
   it('collects approvals and failures only', () => {
     const entries = [
@@ -421,6 +660,16 @@ describe('cardStateLine', () => {
     expect(cardStateLine(entry, available, now).text).toBe('Outside contributor. Approval starts Issue work.')
   })
 
+  it('names Issue triage for an outside issue that has not been read yet', () => {
+    const entry = queueEntry({ kind: 'issue', state: { _tag: 'AwaitingApproval', kind: 'issue_triage' } })
+    expect(cardStateLine(entry, available, now).text).toBe('Outside contributor. Approval starts Issue triage.')
+    expect(approvalActionLabel(entry)).toBe('Approve')
+    expect(approvalConsequence(entry)).toBe(
+      'The agent reads the issue. If it is ready to implement, the agent implements it and the controller opens a draft pull request.',
+    )
+    expect(queueWork(entry)).toBe('issue_triage')
+  })
+
   it('passes the reason through for Action required and Pending, with the right tone', () => {
     expect(
       cardStateLine(
@@ -432,6 +681,13 @@ describe('cardStateLine', () => {
     expect(
       cardStateLine(queueEntry({ state: { _tag: 'Pending', reason: 'Blocked on a draft.' } }), available, now),
     ).toEqual({ text: 'Blocked on a draft.', tone: 'muted' })
+  })
+
+  it('names the wait when a Pending reason arrives empty', () => {
+    expect(cardStateLine(queueEntry({ state: { _tag: 'Pending', reason: '' } }), available, now)).toEqual({
+      text: 'Waiting on GitHub.',
+      tone: 'muted',
+    })
   })
 
   it.each([
@@ -789,50 +1045,6 @@ describe('task presentation', () => {
   })
 })
 
-describe('repositoryState', () => {
-  it('ranks an error above a missing first poll', () => {
-    expect(
-      repositoryState({
-        github: 'a/b',
-        enabled: true,
-        writesEnabled: true,
-        ownership: 'owned',
-        paused: false,
-        lastAttemptAt: null,
-        lastSuccessAt: '2026-08-14T11:00:00.000Z',
-        lastError: 'boom',
-        subjectCount: 0,
-      }).tone,
-    ).toBe('error')
-    expect(
-      repositoryState({
-        github: 'a/b',
-        enabled: true,
-        writesEnabled: true,
-        ownership: 'owned',
-        paused: false,
-        lastAttemptAt: null,
-        lastSuccessAt: null,
-        lastError: null,
-        subjectCount: 0,
-      }).tone,
-    ).toBe('warning')
-    expect(
-      repositoryState({
-        github: 'a/b',
-        enabled: true,
-        writesEnabled: true,
-        ownership: 'owned',
-        paused: false,
-        lastAttemptAt: null,
-        lastSuccessAt: '2026-08-14T11:00:00.000Z',
-        lastError: null,
-        subjectCount: 0,
-      }).tone,
-    ).toBe('success')
-  })
-})
-
 function incident(overrides: Partial<Incident> = {}): Incident {
   return {
     id: 'incident-1',
@@ -1110,5 +1322,57 @@ describe('repositoryWritesControl', () => {
       _tag: 'Adjustable',
       writesEnabled: false,
     })
+  })
+})
+
+describe('batchRow', () => {
+  it('names a planning Batch by its reserved issues and a planned one by its units and stack', () => {
+    const planning = batchRow({
+      id: 'batch-1',
+      repository: 'wolfstar-project/example',
+      state: { _tag: 'Running', workerId: 'w', fence: 1, leaseExpiresAt: '2026-09-04T02:00:00.000Z' },
+      issues: [
+        { taskId: 't1', issueNumber: 101, title: 'A', body: '', triageSummary: null, relatedIssues: [], target: null },
+        { taskId: 't2', issueNumber: 102, title: 'B', body: '', triageSummary: null, relatedIssues: [], target: null },
+      ],
+      units: null,
+      createdAt: '2026-09-04T01:00:00.000Z',
+      updatedAt: '2026-09-04T01:00:00.000Z',
+    })
+    expect(planning).toEqual(expect.objectContaining({ label: 'Planning', issues: '#101, #102', units: [] }))
+
+    const planned = batchRow({
+      id: 'batch-1',
+      repository: 'wolfstar-project/example',
+      state: { _tag: 'Running', workerId: 'w', fence: 1, leaseExpiresAt: '2026-09-04T02:00:00.000Z' },
+      issues: [],
+      units: [
+        {
+          id: 'u0',
+          position: 0,
+          primaryTaskId: 't1',
+          issueNumbers: [101, 102],
+          dependsOnUnitId: null,
+          rationale: 'Same helper.',
+          state: { _tag: 'Published', pullRequestNumber: 7, headRef: 'fix/issue-101', headSha: 'c1' },
+        },
+        {
+          id: 'u1',
+          position: 1,
+          primaryTaskId: 't3',
+          issueNumbers: [103],
+          dependsOnUnitId: 'u0',
+          rationale: 'Needs the helper.',
+          state: { _tag: 'Running' },
+        },
+      ],
+      createdAt: '2026-09-04T01:00:00.000Z',
+      updatedAt: '2026-09-04T01:00:00.000Z',
+    })
+    expect(planned.label).toBe('Running')
+    expect(planned.units.map((unit) => [unit.issues, unit.label, unit.stack, unit.pullRequestNumber])).toEqual([
+      ['#101, #102', 'Opened #7', null, 7],
+      ['#103', 'Running', 'on #7', null],
+    ])
   })
 })

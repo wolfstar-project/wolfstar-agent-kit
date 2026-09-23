@@ -127,6 +127,7 @@ describe('selection mode approval controller', () => {
   ) {
     return createApprovalController({
       github: {
+        clearAgentLabels: () => Promise.resolve(ok(undefined)),
         consumeApprovalLabel: () => {
           calls.push('consume')
           return Promise.resolve(ok(undefined))
@@ -142,10 +143,11 @@ describe('selection mode approval controller', () => {
       },
       now: () => new Date('2026-08-13T01:00:00.000Z'),
       store: {
-        approveIssueWork: () => {
+        approveIssue: () => {
           throw new Error('Unexpected issue Approval.')
         },
-        isIssueWorkApprovalReady: () => false,
+        isIssueApprovalPending: () => false,
+        hasApprovalPromptComment: () => false,
         recordApprovalPromptComment: () => true,
         getSelectionMode: () => mode,
         hasPullRequestApproval: () => false,
@@ -203,9 +205,11 @@ describe('selection mode route', () => {
       dashboardRoot: join(import.meta.dirname, 'fixtures', 'dashboard'),
       now: () => new Date('2026-08-13T01:00:00.000Z'),
       store: {
-        approveIssueWork: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
+        approveIssue: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         approvePullRequest: () => ({ _tag: 'Rejected', reason: { _tag: 'RevisionMismatch' } }),
         cancelTask: () => ({ _tag: 'Rejected', reason: { _tag: 'TaskNotFound' } }),
+        listRoutines: () => [],
+        openRoutineRun: () => null,
         getDashboardSnapshot: () => dashboardSnapshot(),
         getStats: () => {
           throw new Error('Unexpected Stats request.')
@@ -214,7 +218,13 @@ describe('selection mode route', () => {
         listWorkflowEvents: () => [],
         pauseAgents: (at: string) => ({ _tag: 'Paused' as const, pausedAt: at }),
         recordAgentFeedback: () => ({ _tag: 'Rejected', reason: { _tag: 'ReviewRunNotFound' } }),
-        requestRestart: (input) => ({ _tag: 'Requested', id: input.id, source: input.source, requestedAt: input.at }),
+        requestRestart: (input) => ({
+          _tag: 'Requested',
+          id: input.id,
+          source: input.source,
+          operation: input.operation,
+          requestedAt: input.at,
+        }),
         requestReviewRerun: () => ({ _tag: 'Rejected', reason: { _tag: 'ItemNotFound' } }),
         resumeAgents: () => ({ _tag: 'Running' as const }),
         selectAgent: (selection) => selection,

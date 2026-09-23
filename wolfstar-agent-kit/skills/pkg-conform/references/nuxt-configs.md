@@ -84,6 +84,10 @@ export default defineConfig({
 Use the shared `.oxlintrc.json` and `.oxfmtrc.json` templates from `configs.md`.
 Add `CLAUDE.md`, `test/fixtures/**`, and `playground/**` to their ignore lists when generated artifacts should not be checked.
 
+Never add `AGENTS.md` to `ignores`. A global ignore beats the prompt config's
+`files`, so one line there turns off every rule in
+[root-docs.md](../../../references/root-docs.md).
+
 ## build.config.ts
 
 ```ts
