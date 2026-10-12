@@ -73,6 +73,53 @@ function projectWithRecordingEslint(): { directory: string; log: string } {
 }
 
 describe('tool.execute.before', () => {
+  it.each([
+    'WOLFSTAR_AGENT_GITHUB_PRIVATE=owner/private gh run watch 123 --repo owner/private',
+    'WOLFSTAR_AGENT_GITHUB_PRIVATE=owner/private gh -R owner/private run watch 123 -i 3',
+    'WOLFSTAR_AGENT_GITHUB_PRIVATE=owner/private gh pr checks 1 --watch --repo owner/private',
+  ])('blocks rapid private CI watches: %s', async (command) => {
+    await expect(runShellHook(command)).rejects.toThrow(/60/)
+  })
+
+  it.each([
+    'gh api repos/owner/public/issues',
+    'gh api "repos/owner/public/issues"',
+    '"/usr/bin/gh" api repos/owner/public/issues',
+    "bash -c 'gh api repos/owner/public/issues'",
+    'for number in 1 2; do gh pr view "$number" --repo owner/public; done',
+    '/usr/bin/gh api repos/owner/public/issues',
+    'gh pr view 1 --repo owner/public',
+    'env FOO=1 timeout 30 gh run list --repo owner/public',
+    'env -u GH_TOKEN /usr/bin/gh api repos/owner/public/issues',
+    'gh pr view 1 --repo owner/private WOLFSTAR_AGENT_GITHUB_PRIVATE=owner/private',
+    'WOLFSTAR_AGENT_GITHUB_PRIVATE=owner/private gh pr view 1 --repo owner/private; gh api repos/owner/public/issues',
+    'WOLFSTAR_AGENT_GITHUB_PRIVATE=owner/private gh pr view 1 --repo owner/public',
+    'WOLFSTAR_AGENT_GITHUB_PRIVATE=owner/private gh pr view 1 --repo owner/private --repo owner/public',
+    'WOLFSTAR_AGENT_GITHUB_PRIVATE=owner/private gh api repos/owner/public -f api repos/owner/private/issues',
+    'gh api graphql -f query=query',
+  ])('routes GitHub reads through the public CLI: %s', async (command) => {
+    await expect(runShellHook(command)).rejects.toThrow(/agent-gh/)
+  })
+
+  it.each([
+    'agent-gh api repos/owner/public/issues',
+    'WOLFSTAR_AGENT_GITHUB_PRIVATE=owner/private gh pr view 1 --repo owner/private',
+    'WOLFSTAR_AGENT_GITHUB_PRIVATE=owner/private gh api repos/owner/private/actions/runs',
+    'WOLFSTAR_AGENT_GITHUB_PRIVATE=owner/private gh api /repos/owner/private/actions/runs',
+    'WOLFSTAR_AGENT_GITHUB_PRIVATE=owner/private gh pr view 1 --repo=owner/private',
+    'WOLFSTAR_AGENT_GITHUB_PRIVATE=owner/private gh pr view 1 --repo "owner/private"',
+    'WOLFSTAR_AGENT_GITHUB_PRIVATE=owner/private gh -R owner/private run watch 123 --interval 60',
+    'WOLFSTAR_AGENT_GITHUB_PRIVATE=owner/private gh pr checks 1 --watch --repo owner/private --interval 60',
+    'gh api user --jq .login',
+    'gh auth status',
+    'gh api repos/owner/public/issues/1 -X PATCH --input body.json',
+    'printf "gh api repos/owner/public/issues"',
+    'printf "example; gh api repos/owner/public/issues"',
+    "cat <<'EOF'\ngh api repos/owner/public/issues\nEOF",
+  ])('preserves deliberate GitHub access and command examples: %s', async (command) => {
+    await expect(runShellHook(command)).resolves.toBe(command)
+  })
+
   it('rewrites npm to pnpm', async () => {
     await expect(runShellHook('npm install --frozen-lockfile')).resolves.toBe('pnpm install --frozen-lockfile')
   })
