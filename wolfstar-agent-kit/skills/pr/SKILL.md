@@ -126,7 +126,7 @@ Resolves #NUMBER
 
 <!-- why this is needed, then 1 to 2 sentences on what changed -->
 
-> 🤖 AI disclosure: [Wolfstar Agent Kit](https://github.com/wolfstar-project/wolfstar-agent-kit) modified this description. [My AI open-source policy](https://harlanzw.com/blog/ai-in-open-source).
+> 🤖 AI disclosure: [Wolfstar Agent Kit](https://github.com/wolfstar-project/wolfstar-agent-kit) modified this description. [AI open source policy](https://harlanzw.com/blog/ai-in-open-source).
 ```
 
 Reproduce that block character for character, including every emoji. Do not restyle it per repo.

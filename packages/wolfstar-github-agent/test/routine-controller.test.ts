@@ -425,7 +425,7 @@ describe('routines of a repository with no Repository mapping', () => {
 
       const outcome = retireUnmappedRoutines({
         repositories: [],
-        unresolved: ['Wolfstar-ZW/Example'],
+        unresolved: ['Wolfstar-Project/Example'],
         now: at('2026-08-28T00:00:00.000Z'),
         store,
       })
@@ -448,7 +448,7 @@ describe('routines of a repository with no Repository mapping', () => {
       await seedQueuedRun(store)
 
       const outcome = retireUnmappedRoutines({
-        repositories: [repositoryMapping({ github: 'Wolfstar-ZW/Example' })],
+        repositories: [repositoryMapping({ github: 'Wolfstar-Project/Example' })],
         unresolved: [],
         now: at('2026-08-28T00:00:00.000Z'),
         store,

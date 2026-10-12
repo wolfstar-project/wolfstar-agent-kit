@@ -479,7 +479,7 @@ export function createPackageReleaseSource(options: {
         .replace(/^- \[ \] 🧹 Chore$/m, '- [x] 🧹 Chore')
         .replace(/^> 🤖 AI disclosure:.*$/gm, '')
         .trimEnd()
-      const body = `${template}\n\n${description}\n\n> 🤖 AI disclosure: [Wolfstar Agent Kit](https://github.com/wolfstar-project/wolfstar-agent-kit) modified this description. [My AI open-source policy](https://harlanzw.com/blog/ai-in-open-source).`
+      const body = `${template}\n\n${description}\n\n> 🤖 AI disclosure: [Wolfstar Agent Kit](https://github.com/wolfstar-project/wolfstar-agent-kit) modified this description. [AI open source policy](https://harlanzw.com/blog/ai-in-open-source).`
       const writer = await client('item_write')
       const existing = (
         await writer.rest.pulls.list({

@@ -313,7 +313,7 @@ export function createRepairRecoveryController(options: {
                 taskKind: 'review_fix' as const,
                 pullRequestNumber: task.pullRequestNumber,
                 pullRequestTitle: `fix: recover selected finding from #${task.pullRequestNumber}`,
-                pullRequestBody: `Repairs the selected Review finding from #${task.pullRequestNumber}.\n\n${target.value.report.summary}\n\n> 🤖 AI disclosure: [Wolfstar Agent Kit](https://github.com/wolfstar-project/wolfstar-agent-kit) modified this description. [My AI open-source policy](https://harlanzw.com/blog/ai-in-open-source).`,
+                pullRequestBody: `Repairs the selected Review finding from #${task.pullRequestNumber}.\n\n${target.value.report.summary}\n\n> 🤖 AI disclosure: [Wolfstar Agent Kit](https://github.com/wolfstar-project/wolfstar-agent-kit) modified this description. [AI open source policy](https://harlanzw.com/blog/ai-in-open-source).`,
                 commitSha: recovered.value.commitSha,
                 baseSha: recovered.value.baseSha,
                 baseRef: task.repositoryMapping.defaultBranch,
