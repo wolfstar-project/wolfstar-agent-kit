@@ -3,23 +3,9 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 export const pins = {
-  web: {
-    repository: 'coder/ghostty-web',
-    commit: '1858a5947767a3e1c9e98dbf53b2ff87fedb2aab',
-    archive: 'ghostty-web.tar.gz',
-    sha256: 'bfa2a5b2ee5a1941a00dd93ba30c2ea3031286e519e588f1661e5a9fc8f8359b',
-  },
-  native: {
-    repository: 'ghostty-org/ghostty',
-    commit: '5714ed07a1012573261b7b7e3ed2add9c1504496',
-    archive: 'ghostty.tar.gz',
-    sha256: 'fabdc07412f5fb39835c875c1d07b5d41b724d84364bd5aff70e5fceda5c5f95',
-  },
-  zig: {
-    version: '0.15.2',
-    archive: 'zig.tar.xz',
-    sha256: '02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239',
-  },
+  web: { repository: 'coder/ghostty-web', commit: '1858a5947767a3e1c9e98dbf53b2ff87fedb2aab', archive: 'ghostty-web.tar.gz', sha256: 'bfa2a5b2ee5a1941a00dd93ba30c2ea3031286e519e588f1661e5a9fc8f8359b' },
+  native: { repository: 'ghostty-org/ghostty', commit: '5714ed07a1012573261b7b7e3ed2add9c1504496', archive: 'ghostty.tar.gz', sha256: 'fabdc07412f5fb39835c875c1d07b5d41b724d84364bd5aff70e5fceda5c5f95' },
+  zig: { version: '0.15.2', archive: 'zig.tar.xz', sha256: '02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239' },
   declarations: { package: 'ghostty-web', version: '0.4.0' },
   bundler: { package: 'esbuild', version: '0.28.2' },
 }
@@ -36,17 +22,8 @@ export function digest(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex')
 }
 export function provenance(packageRoot: string) {
-  const sources = Object.fromEntries(
-    [
-      'patches/native.patch',
-      'patches/wrapper.patch',
-      'scripts/build.ts',
-      'scripts/verify.ts',
-      'scripts/provenance.ts',
-      'LICENSE.ghostty',
-      'LICENSE.ghostty-web',
-    ].map((file) => [file, digest(resolve(packageRoot, file))]),
-  )
+  const sources = Object.fromEntries(['patches/native.patch', 'patches/wrapper.patch', 'scripts/build.ts', 'scripts/verify.ts', 'scripts/provenance.ts', 'LICENSE.ghostty', 'LICENSE.ghostty-web']
+    .map(file => [file, digest(resolve(packageRoot, file))]))
   return { pins, sources, files: artifactDigests }
 }
 
@@ -55,10 +32,9 @@ export function verifyArtifacts(packageRoot: string): void {
   const directory = resolve(packageRoot, '.generated')
   const manifest: unknown = JSON.parse(readFileSync(resolve(directory, 'build-manifest.json'), 'utf8'))
   if (JSON.stringify(manifest) !== JSON.stringify(provenance(packageRoot)))
-    throw new Error(
-      'Ghostty provenance differs from pinned sources. Run build:source after reviewing the source changes.',
-    )
+    throw new Error('Ghostty provenance differs from pinned sources. Run build:source after reviewing the source changes.')
   for (const [file, expected] of Object.entries(artifactDigests)) {
-    if (digest(resolve(directory, file)) !== expected) throw new Error(`Ghostty artifact checksum mismatch: ${file}`)
+    if (digest(resolve(directory, file)) !== expected)
+      throw new Error(`Ghostty artifact checksum mismatch: ${file}`)
   }
 }
