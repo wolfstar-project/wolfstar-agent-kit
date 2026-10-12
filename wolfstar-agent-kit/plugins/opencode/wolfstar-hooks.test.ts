@@ -61,12 +61,12 @@ async function runShellHook(command: string): Promise<string> {
   return args.command
 }
 
-/** Builds a project whose local eslint records the arguments it received. */
-function projectWithRecordingEslint(): { directory: string; log: string } {
+/** Builds a project whose local oxlint records the arguments it received. */
+function projectWithRecordingOxlint(): { directory: string; log: string } {
   const directory = mkdtempSync(join(tmpdir(), 'wolfstar-hooks-project-'))
-  const log = join(directory, 'eslint.log')
+  const log = join(directory, 'oxlint.log')
   mkdirSync(join(directory, 'node_modules', '.bin'), { recursive: true })
-  const binary = join(directory, 'node_modules', '.bin', 'eslint')
+  const binary = join(directory, 'node_modules', '.bin', 'oxlint')
   writeFileSync(binary, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> '${log}'\n`)
   chmodSync(binary, 0o755)
   return { directory, log }
@@ -178,7 +178,7 @@ describe('tool.execute.before', () => {
 
 describe('tool.execute.after', () => {
   it('lints the written file', async () => {
-    const project = projectWithRecordingEslint()
+    const project = projectWithRecordingOxlint()
     const plugin = await loadPlugin(project.directory)
     await plugin['tool.execute.after']({ tool: 'write', args: { filePath: 'src/index.ts' } })
     expect(readFileSync(project.log, 'utf8')).toMatch(/src\/index\.ts --fix/)
@@ -186,7 +186,7 @@ describe('tool.execute.after', () => {
   })
 
   it('ignores a tool that wrote no file', async () => {
-    const project = projectWithRecordingEslint()
+    const project = projectWithRecordingOxlint()
     const plugin = await loadPlugin(project.directory)
     await plugin['tool.execute.after']({ tool: 'bash', args: { command: 'ls' } })
     expect(() => readFileSync(project.log, 'utf8')).toThrow()
