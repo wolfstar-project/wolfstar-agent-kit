@@ -21,7 +21,9 @@ describe('defaultAgentContextPaths', () => {
     expect(paths.claudeHome).toBe('/agent-home/.claude')
     expect(paths.instructionsPath).toBe('/agent-home/AGENTS.md')
     expect(paths.skillsRoot).toBe('/service/wolfstar-agent-kit/skills')
-    expect(paths.requiredSkillDirectories).toEqual([])
+    expect(paths.requiredSkillDirectories).toContain(
+      '/agent-home/.local/share/wolfstar-agent-kit/skilld/skills/im-part-human',
+    )
   })
 })
 
@@ -32,7 +34,7 @@ describe('loadAgentContext', () => {
       claudeHome: root,
       instructionsPath: join(root, 'AGENTS.md'),
       skillsRoot: join(root, 'personal'),
-      requiredSkillDirectories: [join(root, 'portable/portable-skill')],
+      requiredSkillDirectories: [join(root, 'portable/im-part-human')],
     }
     try {
       await writeFile(paths.instructionsPath, '# Instructions\n')
@@ -40,7 +42,7 @@ describe('loadAgentContext', () => {
       await writeFile(join(paths.skillsRoot, 'pr/SKILL.md'), 'Personal PR policy.\n')
       await expect(loadAgentContext(paths)).resolves.toMatchObject({
         _tag: 'Err',
-        error: expect.stringContaining('portable-skill'),
+        error: expect.stringContaining('im-part-human'),
       })
       await mkdir(paths.requiredSkillDirectories[0]!, { recursive: true })
       await writeFile(join(paths.requiredSkillDirectories[0]!, 'SKILL.md'), 'Portable writing.\n')
@@ -50,12 +52,12 @@ describe('loadAgentContext', () => {
       const environment = opencodeAgentEnvironment({ context: result.value, environment: {} })
       expect(environment._tag).toBe('Ok')
       if (environment._tag === 'Err') return
-      expect(JSON.parse(environment.value.OPENCODE_CONFIG_CONTENT!).skills.paths).toEqual([
+      expect(JSON.parse(environment.value.OPENCODE_CONFIG_CONTENT!).skills).toEqual([
         join(paths.skillsRoot, 'pr'),
         ...paths.requiredSkillDirectories,
       ])
-      await mkdir(join(paths.skillsRoot, 'portable-skill'), { recursive: true })
-      await writeFile(join(paths.skillsRoot, 'portable-skill/SKILL.md'), 'Duplicate.\n')
+      await mkdir(join(paths.skillsRoot, 'im-part-human'), { recursive: true })
+      await writeFile(join(paths.skillsRoot, 'im-part-human/SKILL.md'), 'Duplicate.\n')
       await expect(loadAgentContext(paths)).resolves.toMatchObject({
         _tag: 'Err',
         error: expect.stringContaining('Duplicate Skill'),
@@ -148,7 +150,7 @@ describe('opencodeAgentEnvironment', () => {
         OPENCODE_CONFIG_CONTENT: JSON.stringify({
           instructions: ['/repo/CONTRIBUTING.md'],
           share: 'disabled',
-          skills: { paths: ['/custom/skill'], urls: ['https://example.com/skills/'] },
+          skills: ['/custom/skill', 'https://example.com/skills/'],
         }),
       },
     })
@@ -159,10 +161,7 @@ describe('opencodeAgentEnvironment', () => {
     expect(JSON.parse(result.value.OPENCODE_CONFIG_CONTENT ?? '')).toEqual({
       instructions: ['/repo/CONTRIBUTING.md', '/home/wolfstar/.codex/AGENTS.md'],
       share: 'disabled',
-      skills: {
-        paths: ['/custom/skill', '/kit/skills/pr', '/kit/skills/unit-tests'],
-        urls: ['https://example.com/skills/'],
-      },
+      skills: ['/custom/skill', 'https://example.com/skills/', '/kit/skills/pr', '/kit/skills/unit-tests'],
     })
   })
 
@@ -345,7 +344,7 @@ describe('opencodeTurnEnvironment', () => {
       environment: {
         OPENCODE_CONFIG_CONTENT: JSON.stringify({
           instructions: ['/home/wolfstar/.codex/AGENTS.md'],
-          skills: { paths: ['/kit/skills/pr'] },
+          skills: ['/kit/skills/pr'],
         }),
       },
       instructionPaths: ['/home/wolfstar/.claude/projects/-home-wolfstar-pkg-unhead/memory/MEMORY.md'],
@@ -358,7 +357,7 @@ describe('opencodeTurnEnvironment', () => {
         '/home/wolfstar/.codex/AGENTS.md',
         '/home/wolfstar/.claude/projects/-home-wolfstar-pkg-unhead/memory/MEMORY.md',
       ],
-      skills: { paths: ['/kit/skills/pr'] },
+      skills: ['/kit/skills/pr'],
     })
   })
 
