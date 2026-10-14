@@ -29,6 +29,7 @@ const paths = [
   '.config/git/hooks',
   '.local/share/wolfstar-agent-kit/github-bin',
   '.codex/AGENTS.md',
+  '.local/share/wolfstar-agent-kit/skilld/skills',
   '.agents/skills',
   '.local/share/wolfstar-agent-kit/hooks',
   '.local/share/wolfstar-agent-kit/.claude-plugin/plugin.json',
