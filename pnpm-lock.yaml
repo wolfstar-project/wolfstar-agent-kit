@@ -364,6 +364,9 @@ importers:
       '@iconify-json/simple-icons':
         specifier: 'catalog:'
         version: 1.2.100
+      '@internationalized/date':
+        specifier: 3.12.4
+        version: 3.12.4
       '@nuxt/fonts':
         specifier: 'catalog:'
         version: 0.14.0(aws4fetch@1.0.20)(db0@0.3.4)(esbuild@0.28.2)(ioredis@5.11.1(supports-color@10.2.2))(magic-string@1.4.3)(magicast@0.5.5)(rolldown@1.2.13)(rollup@4.63.4)(vite@8.3.4(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1))

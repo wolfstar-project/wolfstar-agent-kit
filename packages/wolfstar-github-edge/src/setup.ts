@@ -9,6 +9,8 @@
  * issues, or the dashboard password it generates.
  */
 
+import type { ProviderChanges } from './settings.ts'
+import { parseCodexPoll, pollCodexCode, requestCodexCode } from './codex-login.ts'
 import { applyProviderChanges, parseProviderChanges, settingsView, USER_AGENT } from './settings.ts'
 
 export interface GitHubAppRecord {
@@ -458,21 +460,40 @@ async function settingsApi(
   if (!allowed) return json({ error: 'Sign in to the dashboard first.' }, 401)
 
   if (request.method === 'GET' && pathname === '/setup/api/state') return json(settingsView(record, isReady(record)))
+  if (request.method !== 'POST') return json({ error: 'Not found.' }, 404)
 
-  if (request.method === 'POST' && pathname === '/setup/api/providers') {
-    if (!isSameOrigin(request)) return json({ error: 'Request origin is not allowed.' }, 403)
-    // A form post from another site cannot send this type without a preflight.
-    if (!(request.headers.get('content-type') ?? '').toLowerCase().startsWith('application/json'))
-      return json({ error: 'Send application/json.' }, 415)
-    const parsed = parseProviderChanges(await request.json().catch(() => undefined))
-    if (parsed._tag === 'Err') return json({ error: parsed.message }, 400)
+  if (!isSameOrigin(request)) return json({ error: 'Request origin is not allowed.' }, 403)
+  // A form post from another site cannot send this type without a preflight.
+  if (!(request.headers.get('content-type') ?? '').toLowerCase().startsWith('application/json'))
+    return json({ error: 'Send application/json.' }, 415)
 
-    const outcome = await applyProviderChanges(record, parsed.changes, dependencies)
+  async function save(changes: ProviderChanges): Promise<Response> {
+    const outcome = await applyProviderChanges(record, changes, dependencies)
     if (outcome._tag === 'Refused') return json({ error: outcome.message, title: outcome.title }, outcome.status)
 
     await dependencies.store.write(outcome.record)
     await dependencies.store.restart({ forgetCodexLogin: outcome.forgetCodexLogin })
     return json({ ...settingsView(outcome.record, isReady(outcome.record)), restarting: true })
+  }
+
+  if (pathname === '/setup/api/providers') {
+    const parsed = parseProviderChanges(await request.json().catch(() => undefined))
+    if (parsed._tag === 'Err') return json({ error: parsed.message }, 400)
+    return save(parsed.changes)
+  }
+
+  if (pathname === '/setup/api/codex/code') {
+    const outcome = await requestCodexCode(dependencies)
+    return outcome._tag === 'Issued' ? json(outcome.code) : json({ error: outcome.message }, 502)
+  }
+
+  if (pathname === '/setup/api/codex/token') {
+    const code = parseCodexPoll(await request.json().catch(() => undefined))
+    if (code === null) return json({ error: 'Send the code OpenAI issued.' }, 400)
+    const outcome = await pollCodexCode(dependencies, code)
+    if (outcome._tag === 'Pending') return json({ pending: true }, 202)
+    if (outcome._tag === 'Failed') return json({ error: outcome.message }, 502)
+    return save({ codexAuth: outcome.auth })
   }
 
   return json({ error: 'Not found.' }, 404)

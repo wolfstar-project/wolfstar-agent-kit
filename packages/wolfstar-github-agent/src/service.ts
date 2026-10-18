@@ -33,6 +33,7 @@ import { agentLabelItem } from './agent-label.ts'
 import { createAgentPermitPool, createRoutinePermitPools } from './agent-permit-pool.ts'
 import { AGENT_PROVIDER_NAMES, agentProfile, createAgentRuntimeSource } from './agent-profile.ts'
 import { createAgentApp } from './app.ts'
+import { createConfigurationEditor } from './config-editor.ts'
 import { createApprovalController } from './approval-controller.ts'
 import { createAutoMergeController } from './auto-merge-controller.ts'
 import { retireObsoleteBaselineRepairs } from './baseline-repair-sweep.ts'
@@ -537,6 +538,7 @@ export async function startAgentService(options: StartAgentServiceOptions): Prom
     options.config.github.allowedOwners,
     options.config.releaseDefaults,
     appActorLogin,
+    options.config.repositoryDefaults,
   )
   const validatedDiscovery = await validateRepositoryMappings({ ...options.config, repositories: discoveredMappings })
   if (validatedDiscovery._tag === 'Err')
@@ -1599,7 +1601,15 @@ export async function startAgentService(options: StartAgentServiceOptions): Prom
                     .filter((repository) => repository.enabled)
                     .map(async (repository) => ({
                       repository: repository.github,
-                      outcome: await syncRepositoryRoutines(repository, { github, store, now, signal }),
+                      outcome: await syncRepositoryRoutines(repository, {
+                        github,
+                        store,
+                        now,
+                        signal,
+                        specOverride:
+                          config.routineOverrides?.[repository.github.toLowerCase()] ??
+                          (config.routinesFromRepositories === false ? { routines: [] } : undefined),
+                      }),
                     })),
                 ),
               [],
@@ -2104,6 +2114,7 @@ export async function startAgentService(options: StartAgentServiceOptions): Prom
     return { ...current, agentStart: resolveAgentStartState(current) }
   }
   const app = createAgentApp({
+    ...(options.configPath === undefined ? {} : { configuration: createConfigurationEditor(options.configPath) }),
     ...(browserAuth ? { browserAuth } : {}),
     ...(browserAuth?.public?.bootstrapKind === 'passkey' ? { emergencyIsolation: emergencyIsolationRequest } : {}),
     pullRequestDiff: createGitHubPullRequestDiff({

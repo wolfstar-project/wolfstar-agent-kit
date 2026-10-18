@@ -1,4 +1,4 @@
-import type { SettingsAvailability, SettingsChanges, SettingsView } from '../utils/settings.ts'
+import type { CodexCode, CodexPoll, SettingsAvailability, SettingsChanges, SettingsView } from '../utils/settings.ts'
 import { createSharedComposable } from '@vueuse/core'
 import { availabilityFromError } from '../utils/settings.ts'
 
@@ -44,18 +44,23 @@ export const useSettings = createSharedComposable(() => {
     }
   }
 
+  function accept(saved: SettingsView & { restarting?: boolean }): void {
+    const { restarting: restart, ...next } = saved
+    availability.value = { _tag: 'Available', view: next }
+    restarting.value = restart === true
+  }
+
   /** Returns true when the Worker accepted the change. */
   async function save(changes: SettingsChanges): Promise<boolean> {
     saving.value = true
     saveError.value = undefined
     try {
-      const saved = await $fetch<SettingsView & { restarting?: boolean }>('/setup/api/providers', {
-        method: 'POST',
-        body: changes,
-      })
-      const { restarting: restart, ...next } = saved
-      availability.value = { _tag: 'Available', view: next }
-      restarting.value = restart === true
+      accept(
+        await $fetch<SettingsView & { restarting?: boolean }>('/setup/api/providers', {
+          method: 'POST',
+          body: changes,
+        }),
+      )
       return true
     } catch (error) {
       saveError.value = failure(error).reason
@@ -65,5 +70,29 @@ export const useSettings = createSharedComposable(() => {
     }
   }
 
-  return { availability, view, saving, saveError, restarting, load, save }
+  /** Asks the Worker for a code to sign Codex in with, as `codex login --device-auth` does. */
+  async function requestCodexCode(): Promise<CodexCode | { error: string }> {
+    try {
+      return await $fetch<CodexCode>('/setup/api/codex/code', { method: 'POST', body: {} })
+    } catch (error) {
+      return { error: failure(error).reason }
+    }
+  }
+
+  /** Asks once whether the person approved the code. The Worker saves the login when they have. */
+  async function pollCodexCode(code: CodexCode): Promise<CodexPoll> {
+    try {
+      const response = await $fetch.raw<SettingsView & { restarting?: boolean }>('/setup/api/codex/token', {
+        method: 'POST',
+        body: { deviceAuthId: code.deviceAuthId, userCode: code.userCode },
+      })
+      if (response.status === 202 || response._data === undefined) return { _tag: 'Pending' }
+      accept(response._data)
+      return { _tag: 'SignedIn' }
+    } catch (error) {
+      return { _tag: 'Failed', reason: failure(error).reason }
+    }
+  }
+
+  return { availability, view, saving, saveError, restarting, load, save, requestCodexCode, pollCodexCode }
 })

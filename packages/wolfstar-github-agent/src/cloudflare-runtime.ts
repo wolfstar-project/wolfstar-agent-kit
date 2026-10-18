@@ -17,6 +17,7 @@ import { WORKERS_AI_MODELS, WORKERS_AI_PROVIDER, workersAiBaseUrl } from './work
  * way of loading its inputs.
  */
 export interface CloudflareRuntimeInputs {
+  configuration?: Record<string, unknown>
   appId: number
   /** The slug of the App the setup page created. Its bot posts as `<slug>[bot]`. */
   appSlug: string
@@ -51,6 +52,7 @@ export interface ProviderCredentials {
 
 /** The variable names the edge Worker sets. Keep in step with `packages/wolfstar-github-edge`. */
 export const RUNTIME_VARIABLES = {
+  configuration: 'WOLFSTAR_CONFIGURATION_JSON',
   appId: 'WOLFSTAR_GITHUB_APP_ID',
   appSlug: 'WOLFSTAR_GITHUB_APP_SLUG',
   privateKey: 'WOLFSTAR_GITHUB_APP_PRIVATE_KEY',
@@ -141,8 +143,18 @@ export function readRuntimeInputs(
   if (configuredProviders(providers).length === 0)
     issues.push('No Agent provider credential is set. Add one on the setup page.')
 
+  let configuration: Record<string, unknown> = {}
+  try {
+    const value: unknown = JSON.parse(environment[RUNTIME_VARIABLES.configuration] || '{}')
+    if (typeof value !== 'object' || value === null || Array.isArray(value))
+      issues.push('Saved configuration must be an object.')
+    else configuration = value as Record<string, unknown>
+  } catch {
+    issues.push('Saved configuration is not valid JSON.')
+  }
   if (issues.length > 0) return err(issues)
   return ok({
+    configuration,
     appId,
     appSlug,
     privateKey,
@@ -224,7 +236,7 @@ export const CONTAINER_DASHBOARD_ORIGIN = 'https://wolfstar-github-agent.localho
  */
 export function renderRuntimeConfig(inputs: CloudflareRuntimeInputs, paths: RuntimePaths): string {
   const providers = configuredProviders(inputs.providers)
-  return stringify({
+  const base = {
     agent: {
       provider: providers[0],
       order: providers,
@@ -249,6 +261,8 @@ export function renderRuntimeConfig(inputs: CloudflareRuntimeInputs, paths: Runt
     },
     storage: { path: paths.storage },
     triggers: ['github', 'routine'],
+    routines_from_repositories: false,
+    routine_overrides: [],
     mutations_enabled: inputs.mutationsEnabled,
     auto_merge: { enabled: false, minimum_confidence: 100, method: 'squash' },
     max_open_pull_requests: 8,
@@ -258,6 +272,23 @@ export function renderRuntimeConfig(inputs: CloudflareRuntimeInputs, paths: Runt
     issue_cutoff: inputs.issueCutoff,
     external_repositories: [],
     repositories: [],
+  }
+  // The saved dashboard values survive a fresh Container; deployment-owned
+  // endpoints and credential paths always come from this start's inputs.
+  const saved = inputs.configuration ?? {}
+  const object = (value: unknown): Record<string, unknown> =>
+    typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
+  return stringify({
+    ...base,
+    ...saved,
+    github: {
+      ...object(saved.github),
+      ...base.github,
+    },
+    server: { ...object(saved.server), ...base.server },
+    webhook: { ...object(saved.webhook), ...base.webhook },
+    storage: base.storage,
+    mutations_enabled: inputs.mutationsEnabled,
   })
 }
 

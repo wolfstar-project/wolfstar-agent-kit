@@ -371,7 +371,7 @@ describe('resolving an automatic Agent selection', () => {
     chosen = 'opencode'
     const after = runtime()
 
-    expect(before.profile.roles.adversarial_review.model).toBe('gpt-5.6-sol')
+    expect(before.profile.roles.adversarial_review.model).toBe('gpt-6-astra')
     expect(after.profile.roles.adversarial_review.model).toBe('zai-coding-plan/glm-5.3-flash')
   })
 })

@@ -392,7 +392,7 @@ describe('review resilience', () => {
           headSha: 'abc123',
           provider: 'codex',
           sessionId: 'stored-session',
-          model: 'gpt-5.6-sol',
+          model: 'gpt-6-astra',
           agentVersion: '0.0.0',
           skillDigest: 'a'.repeat(64),
           startedAt: '2026-08-13T00:40:00.000Z',

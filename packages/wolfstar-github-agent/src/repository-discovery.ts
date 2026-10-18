@@ -227,7 +227,7 @@ function defaultMapping(
     ownership,
     ...(release === undefined ? {} : { release }),
     defaultBranch: repository.defaultBranch,
-    writablePullRequestAuthors: ['wolfstar-project', appActorLogin],
+    writablePullRequestAuthors: [...(repository.owner.type === 'User' ? [repository.owner.login] : []), appActorLogin],
     writablePullRequestHeadPrefixes: [
       'fix/',
       'feat/',
@@ -377,6 +377,7 @@ export function buildRepositoryMappings(
   allowedOwners: string[],
   releaseDefaults?: PackageReleaseDefaults,
   appActorLogin: string = AGENT_ACTOR_LOGIN,
+  repositoryDefaults: Partial<RepositoryMapping> = {},
 ): RepositoryMapping[] {
   const checkoutByRepository = new Map(checkouts.map((checkout) => [checkout.github.toLowerCase(), checkout.checkout]))
   const overrideByRepository = new Map(overrides.map((mapping) => [mapping.github.toLowerCase(), mapping]))
@@ -392,14 +393,18 @@ export function buildRepositoryMappings(
       return [
         {
           ...defaults,
+          ...repositoryDefaults,
           ...override,
           github: repository.github,
           checkout,
           // Discover App access unless the owner selects a dedicated automation account.
           // Configuration alone cannot establish an App installation.
-          authentication: override?.githubAccount === undefined ? repository.authentication : 'user',
+          authentication:
+            (override?.githubAccount ?? repositoryDefaults.githubAccount) === undefined
+              ? repository.authentication
+              : 'user',
           defaultBranch: repository.defaultBranch,
-          enabled: !repository.archived && (override?.enabled ?? true),
+          enabled: !repository.archived && (override?.enabled ?? repositoryDefaults.enabled ?? true),
         },
       ]
     })

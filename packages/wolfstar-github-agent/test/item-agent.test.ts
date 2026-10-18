@@ -242,8 +242,8 @@ describe('subject Workers', () => {
     expect(comments[4]).toContain('READY · 96/100')
     expect(comments.join('\n')).not.toContain('Head commit and CI checked')
     expect(stamped).toEqual(['READY'])
-    expect(attempt).toEqual(expect.objectContaining({ model: 'gpt-5.6-sol', confidence: 96 }))
-    expect(capture.requests).toEqual([expect.objectContaining({ model: 'gpt-5.6-sol', reasoningEffort: 'medium' })])
+    expect(attempt).toEqual(expect.objectContaining({ model: 'gpt-6-astra', confidence: 96 }))
+    expect(capture.requests).toEqual([expect.objectContaining({ model: 'gpt-6-astra', reasoningEffort: 'medium' })])
     expect(capture.requests[0]?.prompt).toContain(
       'Never run a repository-wide test suite, typecheck, build, dev server, site crawl, or Lighthouse audit',
     )
@@ -1742,7 +1742,7 @@ describe('subject Workers', () => {
       },
     })
     expect(capture.requests).toEqual([
-      expect.objectContaining({ model: 'gpt-5.6-terra', reasoningEffort: 'medium', sessionId: null }),
+      expect.objectContaining({ model: 'gpt-6.1-sol', reasoningEffort: 'medium', sessionId: null }),
     ])
     expect(capture.requests[0]?.workspace).toBe('/tmp/issue-worktree')
     expect(capture.requests[0]?.prompt).toContain(

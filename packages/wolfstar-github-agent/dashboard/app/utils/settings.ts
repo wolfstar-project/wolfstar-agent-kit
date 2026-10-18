@@ -64,7 +64,7 @@ export const PROVIDERS: readonly ProviderDescription[] = [
     id: 'codex',
     title: 'Codex',
     summary: 'Runs on your ChatGPT subscription.',
-    source: 'Run `codex login`, then paste the whole contents of ~/.codex/auth.json.',
+    source: 'Sign in with a one-time code, as `codex login --device-auth` does. No file to copy.',
     fields: [{ key: 'codexAuth', label: 'auth.json', hint: 'The whole file, as JSON', multiline: true }],
   },
   {
@@ -141,6 +141,17 @@ export function removeChanges(id: ProviderId): SettingsChanges {
   for (const key of providerKeys(id)) changes[key] = null
   return changes
 }
+
+/** A Codex sign in code the Worker got from OpenAI. Keep in step with `CodexDeviceCode` in the edge Worker. */
+export interface CodexCode {
+  deviceAuthId: string
+  userCode: string
+  verificationUrl: string
+  interval: number
+  expiresAt: number
+}
+
+export type CodexPoll = { _tag: 'Pending' } | { _tag: 'SignedIn' } | { _tag: 'Failed'; reason: string }
 
 export type SettingsAvailability =
   | { _tag: 'Loading' }

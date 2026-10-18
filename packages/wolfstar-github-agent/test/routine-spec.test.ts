@@ -133,7 +133,7 @@ routines:
 version: 1
 routines:
   - name: pr-triage
-    model: gpt-5.6-sol
+    model: gpt-6-astra
     on:
       schedule:
         - cron: "0 9 * * *"

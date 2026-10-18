@@ -82,6 +82,9 @@ storage:
 # The two sets never overlap, so neither machine can claim the other's task and
 # they need no lock between them.
 triggers: [github, routine]
+# Repository schedules are opt-in. The dashboard can replace them per repository.
+routines_from_repositories: false
+routine_overrides: []
 mutations_enabled: false
 # The controller merges a pull request labelled wolfstar-agent-auto-merge after a
 # READY review at or above minimum_confidence. Everything else waits for Wolfstar.
