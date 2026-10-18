@@ -1,16 +1,18 @@
 <script setup lang="ts">
 import type { DropdownMenuItem } from '@nuxt/ui'
 import { useMediaQuery } from '@vueuse/core'
+import { mobileBarPaths, pageTabs, settingsTab } from '../utils/navigation.ts'
 import { restartNotice } from '../utils/system.ts'
 
 /**
  * Everything that is not a decision: Selection mode, Restart, Notifications,
- * Theme, Keyboard, How it works. Below `md` the tabs and Pause live here too.
+ * Theme, Keyboard, How it works. Below `md` the pages the bottom bar leaves out
+ * live here too. The trigger is replaceable, so the bottom bar can label it.
  */
+const { side = 'bottom' } = defineProps<{ side?: 'top' | 'bottom' }>()
 const emit = defineEmits<{ keyboard: [] }>()
 
-const { snapshot, controlsUnavailable, controlPending, setSelectionMode, setAgentControl, requestRestart } =
-  useDashboard()
+const { snapshot, controlsUnavailable, controlPending, setSelectionMode, requestRestart } = useDashboard()
 const notifications = useNotifications()
 const colorMode = useColorMode()
 const toast = useToast()
@@ -23,8 +25,6 @@ const restart = computed(() => restartNotice(snapshot.value.restartRequest))
 const restartActive = computed(
   () => snapshot.value.restartRequest?._tag === 'Requested' || snapshot.value.restartRequest?._tag === 'Restarting',
 )
-const paused = computed(() => snapshot.value.agentControl._tag === 'Paused')
-
 async function toggleNotifications(): Promise<void> {
   const result = await notifications.toggle()
   if (result._tag === 'Blocked')
@@ -38,28 +38,14 @@ const themes = [
 ] as const
 
 const items = computed<DropdownMenuItem[][]>(() => {
+  // The Sessions page has no bottom bar, so its menu lists every page. Elsewhere the
+  // bar holds the main pages and Pause, and this menu holds the rest.
   const compact: DropdownMenuItem[][] = wide.value
     ? []
     : [
-        [
-          { label: 'Sessions', to: '/sessions', icon: 'i-octicon-comment-discussion-16' },
-          { label: 'Board', to: '/', icon: 'i-octicon-columns-16' },
-          { label: 'History', to: '/history', icon: 'i-octicon-history-16' },
-          { label: 'Watching', to: '/watching', icon: 'i-octicon-broadcast-16' },
-          { label: 'Routines', to: '/routines', icon: 'i-octicon-calendar-16' },
-          { label: 'Stats', to: '/stats', icon: 'i-octicon-graph-16' },
-          { label: 'Settings', to: '/settings', icon: 'i-octicon-gear-16' },
-        ],
-        sessionPage.value
-          ? []
-          : [
-              {
-                label: paused.value ? 'Resume' : 'Pause',
-                icon: paused.value ? 'i-octicon-play-16' : 'i-octicon-stop-16',
-                disabled: controlPending.value || controlsUnavailable.value,
-                onSelect: () => setAgentControl(paused.value ? 'resume' : 'pause'),
-              },
-            ],
+        [...pageTabs, settingsTab]
+          .filter((tab) => sessionPage.value || !mobileBarPaths.includes(tab.to))
+          .map(({ label, to, icon }) => ({ label, to, icon })),
       ]
   return [
     ...compact,
@@ -143,15 +129,17 @@ const items = computed<DropdownMenuItem[][]>(() => {
 </script>
 
 <template>
-  <UDropdownMenu :items="items" :content="{ align: 'end' }" :ui="{ content: 'w-80' }">
-    <UButton
-      color="neutral"
-      variant="ghost"
-      size="sm"
-      square
-      icon="i-octicon-kebab-horizontal-16"
-      aria-label="More"
-      title="More"
-    />
+  <UDropdownMenu :items="items" :content="{ align: 'end', side }" :ui="{ content: 'w-80 max-w-[calc(100vw-1rem)]' }">
+    <slot>
+      <UButton
+        color="neutral"
+        variant="ghost"
+        size="sm"
+        square
+        icon="i-octicon-kebab-horizontal-16"
+        aria-label="More"
+        title="More"
+      />
+    </slot>
   </UDropdownMenu>
 </template>

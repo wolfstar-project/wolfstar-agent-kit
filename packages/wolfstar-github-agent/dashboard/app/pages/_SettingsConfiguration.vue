@@ -320,7 +320,7 @@ useEventListener(window, 'beforeunload', (event: BeforeUnloadEvent) => {
 
       <footer
         v-if="!opened || dirty || saving"
-        class="sticky bottom-0 z-10 mt-8 flex flex-wrap items-center justify-between gap-3 border-t border-default bg-default py-3"
+        class="sticky bottom-0 z-10 mt-8 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-default bg-elevated px-4 py-3 shadow-lg"
         aria-label="Configuration actions"
       >
         <p class="text-sm text-muted" role="status" aria-live="polite">
