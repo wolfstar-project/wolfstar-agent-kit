@@ -319,7 +319,7 @@ useEventListener(window, 'beforeunload', (event: BeforeUnloadEvent) => {
       </div>
 
       <footer
-        v-if="!opened || dirty || saving"
+        v-if="dirty || saving || needsRestart || restartActive"
         class="sticky bottom-0 z-10 mt-8 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-default bg-elevated px-4 py-3 shadow-lg"
         aria-label="Configuration actions"
       >
