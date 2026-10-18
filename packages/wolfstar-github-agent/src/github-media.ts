@@ -207,6 +207,7 @@ export function renderSvgPixels(
         }
         const reason = stderr.toString()
         const known = [
+          'SVG text contains characters unavailable in the bundled fonts.',
           'SVG contains unsupported external resources.',
           'SVG exceeds the pixel limit or references external images.',
           'Rendered image exceeds the byte limit.',

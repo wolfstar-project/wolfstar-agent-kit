@@ -1,5 +1,6 @@
 <script setup lang="ts">
 const auth = useBrowserAuth()
+const checking = computed(() => auth.pending.value === 'check' || (!auth.session.value && !auth.error.value))
 const password = ref('')
 async function submitPassword() {
   await auth.passwordLogin(password.value)
@@ -16,13 +17,15 @@ onMounted(() => {
     <section
       class="w-full max-w-sm rounded-lg border border-default bg-muted p-6 shadow-sm"
       aria-labelledby="browser-login-title"
-      :aria-busy="auth.pending.value !== null"
+      :aria-busy="checking || auth.pending.value !== null"
     >
       <div class="mb-6 flex items-center gap-3">
         <UIcon name="i-octicon-hubot-16" class="size-6 text-highlighted" aria-hidden="true" />
-        <h1 id="browser-login-title" class="text-lg font-semibold text-highlighted">Sign in to Agent</h1>
+        <h1 id="browser-login-title" class="text-lg font-semibold text-highlighted">
+          {{ checking ? 'Opening Agent' : 'Sign in to Agent' }}
+        </h1>
       </div>
-      <p v-if="auth.pending.value === 'check'" role="status" class="text-sm text-muted">Checking sign-in access.</p>
+      <p v-if="checking" role="status" class="text-sm text-muted">Checking sign-in access.</p>
       <div v-else class="space-y-4">
         <UButton
           v-if="auth.session.value?.passkeys"
@@ -62,7 +65,7 @@ onMounted(() => {
           Open the pairing link from the terminal host.
         </p>
         <UButton
-          v-if="!auth.session.value"
+          v-if="!auth.session.value && auth.error.value"
           label="Retry"
           color="neutral"
           variant="outline"

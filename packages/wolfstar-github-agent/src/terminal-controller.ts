@@ -1,6 +1,7 @@
 import type { IncomingMessage } from 'node:http'
 import type { BrowserAuth } from './browser-auth.ts'
 import type { TerminalDiffSnapshot, TerminalDiffSource } from './terminal-diff.ts'
+import type { AgentSessionsCodexMode } from './types.ts'
 import { timingSafeEqual } from 'node:crypto'
 import { constants } from 'node:fs'
 import { access } from 'node:fs/promises'
@@ -10,6 +11,17 @@ import { fileURLToPath } from 'node:url'
 import { discoverDesktopSessionProjects } from './desktop-session-projects.ts'
 import { listTerminalDiff, readTerminalDiff } from './terminal-diff.ts'
 import { createTerminalRuntime } from './terminal-runtime.ts'
+
+export function controllerTerminalProviderArguments(mode: AgentSessionsCodexMode) {
+  return {
+    codex:
+      mode === 'full_access'
+        ? ['--ask-for-approval', 'never', '--sandbox', 'danger-full-access']
+        : ['--ask-for-approval', 'on-request', '--sandbox', 'workspace-write'],
+    claude: [],
+    opencode: [],
+  }
+}
 
 export function terminalDashboardAccess(request: IncomingMessage, password: string): boolean {
   if (request.headers['x-wolfstar-agent-ingress'] === 'public') return false
@@ -89,6 +101,7 @@ export async function createControllerTerminals(options: {
   memoryGiB: number
   admissionCli: string
   protectedPaths: string[]
+  codexMode: AgentSessionsCodexMode
   browserAuth?: BrowserAuth
   publicBrowserAuth?: BrowserAuth
 }) {
@@ -98,6 +111,7 @@ export async function createControllerTerminals(options: {
     executable('opencode'),
     discoverDesktopSessionProjects(homedir()),
   ])
+  const providerArguments = controllerTerminalProviderArguments(options.codexMode)
   const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'mjs'
   return createTerminalRuntime({
     directory: options.directory,
@@ -107,9 +121,9 @@ export async function createControllerTerminals(options: {
     controller: true,
     projects: projects.map(({ id, name, path }) => ({ id, name, path })),
     providers: {
-      codex: { executable: codex, argv: ['--ask-for-approval', 'on-request', '--sandbox', 'workspace-write'] },
-      claude: { executable: claude, argv: [] },
-      opencode: { executable: opencode, argv: [] },
+      codex: { executable: codex, argv: providerArguments.codex },
+      claude: { executable: claude, argv: providerArguments.claude },
+      opencode: { executable: opencode, argv: providerArguments.opencode },
     },
     helperSource: fileURLToPath(new URL(`./terminal-helper.${extension}`, import.meta.url)),
     claimScript: fileURLToPath(new URL('../../../wolfstar-agent-kit/scripts/worktree-claim.sh', import.meta.url)),

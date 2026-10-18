@@ -64,7 +64,9 @@ function emptySnapshot(): DashboardSnapshot {
 function createDashboard() {
   const { readOnly, controllerPath } = useTerminalHost()
   let started = false
+  let liveRevision = 0
   const snapshot = shallowRef<DashboardSnapshot>(emptySnapshot())
+  const lastLiveAt = ref('')
   const loading = ref(true)
   const loadError = ref<string>()
   const controlPending = ref(false)
@@ -89,15 +91,16 @@ function createDashboard() {
 
   const {
     data: liveSnapshot,
+    event: liveEvent,
     open: openLiveUpdates,
     close: closeLiveUpdates,
-  } = useEventSource<['state'], DashboardSnapshot>(
+  } = useEventSource<['state', 'heartbeat'], DashboardSnapshot | string>(
     computed(() => controllerPath('/api/events')),
-    ['state'],
+    ['state', 'heartbeat'],
     {
       immediate: false,
       autoReconnect: { delay: 1_500 },
-      serializer: { read: (value) => JSON.parse(value ?? '{}') as DashboardSnapshot },
+      serializer: { read: (value) => JSON.parse(value ?? '{}') as DashboardSnapshot | string },
     },
   )
 
@@ -122,7 +125,8 @@ function createDashboard() {
   }))
 
   /** Old data on a monitoring surface is worse than none, because it still looks authoritative. */
-  const isStale = computed(() => !loading.value && isSnapshotStale(snapshot.value.generatedAt, now.value))
+  const freshnessAt = computed(() => lastLiveAt.value || snapshot.value.generatedAt)
+  const isStale = computed(() => !loading.value && isSnapshotStale(freshnessAt.value, now.value))
   const controlsUnavailable = computed(
     () => readOnly.value || loading.value || snapshot.value.generatedAt.length === 0 || isStale.value,
   )
@@ -149,14 +153,20 @@ function createDashboard() {
 
   async function loadState(): Promise<void> {
     loadError.value = undefined
+    const revisionAtStart = liveRevision
     return $fetch
       .raw<DashboardSnapshot>(controllerPath('/api/state'))
       .then((response) => {
         if (response._data === undefined) throw new Error('The Service returned no state.')
         clockOffset.value = serviceClockOffset(response.headers.get('date'), new Date())
+        // A live state or heartbeat sampled after this request started is a
+        // newer authority than a delayed HTTP response.
+        if (liveRevision !== revisionAtStart) return
         snapshot.value = response._data
+        lastLiveAt.value = response._data.generatedAt
       })
       .catch((error: unknown) => {
+        if (liveRevision !== revisionAtStart) return
         loadError.value =
           error instanceof Error
             ? `State could not load: ${error.message}. Check the local service.`
@@ -421,9 +431,20 @@ function createDashboard() {
     if (visibility.value === 'visible') openLiveUpdates()
   }
 
-  watch(liveSnapshot, (value) => {
-    if (value !== null) {
+  watch([liveSnapshot, liveEvent], ([value, event]) => {
+    if (event === 'heartbeat') {
+      if (typeof value === 'string') {
+        liveRevision++
+        loadError.value = undefined
+        lastLiveAt.value = value
+      }
+      return
+    }
+    if (event === 'state' && value !== null && typeof value === 'object') {
+      liveRevision++
       snapshot.value = value
+      lastLiveAt.value = value.generatedAt
+      loadError.value = undefined
       loading.value = false
     }
   })
@@ -440,6 +461,7 @@ function createDashboard() {
 
   return {
     snapshot,
+    lastLiveAt,
     loading,
     loadError,
     controlPending,

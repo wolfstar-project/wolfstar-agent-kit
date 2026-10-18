@@ -352,33 +352,36 @@ describe('repository discovery', () => {
     expect(mappings[0]?.enabled).toBe(false)
   })
 
-  it('lets the controller repair a CI branch without explicit policy', () => {
-    const mappings = buildRepositoryMappings(
-      [
-        {
-          github: 'wolfstar-project/example',
-          defaultBranch: 'main',
-          archived: false,
-          fork: false,
-          topics: [],
-          authentication: 'app' as const,
-          owner: { login: 'wolfstar-project', type: 'User' },
-        },
-      ],
-      [{ github: 'wolfstar-project/example', checkout: '/home/wolfstar/pkg/example' }],
-      [],
-      ['wolfstar-project'],
-    )
+  it.each(['ci/self-hosted-runners', 'terminal/session-123'])(
+    'lets the controller repair %s without explicit policy',
+    (headRef) => {
+      const mappings = buildRepositoryMappings(
+        [
+          {
+            github: 'wolfstar-project/example',
+            defaultBranch: 'main',
+            archived: false,
+            fork: false,
+            topics: [],
+            authentication: 'app' as const,
+            owner: { login: 'wolfstar-project', type: 'User' },
+          },
+        ],
+        [{ github: 'wolfstar-project/example', checkout: '/home/wolfstar/pkg/example' }],
+        [],
+        ['wolfstar-project'],
+      )
 
-    expect(
-      canRepairPullRequestHead(
-        mappings[0]!,
-        pullRequestItem({
-          headRef: 'ci/self-hosted-runners',
-        }),
-      ),
-    ).toBe(true)
-  })
+      expect(
+        canRepairPullRequestHead(
+          mappings[0]!,
+          pullRequestItem({
+            headRef,
+          }),
+        ),
+      ).toBe(true)
+    },
+  )
 })
 
 describe('the App bot as a writable pull request author', () => {
