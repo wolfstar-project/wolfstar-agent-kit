@@ -3,9 +3,12 @@ import type { Env, RelayedDelivery } from './env.ts'
 import type { SetupRecord } from './setup.ts'
 import { Container } from '@cloudflare/containers'
 import { ARTIFACTS_HOST, artifactsAccess } from './artifacts.ts'
+import { proxyConfiguration } from './configuration.ts'
 import { EMPTY_SETUP, isReady } from './setup.ts'
 
 const SETUP_KEY = 'setup'
+const CONFIGURATION_KEY = 'configuration'
+
 const DASHBOARD_PORT = 8080
 const WEBHOOK_PORT = 8081
 /** Files the Container may keep in R2 through `http://state.internal/files/<name>`. */
@@ -40,6 +43,8 @@ const stateFiles: OutboundHandler<Env> = async (request, env) => {
  * Container as environment variables when it starts, and nowhere else.
  */
 export class ControllerContainer extends Container<Env> {
+  private configurationQueue: Promise<void> = Promise.resolve()
+
   override defaultPort = DASHBOARD_PORT
   override requiredPorts = [DASHBOARD_PORT, WEBHOOK_PORT]
   override sleepAfter = '1h'
@@ -71,7 +76,10 @@ export class ControllerContainer extends Container<Env> {
   private async prepare(): Promise<boolean> {
     const record = await this.readSetup()
     if (!isReady(record)) return false
-    this.envVars = controllerEnvironment(record, this.env.ALLOWED_OWNERS)
+    this.envVars = {
+      ...controllerEnvironment(record, this.env.ALLOWED_OWNERS),
+      WOLFSTAR_CONFIGURATION_JSON: JSON.stringify((await this.ctx.storage.get(CONFIGURATION_KEY)) ?? {}),
+    }
     return true
   }
 
@@ -113,7 +121,28 @@ export class ControllerContainer extends Container<Env> {
 
   async proxyDashboard(request: Request): Promise<Response> {
     if (!(await this.prepare())) return new Response('Setup is not complete.', { status: 503 })
-    return this.containerFetch(request, DASHBOARD_PORT)
+    if (new URL(request.url).pathname !== '/api/configuration') return this.containerFetch(request, DASHBOARD_PORT)
+    // A promise queue serializes configuration saves without the 30-second
+    // Durable Object initialization lock around container/network preflight.
+    const result = this.configurationQueue.then(() =>
+      proxyConfiguration(request, {
+        proxy: (candidate) => this.containerFetch(candidate, DASHBOARD_PORT),
+        persist: async (values) => {
+          const { mutations_enabled, ...configuration } = values
+          await this.ctx.storage.transaction(async (transaction) => {
+            const latest = await transaction.get<SetupRecord>(SETUP_KEY)
+            if (!latest) throw new Error('Setup record disappeared while saving configuration.')
+            await transaction.put(CONFIGURATION_KEY, configuration)
+            await transaction.put(SETUP_KEY, { ...latest, mutationsEnabled: mutations_enabled === true })
+          })
+        },
+      }),
+    )
+    this.configurationQueue = result.then(
+      () => undefined,
+      () => undefined,
+    )
+    return result
   }
 }
 

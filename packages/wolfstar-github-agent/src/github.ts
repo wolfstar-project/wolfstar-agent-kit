@@ -1,4 +1,6 @@
 import type { Octokit } from 'octokit'
+import type { ReviewerPolicy, ReviewerEvidence } from './reviewer-policy.ts'
+import { reviewerPolicyRefusal } from './reviewer-policy.ts'
 import type { AutoMergeMethod } from './auto-merge.ts'
 import type { GitHubTokenProvider } from './github-auth.ts'
 import type { UploadUserAsset } from './github-user-assets.ts'
@@ -1105,6 +1107,7 @@ export interface GitHubPullRequestMerger {
       number: number
       expectedHeadSha: string
       method: AutoMergeMethod
+      reviewerPolicy?: ReviewerPolicy | undefined
       /** Synchronous current authority, checked again before a fallback merge. */
       authorize: (autoMerge: boolean) => Result<void, string>
     },
@@ -1259,6 +1262,92 @@ export function createGitHubPullRequestMerger(options: GitHubPullRequestPublishe
         })
       }
 
+      const checkReviewers = async (): Promise<string | null> => {
+        if (!input.reviewerPolicy) return null
+        const reviews = await octokit.paginate(octokit.rest.pulls.listReviews, {
+          owner,
+          repo,
+          pull_number: input.number,
+          per_page: 100,
+          ...request,
+        })
+        const threads: ReviewerEvidence['threads'] = []
+        let after: string | null = null
+        do {
+          const page: {
+            repository: {
+              pullRequest: {
+                headRefOid: string
+                reviewThreads: {
+                  nodes: {
+                    isResolved: boolean
+                    comments: { nodes: { author: { login: string } | null; originalCommit: { oid: string } | null }[] }
+                  }[]
+                  pageInfo: { hasNextPage: boolean; endCursor: string | null }
+                }
+              } | null
+            } | null
+          } = await octokit.graphql(
+            `query($owner: String!, $repo: String!, $number: Int!, $after: String) { repository(owner: $owner, name: $repo) { pullRequest(number: $number) { headRefOid reviewThreads(first: 100, after: $after) { nodes { isResolved comments(first: 1) { nodes { author { login } originalCommit { oid } } } } pageInfo { hasNextPage endCursor } } } } }`,
+            { owner, repo, number: input.number, after, ...request },
+          )
+          const pull = page.repository?.pullRequest
+          if (!pull || pull.headRefOid !== input.expectedHeadSha)
+            return 'Reviewer evidence no longer belongs to the current head commit.'
+          for (const thread of pull.reviewThreads.nodes) {
+            const comment = thread.comments.nodes[0]
+            if (comment?.author)
+              threads.push({
+                login: comment.author.login,
+                resolved: thread.isResolved,
+                headSha: comment.originalCommit?.oid ?? '',
+              })
+          }
+          if (pull.reviewThreads.pageInfo.hasNextPage && !pull.reviewThreads.pageInfo.endCursor)
+            return 'Reviewer thread pagination is incomplete.'
+          after = pull.reviewThreads.pageInfo.hasNextPage ? pull.reviewThreads.pageInfo.endCursor : null
+        } while (after !== null)
+        return reviewerPolicyRefusal(input.reviewerPolicy, input.expectedHeadSha, {
+          reviews: reviews.map((review) => ({
+            login: review.user?.login ?? '',
+            state: review.state,
+            headSha: review.commit_id ?? '',
+          })),
+          threads,
+        })
+      }
+      const reviewRefusal = async (): Promise<Result<never, GitHubReadError> | null> => {
+        try {
+          const reason = await checkReviewers()
+          return reason === null ? null : err({ repository: input.repository.github, message: reason })
+        } catch (error) {
+          return failure(error)
+        }
+      }
+      const authorizeAfterReviews = async (autoMerge: boolean): Promise<Result<void, GitHubReadError>> => {
+        if (input.reviewerPolicy) {
+          // Reading paginated reviewer evidence adds an asynchronous boundary.
+          // Refresh state and label authority after it, immediately before writing.
+          const latest = await octokit.rest.pulls
+            .get({ owner, repo, pull_number: input.number, ...request })
+            .then((response) => ok(response.data))
+            .catch(failure)
+          if (latest._tag === 'Err') return latest
+          const refusal = autoMergePullRequestRefusal(
+            input.repository,
+            input.expectedHeadSha,
+            input.repository.defaultBranch,
+            latest.value,
+          )
+          if (refusal !== null) return err({ repository: input.repository.github, message: refusal })
+          autoMerge = hasAutoMergeLabel(labelNames(latest.value.labels))
+        }
+        const authorization = input.authorize(autoMerge)
+        return authorization._tag === 'Err'
+          ? err({ repository: input.repository.github, message: authorization.error })
+          : ok(undefined)
+      }
+
       /**
        * Merges in this call, pinned to the reviewed head SHA.
        *
@@ -1283,6 +1372,10 @@ export function createGitHubPullRequestMerger(options: GitHubPullRequestPublishe
         const authorization = input.authorize(hasAutoMergeLabel(labelNames(latest.value.labels)))
         if (authorization._tag === 'Err')
           return err({ repository: input.repository.github, message: authorization.error })
+        const reviewerRefusal = await reviewRefusal()
+        if (reviewerRefusal !== null) return reviewerRefusal
+        const latestAuthorization = await authorizeAfterReviews(hasAutoMergeLabel(labelNames(latest.value.labels)))
+        if (latestAuthorization._tag === 'Err') return latestAuthorization
         return octokit.rest.pulls
           .merge({
             owner,
@@ -1320,6 +1413,10 @@ export function createGitHubPullRequestMerger(options: GitHubPullRequestPublishe
       const authorization = input.authorize(autoMerge)
       if (authorization._tag === 'Err')
         return err({ repository: input.repository.github, message: authorization.error })
+      const reviewerRefusal = await reviewRefusal()
+      if (reviewerRefusal !== null) return reviewerRefusal
+      const latestAuthorization = await authorizeAfterReviews(autoMerge)
+      if (latestAuthorization._tag === 'Err') return latestAuthorization
       return octokit
         .graphql(enableAutoMergeMutation, {
           pullRequestId: pullRequest.value.node_id,

@@ -123,6 +123,9 @@ export type ClassificationConfig =
 export type ServiceTrigger = 'github' | 'routine'
 
 export interface AgentConfig {
+  routinesFromRepositories?: boolean
+  routineOverrides?: Record<string, RoutineSpec>
+  repositoryDefaults?: Partial<RepositoryMapping>
   agent: {
     provider: AgentProviderName
     /**
@@ -1407,8 +1410,23 @@ export interface ReviewAgent extends ReviewRun {
 
 export type DashboardAgent = ActiveAgent | ReviewAgent
 
-export type CodexAgentModel = 'gpt-5.6-sol' | 'gpt-5.6-terra' | 'gpt-5.6-luna' | 'gpt-6.1-sol'
-export type ClaudeAgentModel = 'claude-fable-5' | 'claude-opus-4-8' | 'claude-sonnet-5'
+/** Older models stay accepted, so a configuration or a stored record that pins one keeps loading. */
+export type CodexAgentModel =
+  | 'gpt-6-astra'
+  | 'gpt-6.1-sol'
+  | 'gpt-6-sol'
+  | 'gpt-6-luna'
+  | 'gpt-5.6-sol'
+  | 'gpt-5.6-terra'
+  | 'gpt-5.6-luna'
+export type ClaudeAgentModel =
+  | 'claude-fable-5-1'
+  | 'claude-opus-5-5'
+  | 'claude-sonnet-5-5'
+  | 'claude-haiku-5-5'
+  | 'claude-fable-5'
+  | 'claude-opus-4-8'
+  | 'claude-sonnet-5'
 /**
  * Models opencode can answer with.
  *

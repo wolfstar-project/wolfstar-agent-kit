@@ -34,7 +34,7 @@ Then open the deployed URL at `/setup`:
 
 1. **Create the GitHub App.** GitHub shows the manifest with every permission and the webhook already filled in. Only someone who can create Apps for the first owner in `ALLOWED_OWNERS` can finish this step, and an App created under any other owner is refused.
 2. **Install the App** on the repositories the agent should work on.
-3. **Add an Agent provider**: a Claude token from `claude setup-token`, the contents of `~/.codex/auth.json` after `codex login`, a GLM Coding Plan key for opencode, or a Cloudflare API token with Workers AI Read. One is enough. See [Workers AI](#workers-ai).
+3. **Add an Agent provider**: a Claude token from `claude setup-token`, a Codex sign in (Settings → Agents → Provider logins signs in with a one-time code, as `codex login --device-auth` does, or takes the contents of `~/.codex/auth.json`), a GLM Coding Plan key for opencode, or a Cloudflare API token with Workers AI Read. One is enough. See [Workers AI](#workers-ai).
 4. **Save the dashboard password** the page shows, then open the dashboard and sign in as `agent`.
 
 To change providers later, open **Settings** in the dashboard, or `/setup/providers` and sign in with the dashboard password. Both save through the same checks, and saving restarts the controller. Settings never shows a saved secret back, only whether one is set. After you install the App on more repositories, GitHub returns you to `/setup/installed`, which restarts the controller so it clones them.

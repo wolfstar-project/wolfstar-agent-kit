@@ -20,7 +20,7 @@ Current:
 - authenticated [H3](https://h3.dev) and [srvx](https://srvx.h3.dev) dashboard
 - safe merge conflict commits and pushes
 - two agent providers: [Codex](https://developers.openai.com/codex/sdk/) and [opencode](https://opencode.ai). Set `agent.provider` to `codex` or `opencode`
-- role-specific Codex profiles: `gpt-5.6-sol` with high reasoning for adversarial review, and `gpt-5.6-terra` with medium reasoning for other work
+- role-specific Codex profiles: `gpt-6-astra` with high reasoning for adversarial review, `gpt-6-luna` with low reasoning for pull request triage, and `gpt-6.1-sol` with medium reasoning for other work
 - the opencode profile runs `zai-coding-plan/glm-5.3-flash` at the high reasoning effort for every role
 - opencode also runs [Cloudflare Workers AI](https://developers.cloudflare.com/workers-ai/) models, named `cloudflare-workers-ai/@cf/...` in the Agent selection. Put the API token and the account endpoint in `~/.config/opencode/opencode.json` under `providers.cloudflare-workers-ai.settings` as `apiKey` and `baseURL` (`https://api.cloudflare.com/client/v4/accounts/<account id>/ai/v1`), then provision the worker again
 - switch the Agent provider, model, and reasoning effort from the dashboard or the tray, with no restart
@@ -70,6 +70,24 @@ The sync rejects missing files, unsafe symlinks, untrusted paths, and files that
 The dashboard denies framing. If another page must frame it, list its origin in `server.frame_ancestors`: HTTPS, or `http://localhost` with a port.
 
 Save the dashboard password in `dashboard-password` beside the config file. Use at least 32 bytes and restrict the file to mode `600`.
+
+After the first local start, open **Settings** to edit the configuration through form controls.
+Choose Automation, Routines, Agents, GitHub, Repositories, Connection, Account, or Advanced; unsaved edits stay in place when changing sections.
+Provider order uses move controls, and repository policies and advanced options open on demand.
+The dashboard reads and saves the file passed with `--config`, including a file named `config.yml`.
+Saving validates the complete service configuration and its referenced files, retains YAML comments and advanced settings, and rejects changes based on an outdated copy.
+Select **Restart after current work** to apply the saved file. A pinned Agent selection still overrides the default provider.
+Configuration editing requires private dashboard access; the public ingress cannot read or change the host file.
+Provider credentials remain in their existing local login or secret files.
+Cloudflare deployments expose the same editor and persist operational settings in Durable Object storage, so a fresh Container restores them. Deployment-owned ports, internal origins, database location, credential paths and the allowed GitHub owners are labeled read-only. The owner boundary is shared with checkout provisioning and webhook admission. Provider secrets remain in Provider logins and never appear in the configuration response.
+
+New configurations opt out of inherited repository schedules with `routines_from_repositories: false`. Use Routines to add `routine_overrides` per repository, with explicit names, cron expressions, time zones, modes and enabled state. An empty routine list disables that repository's schedules. Existing configurations that omit this setting retain repository schedules until changed.
+
+Repositories includes `repository_defaults` for discovered repositories, plus explicit per-repository policies that take precedence. A user repository trusts its actual owner and App bot by default. An organization trusts its App bot; configure the maintainers explicitly instead of inheriting another installation's account.
+
+Auto merge can use the Agent's published READY review alone (`auto_merge.review.mode: agent`), or additionally wait for exact reviewer logins (`reviewers`). Choose `require: all` or `any` and `allow_resolved_feedback`. Approvals must cover the current head. Resolved feedback requires current-head review threads; open selected-reviewer threads and native requests for changes block. Kodiak, Pullfrog, Greptile and PR Lens must be entered using the logins actually installed on the repository. Plain comments, diagrams and check summaries are not native approvals.
+
+Manage Passkeys under Account. The sign-out button above Settings opens a confirmation before ending the browser session. Issue cutoff uses the shared `UiDatePicker`, while the file keeps its YYYY-MM-DD value.
 
 Sign in with that password, then select `Manage Passkeys` and `Add Passkey`.
 Use `Sign in with Passkey` on later visits. The password remains available for recovery and machine clients.

@@ -131,6 +131,7 @@ onMounted(() => {
         </UTooltip>
       </nav>
       <div v-if="terminalHost.controller.value" class="mt-auto border-t border-default">
+        <BrowserAuthControls class="w-full" />
         <UTooltip text="Settings" :content="{ side: 'right' }">
           <UButton
             to="/settings"
@@ -203,7 +204,7 @@ onMounted(() => {
               </UButton>
             </div>
             <OverflowMenu v-if="terminalHost.controller.value" @keyboard="keyboardOpen = true" />
-            <BrowserAuthControls />
+            <BrowserAuthControls class="md:hidden" />
           </div>
         </div>
       </header>

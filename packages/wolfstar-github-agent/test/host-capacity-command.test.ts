@@ -73,7 +73,14 @@ describe('single account host capacity command', () => {
   })
 
   it('hands each admitted command its own host reservation, which the maintenance worker requires', () => {
-    const args = ['run', 'maintenance:abc', '4', process.execPath, '-e', 'console.log(process.env.WOLFSTAR_HOST_RESERVATION)']
+    const args = [
+      'run',
+      'maintenance:abc',
+      '4',
+      process.execPath,
+      '-e',
+      'console.log(process.env.WOLFSTAR_HOST_RESERVATION)',
+    ]
     const first = spawnSync(command, args, { env: { ...process.env, WOLFSTAR_HOST_RESERVATION: '' } })
     const second = spawnSync(command, args)
 

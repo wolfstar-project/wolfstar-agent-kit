@@ -233,3 +233,37 @@ describe('GitHub maintainer token', () => {
     expect(controllerEnvironment(withToken)).not.toHaveProperty(RUNTIME_VARIABLES.githubUserToken)
   })
 })
+
+describe('dashboard configuration across Container recreation', () => {
+  it('restores policy without changing deployment-owned transport, credentials or allowed owners', () => {
+    const loaded = readRuntimeInputs({
+      ...environment,
+      [RUNTIME_VARIABLES.configuration]: JSON.stringify({
+        agent: { provider: 'claude', maximum_active_agents: 3 },
+        server: { port: 9999, frame_ancestors: ['https://slides.example.com'] },
+        github: { private_key_path: '/wrong', allowed_owners: ['my-owner'] },
+        auto_merge: { enabled: true, minimum_confidence: 95, method: 'merge' },
+        routines_from_repositories: false,
+        routine_overrides: [],
+        poll_interval_seconds: 120,
+      }),
+    })
+    expect(loaded._tag).toBe('Ok')
+    if (loaded._tag !== 'Ok') return
+    const parsed = parseConfigText(renderRuntimeConfig(loaded.value, runtimePaths(homedir())))
+    expect(parsed).toMatchObject({
+      _tag: 'Ok',
+      value: {
+        agent: { maximumActiveAgents: 3 },
+        server: { port: 3210, frameAncestors: ['https://slides.example.com'] },
+        github: { allowedOwners: ['wolfstar-project', 'someone/one-repo'] },
+        autoMerge: { _tag: 'Enabled', method: 'merge' },
+        routinesFromRepositories: false,
+        pollIntervalSeconds: 120,
+      },
+    })
+  })
+  it('rejects a malformed saved configuration before starting', () => {
+    expect(readRuntimeInputs({ ...environment, [RUNTIME_VARIABLES.configuration]: 'invalid' })._tag).toBe('Err')
+  })
+})

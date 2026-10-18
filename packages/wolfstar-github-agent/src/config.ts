@@ -1,5 +1,6 @@
 import type { AgentProviderName } from './agent-provider.ts'
 import type { AutoMergePolicy } from './auto-merge.ts'
+import type { ReviewerPolicy } from './reviewer-policy.ts'
 import type { Result } from './result.ts'
 import type {
   AgentConfig,
@@ -25,6 +26,8 @@ import { isAbsolute, join, relative, resolve } from 'node:path'
 import process from 'node:process'
 import { parse } from 'yaml'
 import { AGENT_ROLES, REASONING_EFFORTS } from './agent-profile.ts'
+import { parseRoutineSpec } from './routine-spec.ts'
+import { parseCron } from './routine-schedule.ts'
 import { parsePackageReleaseConfig } from './package-release-config.ts'
 import { err, ok } from './result.ts'
 
@@ -136,7 +139,32 @@ function autoMergePolicy(source: UnknownRecord, issues: ConfigIssue[]): AutoMerg
   if (method === undefined) issues.push({ path: '$.auto_merge.method', message: 'Expected merge, rebase, or squash.' })
 
   if (enabled === undefined || minimumConfidence === undefined || method === undefined) return undefined
-  return enabled ? { _tag: 'Enabled', minimumConfidence, method } : { _tag: 'Disabled' }
+  let reviewerPolicy: ReviewerPolicy | undefined
+  const review = value.review
+  if (review !== undefined) {
+    const path = '$.auto_merge.review'
+    if (!isRecord(review) || !['agent', 'reviewers'].includes(String(review.mode)))
+      issues.push({ path, message: 'Choose agent or reviewers mode.' })
+    else if (review.mode === 'reviewers') {
+      const reviewers = stringArray(review, 'reviewers', path, issues)
+      const require = review.require ?? 'all'
+      const allowResolvedFeedback = review.allow_resolved_feedback ?? false
+      if (!reviewers?.length || reviewers.some((login) => !/^[\w-]+(?:\[bot\])?$/.test(login)))
+        issues.push({
+          path: `${path}.reviewers`,
+          message: 'Choose at least one exact GitHub login, including [bot] where applicable.',
+        })
+      if (require !== 'all' && require !== 'any')
+        issues.push({ path: `${path}.require`, message: 'Choose all or any.' })
+      if (typeof allowResolvedFeedback !== 'boolean')
+        issues.push({ path: `${path}.allow_resolved_feedback`, message: 'Expected true or false.' })
+      if (reviewers?.length && (require === 'all' || require === 'any') && typeof allowResolvedFeedback === 'boolean')
+        reviewerPolicy = { reviewers, require, allowResolvedFeedback }
+    }
+  }
+  return enabled
+    ? { _tag: 'Enabled', minimumConfidence, method, ...(reviewerPolicy === undefined ? {} : { reviewerPolicy }) }
+    : { _tag: 'Disabled' }
 }
 
 /** Defaults a repository inherits when it names a Merge risk limit it does not set. */
@@ -564,7 +592,9 @@ function webhookConfig(source: UnknownRecord, issues: ConfigIssue[]): WebhookCon
 
   // Always loopback. The tunnel connects locally, so binding wider would put
   // the listener on the network with nothing in front of it.
-  const host = '127.0.0.1'
+  const host = value.host ?? '127.0.0.1'
+  if (host !== '127.0.0.1' && host !== '::1')
+    issues.push({ path: '$.webhook.host', message: 'Expected a loopback address.' })
   const portValue = value.port ?? 3211
   const port =
     typeof portValue === 'number' && Number.isInteger(portValue) && portValue > 0 && portValue < 65_536
@@ -575,7 +605,7 @@ function webhookConfig(source: UnknownRecord, issues: ConfigIssue[]): WebhookCon
   if (secretPath !== undefined && !isAbsolute(secretPath))
     issues.push({ path: '$.webhook.secret_path', message: 'Expected an absolute path.' })
 
-  if (port === undefined || secretPath === undefined) return undefined
+  if ((host !== '127.0.0.1' && host !== '::1') || port === undefined || secretPath === undefined) return undefined
   return { _tag: 'Enabled', host, port, secretPath }
 }
 
@@ -903,6 +933,34 @@ export function parseConfigText(text: string): Result<AgentConfig, ConfigIssue[]
   if (!isRecord(document.value)) return err([{ path: '$', message: 'Expected an object.' }])
 
   const issues: ConfigIssue[] = []
+  const routinesFromRepositories =
+    document.value.routines_from_repositories === undefined
+      ? true
+      : requiredBoolean(document.value, 'routines_from_repositories', '$', issues)
+  const routineOverrides: NonNullable<AgentConfig['routineOverrides']> = {}
+  const overrides = document.value.routine_overrides ?? []
+  if (!Array.isArray(overrides)) issues.push({ path: '$.routine_overrides', message: 'Expected a list.' })
+  else
+    overrides.forEach((entry: unknown, index: number) => {
+      const path = `$.routine_overrides[${index}]`
+      if (!isRecord(entry) || typeof entry.github !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(entry.github)) {
+        issues.push({ path: `${path}.github`, message: 'Expected owner/repository.' })
+        return
+      }
+      const key = entry.github.toLowerCase()
+      if (Object.hasOwn(routineOverrides, key))
+        issues.push({ path: `${path}.github`, message: 'Duplicate repository override.' })
+      const spec = parseRoutineSpec(JSON.stringify({ version: 1, routines: entry.routines }))
+      if (spec._tag === 'Err') issues.push({ path: `${path}.routines`, message: spec.error })
+      else {
+        for (const routine of spec.value.routines)
+          for (const cron of routine.crons) {
+            const parsed = parseCron(cron)
+            if (parsed._tag === 'Err') issues.push({ path: `${path}.routines`, message: parsed.error })
+          }
+        routineOverrides[key] = spec.value
+      }
+    })
   const agent = agentSettings(document.value, issues)
   const webhook = webhookConfig(document.value, issues)
   const classification = classificationConfig(document.value, issues)
@@ -1038,7 +1096,12 @@ export function parseConfigText(text: string): Result<AgentConfig, ConfigIssue[]
     issues.push({ path: '$.external_repositories', message: `Duplicate repository: ${watch.github}.` }),
   )
 
-  const trustedCheckoutRoots = [join(homedir(), 'pkg'), join(homedir(), 'sites')]
+  const trustedCheckoutRoots =
+    document.value.trusted_checkout_roots === undefined
+      ? [join(homedir(), 'pkg'), join(homedir(), 'sites')]
+      : (stringArray(document.value, 'trusted_checkout_roots', '$', issues) ?? [])
+  if (!trustedCheckoutRoots.length || trustedCheckoutRoots.some((root) => !isAbsolute(root)))
+    issues.push({ path: '$.trusted_checkout_roots', message: 'Choose at least one absolute trusted checkout root.' })
 
   const releaseDefaultsValue = document.value.release_defaults
   const releaseDefaultsRecord =
@@ -1078,6 +1141,60 @@ export function parseConfigText(text: string): Result<AgentConfig, ConfigIssue[]
     releaseDefaultsOwner !== undefined && releaseDefaultsRoot !== undefined && releaseDefaultsPolicy?._tag === 'Ok'
       ? { owner: releaseDefaultsOwner, checkoutRoot: releaseDefaultsRoot, policy: releaseDefaultsPolicy.value }
       : undefined
+
+  let repositoryDefaults: Partial<RepositoryMapping> | undefined
+  const defaultsValue = document.value.repository_defaults
+  if (defaultsValue !== undefined) {
+    if (!isRecord(defaultsValue))
+      issues.push({ path: '$.repository_defaults', message: 'Expected repository policy defaults.' })
+    else {
+      const before = issues.length
+      const parsed = repositoryMapping(
+        {
+          github: 'placeholder/repository',
+          checkout: join(homedir(), 'pkg', 'placeholder'),
+          enabled: true,
+          ownership: 'maintained',
+          default_branch: 'main',
+          writable_pr_authors: ['placeholder'],
+          writable_pr_head_prefixes: ['fix/'],
+          issue_work: false,
+          pr_review: true,
+          conflict_resolution: false,
+          take_ownership: { enabled: false },
+          ...defaultsValue,
+        },
+        0,
+        issues,
+      )
+      for (const issue of issues.slice(before))
+        issue.path = issue.path.replace('$.repositories[0]', '$.repository_defaults')
+      if (parsed) {
+        const keys: Record<string, keyof RepositoryMapping> = {
+          enabled: 'enabled',
+          ownership: 'ownership',
+          writable_pr_authors: 'writablePullRequestAuthors',
+          writable_pr_head_prefixes: 'writablePullRequestHeadPrefixes',
+          issue_work: 'issueWork',
+          pr_review: 'pullRequestReview',
+          conflict_resolution: 'conflictResolution',
+          max_open_pull_requests: 'maxOpenPullRequests',
+          priority: 'priority',
+          poll_interval_seconds: 'pollIntervalSeconds',
+          reasoning_effort: 'reasoningEffort',
+          take_ownership: 'takeOwnership',
+          auto_merge: 'autoMerge',
+          release: 'release',
+          github_account: 'githubAccount',
+        }
+        repositoryDefaults = Object.fromEntries(
+          Object.entries(keys)
+            .filter(([key]) => Object.hasOwn(defaultsValue, key))
+            .map(([_key, target]) => [target, parsed[target]]),
+        )
+      }
+    }
+  }
 
   const repositoriesValue = document.value.repositories
   const repositories = Array.isArray(repositoriesValue)
@@ -1158,6 +1275,7 @@ export function parseConfigText(text: string): Result<AgentConfig, ConfigIssue[]
 
   if (
     issues.length > 0 ||
+    routinesFromRepositories === undefined ||
     agent === undefined ||
     webhook === undefined ||
     classification === undefined ||
@@ -1187,6 +1305,9 @@ export function parseConfigText(text: string): Result<AgentConfig, ConfigIssue[]
   }
 
   return ok({
+    routinesFromRepositories,
+    routineOverrides,
+    ...(repositoryDefaults === undefined ? {} : { repositoryDefaults }),
     agent,
     github: { appId, ...(appSlug === undefined || appSlug === null ? {} : { appSlug }), privateKeyPath, allowedOwners },
     server: {

@@ -1,3 +1,4 @@
+import type { ReviewerPolicy } from './reviewer-policy.ts'
 import type { GitHubPullRequestItem, RepositoryMapping, ReviewRun } from './types.ts'
 
 /**
@@ -27,7 +28,7 @@ export type AutoMergeMethod = 'merge' | 'rebase' | 'squash'
 
 export type AutoMergePolicy =
   | { _tag: 'Disabled' }
-  | { _tag: 'Enabled'; minimumConfidence: number; method: AutoMergeMethod }
+  | { _tag: 'Enabled'; minimumConfidence: number; method: AutoMergeMethod; reviewerPolicy?: ReviewerPolicy }
 
 export type AutoMergeDecision =
   | { _tag: 'Merge'; headSha: string; method: AutoMergeMethod; reviewRunId: string }
