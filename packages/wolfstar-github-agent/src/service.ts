@@ -2113,8 +2113,10 @@ export async function startAgentService(options: StartAgentServiceOptions): Prom
     }
     return { ...current, agentStart: resolveAgentStartState(current) }
   }
+  const installedRepositoryNames = installedRepositories.map((repository) => repository.github).sort()
   const app = createAgentApp({
     ...(options.configPath === undefined ? {} : { configuration: createConfigurationEditor(options.configPath) }),
+    installedRepositories: () => installedRepositoryNames,
     ...(browserAuth ? { browserAuth } : {}),
     ...(browserAuth?.public?.bootstrapKind === 'passkey' ? { emergencyIsolation: emergencyIsolationRequest } : {}),
     pullRequestDiff: createGitHubPullRequestDiff({

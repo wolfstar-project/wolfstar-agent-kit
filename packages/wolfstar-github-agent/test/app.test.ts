@@ -87,8 +87,10 @@ function createApp(
   overrides: Partial<AgentAppOptions['store']> = {},
   pullRequestDiff?: AgentAppOptions['pullRequestDiff'],
   configuration?: AgentAppOptions['configuration'],
+  installedRepositories?: AgentAppOptions['installedRepositories'],
 ) {
   return createAgentApp({
+    ...(installedRepositories === undefined ? {} : { installedRepositories }),
     ...(configuration === undefined ? {} : { configuration }),
     ...(desktop === undefined ? {} : { desktop }),
     ...(repairRecovery === undefined ? {} : { repairRecovery }),
@@ -139,6 +141,16 @@ describe('dashboard HTTP app', () => {
     })
     expect(response.status).toBe(200)
     expect(save).toHaveBeenCalledWith(view)
+  })
+  it('lists the repositories the GitHub App sees for private access only', async () => {
+    const app = createApp(undefined, undefined, undefined, dashboardRoot, {}, undefined, undefined, () => [
+      'wolfstar-project/plugins',
+    ])
+    const url = `${allowedOrigin}/api/installed-repositories`
+    const headers = { host: allowedHost, authorization }
+    expect((await app.request(url, { headers: { host: allowedHost } })).status).toBe(401)
+    expect((await app.request(url, { headers: { ...headers, 'x-wolfstar-agent-ingress': 'public' } })).status).toBe(403)
+    expect(await (await app.request(url, { headers })).json()).toEqual({ repositories: ['wolfstar-project/plugins'] })
   })
   it('reports configuration validation errors and conflicts to the form', async () => {
     const read = async () => ({

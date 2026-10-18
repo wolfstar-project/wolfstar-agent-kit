@@ -62,7 +62,9 @@ webhook:
   secret_path: /home/wolfstar/.config/wolfstar-github-agent/webhook-secret
 storage:
   path: /home/wolfstar/.local/share/wolfstar-github-agent/state.sqlite
-# The Jev classification service, reached through the Cloudflare AI endpoint.
+# The classification service, reached through the Cloudflare AI endpoint. The
+# model is typesafe/jev, or one of Cloudflare's Clef models:
+# @cf/cloudflare/clef, @cf/cloudflare/clef-flash or @cf/cloudflare/clef-omni.
 # Off unless configured. Pull request triage uses it for prose-only pull
 # requests; without it those get a full Review.
 # The token needs Account > Workers AI > Read. Mode 0600, owner you, and at

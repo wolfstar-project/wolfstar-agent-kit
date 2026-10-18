@@ -1,3 +1,8 @@
+import type { InjectionKey, Ref } from 'vue'
+
+/** Provided by Settings so a repository field anywhere in the form can offer the App's repositories. */
+export const installedRepositoriesKey: InjectionKey<Ref<string[]>> = Symbol('installedRepositories')
+
 export interface ConfigurationView {
   path: string
   managedPaths?: string[]
@@ -17,7 +22,7 @@ interface FieldBase {
 export type ConfigurationField = FieldBase &
   (
     | {
-        kind: 'text' | 'multiline' | 'date' | 'boolean' | 'list' | 'issues' | 'checks'
+        kind: 'text' | 'multiline' | 'date' | 'boolean' | 'list' | 'issues' | 'checks' | 'repository'
         fallback?: string | boolean | string[]
       }
     | { kind: 'number'; fallback?: number; min?: number; max?: number; step?: number }
@@ -34,6 +39,13 @@ export type ConfigurationField = FieldBase &
   )
 
 const text = (key: string, label: string): FieldBase & { kind: 'text' } => ({ key, label, kind: 'text' })
+/** A `owner/repository` name, picked from the repositories the GitHub App sees or typed by hand. */
+const repository = (key: string, label: string): FieldBase & { kind: 'repository' } => ({
+  key,
+  label,
+  kind: 'repository',
+  placeholder: 'owner/repository',
+})
 const number = (key: string, label: string, fallback?: number): Extract<ConfigurationField, { kind: 'number' }> => ({
   key,
   label,
@@ -146,7 +158,7 @@ const routineFields: ConfigurationField[] = [
 ]
 
 const repositoryFields: ConfigurationField[] = [
-  text('github', 'GitHub repository'),
+  repository('github', 'GitHub repository'),
   text('checkout', 'Local checkout'),
   { ...flag('enabled', 'Enable this repository'), hint: 'Include this checkout in repository monitoring.' },
   choice('ownership', 'Ownership', ['owned', 'maintained', 'external'], 'maintained'),
@@ -276,9 +288,17 @@ export const CONFIGURATION_FIELDS: ConfigurationField[] = [
   {
     ...group('classification', 'Cloudflare classification', [
       text('account_id', 'Account ID'),
-      text('token_path', 'Token file'),
+      {
+        ...text('token_path', 'Token file'),
+        hint: 'Absolute path of a file that holds the Cloudflare API token, not the token itself. With a Workers AI login on the Cloudflare deployment, use /home/node/.config/wolfstar-github-agent/classification-token.',
+        placeholder: '/home/node/.config/wolfstar-github-agent/classification-token',
+      },
       { ...text('gateway_id', 'AI Gateway ID'), optional: true },
-      text('model', 'Classification model'),
+      {
+        ...text('model', 'Classification model'),
+        hint: 'typesafe/jev, @cf/cloudflare/clef, @cf/cloudflare/clef-flash or @cf/cloudflare/clef-omni.',
+        placeholder: '@cf/cloudflare/clef-flash',
+      },
       { ...number('issue_triage_band', 'Issue triage confidence'), min: 0.5, max: 0.99, step: 0.01, optional: true },
     ]),
     optional: true,
@@ -304,7 +324,7 @@ export const CONFIGURATION_FIELDS: ConfigurationField[] = [
     empty:
       'No dashboard schedules. Add a repository and choose its routines, time zone and cron expressions. An empty routine list disables every routine for that repository.',
     fields: [
-      text('github', 'GitHub repository'),
+      repository('github', 'GitHub repository'),
       {
         key: 'routines',
         label: 'Routines',
@@ -387,7 +407,7 @@ export const CONFIGURATION_FIELDS: ConfigurationField[] = [
     singular: 'issue watch',
     empty: 'No public issue watches. Add a repository to follow its issues without enabling writes.',
     fields: [
-      text('github', 'GitHub repository'),
+      repository('github', 'GitHub repository'),
       { key: 'issues', label: 'Issues', kind: 'issues', hint: 'all, or comma-separated issue numbers.' },
     ],
     initial: { github: '', issues: 'all' },

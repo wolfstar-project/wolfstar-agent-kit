@@ -82,6 +82,38 @@ describe('jev api', () => {
     expect(JSON.parse(seen!.init.body as string).model).toBe('typesafe/jev@jev-1.13.0')
   })
 
+  it.each([
+    ['@cf/cloudflare/clef', 'clef'],
+    ['@cf/cloudflare/clef-flash', 'clef-flash'],
+    ['@cf/cloudflare/clef-omni', 'clef-omni'],
+  ])('speaks the Clef wire for %s', async (model, selector) => {
+    let seen: { url: string; init: RequestInit } | undefined
+    const client = jev({
+      accountId: 'acc-1',
+      apiToken: 'k',
+      gatewayId: 'gw',
+      model,
+      fetch: async (url, init) => {
+        seen = { url: String(url), init: init! }
+        return json({
+          success: true,
+          result: { model: selector, answers, usage: { input_tokens: 1, output_tokens: 0 } },
+        })
+      },
+    })
+
+    const result = await client.systemOne({ state: 'I was charged twice', questions })
+
+    expect(result.answers.billing.noul).toBe(0.9)
+    expect(seen!.url).toBe(`https://api.cloudflare.com/client/v4/accounts/acc-1/ai/run/${model}`)
+    expect((seen!.init.headers as Record<string, string>)['cf-aig-gateway-id']).toBe('gw')
+    expect(JSON.parse(seen!.init.body as string)).toEqual({
+      model: selector,
+      state: 'I was charged twice',
+      questions,
+    })
+  })
+
   it('unwraps a Cloudflare success envelope', async () => {
     const client = jev({
       accountId: 'acc-1',
