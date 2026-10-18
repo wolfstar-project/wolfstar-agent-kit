@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { ConfigurationField, ConfigurationIssue } from '../utils/configuration.ts'
 import { configurationFields, configurationRecord, installedRepositoriesKey } from '../utils/configuration.ts'
-import { describePlan, parsePlan } from '../utils/cron-builder.ts'
+import { cronProblem, describePlan, parsePlan } from '../utils/cron-builder.ts'
 import SettingsFields from './_SettingsFields.vue'
 
 const props = withDefaults(
@@ -70,7 +70,9 @@ function entries(key: string): Record<string, unknown>[] {
 }
 /** A schedule entry is titled by what it says, such as `Every day at 07:00`, not by its expression. */
 function entryCron(entry: Record<string, unknown>): string {
-  return typeof entry.cron === 'string' && entry.cron.trim() !== '' ? describePlan(parsePlan(entry.cron)) : ''
+  if (typeof entry.cron !== 'string' || entry.cron.trim() === '') return ''
+  // A mistyped expression stays as typed. The builder below it names the problem.
+  return cronProblem(entry.cron) === undefined ? describePlan(parsePlan(entry.cron)) : entry.cron
 }
 function setEntry(key: string, index: number, value: Record<string, unknown>): void {
   set(
