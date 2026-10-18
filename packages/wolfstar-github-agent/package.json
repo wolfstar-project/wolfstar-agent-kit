@@ -30,7 +30,7 @@
     }
   },
   "scripts": {
-    "build": "pnpm --filter ghostty-terminal-bindings build && pnpm dashboard:build && obuild",
+    "build": "pnpm --filter ghostty-terminal-bindings build && pnpm dashboard:build && obuild && node security/build.ts dist/emergency",
     "dashboard:build": "nuxt generate dashboard",
     "dashboard:dev": "nuxt dev dashboard",
     "dev": "node --experimental-strip-types src/cli.ts",
@@ -45,6 +45,8 @@
     "@anthropic-ai/claude-agent-sdk": "catalog:",
     "@coldtea/pr-lens-renderer": "catalog:",
     "@coldtea/pr-lens-schema": "catalog:",
+    "@expo-google-fonts/noto-emoji": "catalog:",
+    "@fontpkg/unifont": "catalog:",
     "@openai/codex-sdk": "catalog:",
     "@pierre/diffs": "catalog:",
     "@resvg/resvg-js": "catalog:",

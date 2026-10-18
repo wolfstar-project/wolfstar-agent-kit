@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { useEventListener } from '@vueuse/core'
+import { useEventListener, useMediaQuery, useWindowSize } from '@vueuse/core'
 import { isTypingTarget } from '../utils/keyboard.ts'
 
 /**
@@ -25,6 +25,27 @@ const toast = useToast()
 const keyboardOpen = ref(false)
 const route = useRoute()
 const sessionPage = computed(() => route.path === '/sessions')
+const phoneInput = useMediaQuery('(pointer: coarse)')
+const { height: visualHeight } = useWindowSize({ type: 'visual' })
+const viewportTop = ref(0)
+const viewportScale = ref(1)
+function updateViewport() {
+  viewportTop.value = window.visualViewport?.offsetTop ?? 0
+  viewportScale.value = window.visualViewport?.scale ?? 1
+}
+useEventListener(() => window.visualViewport, 'resize', updateViewport)
+useEventListener(() => window.visualViewport, 'scroll', updateViewport)
+const sessionHeight = computed(() =>
+  sessionPage.value && phoneInput.value && Number.isFinite(visualHeight.value) && viewportScale.value === 1
+    ? {
+        position: 'fixed' as const,
+        top: `${viewportTop.value}px`,
+        left: '0',
+        right: '0',
+        height: `${visualHeight.value}px`,
+      }
+    : undefined,
+)
 const terminalHost = useTerminalHost()
 
 const tabs = [
@@ -67,7 +88,10 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="flex h-dvh min-h-0 overflow-hidden">
+  <div
+    class="flex h-dvh min-h-0 overflow-hidden pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pl-[env(safe-area-inset-left)]"
+    :style="sessionHeight"
+  >
     <a href="#main" class="skip-link">Skip to content</a>
     <aside class="z-40 hidden w-12 shrink-0 flex-col border-r border-default bg-muted md:flex">
       <NuxtLink
@@ -137,7 +161,7 @@ onMounted(() => {
         <div class="flex h-full min-w-0 items-center gap-2 pr-2">
           <NuxtLink
             to="/sessions"
-            class="flex shrink-0 items-center gap-2 text-sm font-medium text-highlighted md:hidden"
+            class="flex min-h-11 min-w-11 shrink-0 items-center justify-center gap-2 text-sm font-medium text-highlighted md:hidden"
           >
             <UIcon name="i-octicon-hubot-16" class="size-4" aria-hidden="true" />
             <span class="sr-only sm:not-sr-only">Agent</span>
@@ -164,7 +188,7 @@ onMounted(() => {
               role="status"
               >Read-only Service connection.</span
             >
-            <SystemChip v-if="terminalHost.controller.value" class="max-sm:max-w-28 max-sm:overflow-hidden" />
+            <SystemChip v-if="terminalHost.controller.value" :compact="sessionPage" />
             <div v-if="terminalHost.controller.value && !sessionPage" class="hidden items-center gap-1.5 lg:flex">
               <AgentSelectionMenu />
               <UButton

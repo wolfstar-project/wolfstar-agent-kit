@@ -1,6 +1,7 @@
 import type { AgentActivityLog } from './agent-activity.ts'
 import type { BrowserAuth } from './browser-auth.ts'
 import type { DesktopBroker } from './desktop-broker.ts'
+import type { EmergencyProxy } from './emergency-isolation.ts'
 import type { AgentHost, AgentSlotLimits, HostAgentPool, HostCapacity } from './host-capacity.ts'
 import type { createPullRequestDiffSource } from './pull-request-diff.ts'
 import type { PullRequestWatchState, PullRequestWatchTarget } from './pull-request-watch.ts'
@@ -25,6 +26,7 @@ import {
   parseDesktopReport,
   parseDesktopWorktree,
 } from './desktop-protocol.ts'
+import { registerEmergencyRoutes } from './emergency-routes.ts'
 import { parseAgentSlots } from './host-capacity.ts'
 import { parseIncidentResolutionRequest } from './incident-resolution.ts'
 import { parsePullRequestWatchTarget } from './pull-request-watch.ts'
@@ -33,6 +35,7 @@ import { registerSessionRoutes } from './session-routes.ts'
 import { parseStatsRange } from './stats.ts'
 
 export interface AgentAppOptions {
+  emergencyIsolation?: EmergencyProxy
   pullRequestDiff?: ReturnType<typeof createPullRequestDiffSource>
   repairRecovery?: (request: RepairRecoveryRequest) => Promise<Result<RepairRecoveryResponse, string>>
   pullRequestWatch?: {
@@ -266,11 +269,12 @@ function hasDashboardAccess(request: Request, password: string): boolean {
   )
 }
 
-function dashboardEvent(options: AgentAppOptions): { observable: string; serialize: () => string } {
+function dashboardEvent(options: AgentAppOptions): { observable: string; heartbeat: string; serialize: () => string } {
   const snapshot = dashboardSnapshot(options)
   let serialized: string | undefined
   return {
     observable: JSON.stringify({ ...snapshot, generatedAt: '' }),
+    heartbeat: JSON.stringify(snapshot.generatedAt),
     serialize: () => (serialized ??= JSON.stringify(snapshot)),
   }
 }
@@ -521,6 +525,14 @@ export function createAgentApp(options: AgentAppOptions): H3 {
       new Response(JSON.stringify({ _tag: 'Err', reason: 'AuthenticationRequired' }), { status: 401 })
     )
   })
+
+  if (options.emergencyIsolation) {
+    registerEmergencyRoutes(app, options.emergencyIsolation, (headers) => {
+      if (headers.get('x-wolfstar-agent-ingress') !== 'public') return null
+      const authority = options.browserAuth?.public
+      return authority?.bootstrapKind === 'passkey' ? (authority.session(headers)?.credentialId ?? null) : null
+    })
+  }
 
   if (options.sessions !== undefined) {
     registerSessionRoutes(app, options.sessions)
@@ -1288,13 +1300,17 @@ export function createAgentApp(options: AgentAppOptions): H3 {
   let dashboardInterval: ReturnType<typeof setInterval> | undefined
   app.get('/api/events', (event) => {
     const stream = createEventStream(event)
-    let previous = dashboardEvent(options).observable
+    const initial = dashboardEvent(options)
+    let previous = initial.observable
     const update = (sample: ReturnType<typeof dashboardEvent>): void => {
       if (!authorization.valid()) {
         shutdown()
         return
       }
-      if (sample.observable === previous) return
+      if (sample.observable === previous) {
+        void stream.push({ event: 'heartbeat', data: sample.heartbeat }).catch(stop)
+        return
+      }
       previous = sample.observable
       // Each subscriber owns its write. One slow or closed stream cannot block the others.
       void stream.push({ event: 'state', data: sample.serialize() }).catch(stop)
@@ -1320,6 +1336,10 @@ export function createAgentApp(options: AgentAppOptions): H3 {
       dashboardSubscribers.add(update)
       options.shutdownSignal?.addEventListener('abort', shutdown, { once: true })
       void stream.pushComment('connected').catch(stop)
+      // A subscriber may have fetched /api/state before this connection while
+      // the service changed. Always resync on attach/reconnect before sending
+      // lightweight freshness-only heartbeats.
+      void stream.push({ event: 'state', data: initial.serialize() }).catch(stop)
       if (dashboardInterval === undefined) {
         dashboardInterval = setInterval(() => {
           const sample = dashboardEvent(options)

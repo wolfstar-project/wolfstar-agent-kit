@@ -15,6 +15,7 @@ import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { setTimeout } from 'node:timers/promises'
 import { parseHostTerminalCapacity } from './terminal-capacity.ts'
+import { pruneExpiredTerminalHistory } from './terminal-history.ts'
 import {
   initializeTerminalStorage,
   readTerminalIntents,
@@ -151,6 +152,23 @@ export async function createTerminalManager(options: {
       intent.session.state = 'Unknown'
       await persist(intent)
     }
+  }
+  function pruneHistory(intent: TerminalIntent) {
+    if (intent.session.state === 'Exited' || intent.session.state === 'Interrupted') {
+      try {
+        pruneExpiredTerminalHistory(options.directory, intent.session.id, options.now().getTime())
+      } catch (cause) {
+        options.log('Terminal session history pruning failed', cause)
+      }
+    }
+  }
+  async function reconcileStartup(intent: TerminalIntent) {
+    try {
+      await reconcile(intent)
+    } catch (cause) {
+      options.log('Terminal session startup reconciliation failed', cause)
+    }
+    pruneHistory(intent)
   }
   async function launch(request: TerminalLaunch, manual = false): Promise<TerminalResult<TerminalSession>> {
     if (options.active && !options.active()) return { _tag: 'Err', reason: 'OwnershipUnknown' }
@@ -363,6 +381,13 @@ export async function createTerminalManager(options: {
     void retryQueued().catch((cause) => options.log('Queued session retry failed', cause))
   }, 10000)
   queueTimer.unref()
+  await Promise.all(
+    [...intents.values()].map((intent) =>
+      owned(intent.session.id, async () => {
+        await reconcileStartup(intent)
+      }),
+    ),
+  )
   const housekeeping = setInterval(
     () => {
       void (async () => {
@@ -370,6 +395,7 @@ export async function createTerminalManager(options: {
           [...intents.values()].map((intent) =>
             owned(intent.session.id, async () => {
               await reconcile(intent)
+              pruneHistory(intent)
               if (intent.session.worktree && !['Exited', 'Interrupted'].includes(intent.session.state)) {
                 await options.renewWorktree(intent.session.id, intent.session.worktree)
               }
@@ -442,7 +468,14 @@ export async function createTerminalManager(options: {
     projects: () => options.projects.map((project) => ({ ...project })),
     async sessions() {
       if (closed) return [...intents.values()].map(session)
-      await Promise.all([...intents.values()].map((intent) => owned(intent.session.id, () => reconcile(intent))))
+      await Promise.all(
+        [...intents.values()].map((intent) =>
+          owned(intent.session.id, async () => {
+            await reconcile(intent)
+            pruneHistory(intent)
+          }),
+        ),
+      )
       return [...intents.values()].map(session)
     },
     intent(id: string) {

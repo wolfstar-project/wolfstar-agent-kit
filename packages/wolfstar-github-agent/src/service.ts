@@ -48,6 +48,7 @@ import { loadConfig, validateRepositoryMappings } from './config.ts'
 import { createConflictWorker } from './conflict-worker.ts'
 import { createDesktopBroker } from './desktop-broker.ts'
 import { DESKTOP_AGENT_SLOT_CEILING } from './desktop-protocol.ts'
+import { emergencyIsolationRequest } from './emergency-isolation.ts'
 import { createReloadableExternalWatchController, mergeExternalWatchSnapshot } from './external-watch.ts'
 import { classifyFailure, isSubjectMovedReason } from './failure.ts'
 import { createFindingThreadSyncController } from './finding-thread-sync.ts'
@@ -2104,6 +2105,7 @@ export async function startAgentService(options: StartAgentServiceOptions): Prom
   }
   const app = createAgentApp({
     ...(browserAuth ? { browserAuth } : {}),
+    ...(browserAuth?.public?.bootstrapKind === 'passkey' ? { emergencyIsolation: emergencyIsolationRequest } : {}),
     pullRequestDiff: createGitHubPullRequestDiff({
       tokens: routedTokens,
       now: () => now().getTime(),
@@ -2215,6 +2217,7 @@ export async function startAgentService(options: StartAgentServiceOptions): Prom
             : {}),
           memoryGiB: config.agent.memoryPerAgentGiB,
           admissionCli: maintenanceAdmission.capacityCommand,
+          codexMode: config.server.agentSessionsCodexMode,
           protectedPaths: [
             dirname(config.storage.path),
             config.github.privateKeyPath,

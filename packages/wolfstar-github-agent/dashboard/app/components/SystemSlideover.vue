@@ -28,6 +28,7 @@ import {
   retryDeadline,
   serviceUpdatePresentation,
 } from '../utils/system.ts'
+import EmergencyIsolation from './system/EmergencyIsolation.vue'
 import GitHubRateLimits from './system/GitHubRateLimits.vue'
 import HostWork from './system/HostWork.vue'
 
@@ -38,6 +39,7 @@ import HostWork from './system/HostWork.vue'
  */
 const {
   snapshot,
+  lastLiveAt,
   incidents,
   relativeTime,
   now,
@@ -260,10 +262,11 @@ function activityLine(item: AgentActivityItem): string {
 <template>
   <USlideover v-model:open="open" title="System" :ui="{ body: 'space-y-10 wrap-anywhere' }">
     <template #body>
+      <EmergencyIsolation :active="open" />
       <section v-if="controlsUnavailable" role="status" aria-label="Service data unavailable">
         <p class="text-sm status-warning">Service data is unavailable. Reload before changing settings or work.</p>
         <p v-if="snapshot.generatedAt" class="mt-2 text-sm text-muted">
-          Last update {{ relativeTime(snapshot.generatedAt) }}.
+          Last update {{ relativeTime(lastLiveAt || snapshot.generatedAt) }}.
         </p>
         <p v-if="loadError" class="mt-2 text-sm status-error">
           {{ loadError }}

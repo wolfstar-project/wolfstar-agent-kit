@@ -273,13 +273,19 @@ function screen(value: unknown): TerminalResult<TerminalScreen> {
 export function parseTerminalServerMessage(value: unknown): TerminalResult<TerminalServerMessage> {
   if (!record(value)) return invalid()
   if (value.type === 'Attached') {
-    if (value.protocol !== 1) return invalid()
+    if (value.protocol !== 1 || (value.history !== undefined && value.history !== true)) return invalid()
     const parsedSession = session(value.session)
     if (parsedSession._tag === 'Err') return parsedSession
     const parsedWriter = writer(value.writer)
     return parsedWriter._tag === 'Err'
       ? parsedWriter
-      : ok({ type: 'Attached', protocol: 1, session: parsedSession.value, writer: parsedWriter.value })
+      : ok({
+          type: 'Attached',
+          ...(value.history === true ? { history: true as const } : {}),
+          protocol: 1,
+          session: parsedSession.value,
+          writer: parsedWriter.value,
+        })
   }
   if (value.type === 'WriterChanged') {
     const result = writer(value.writer)
@@ -338,6 +344,41 @@ export function parseTerminalServerMessage(value: unknown): TerminalResult<Termi
         keyboard: value.modes.keyboard,
       },
       scrollbackLength: value.scrollbackLength,
+    })
+  }
+  if (value.type === 'History' && text(value.generation) && text(value.requestId) && record(value.result)) {
+    const result = value.result
+    if (result._tag === 'Expired')
+      return ok({
+        type: 'History',
+        generation: value.generation,
+        requestId: value.requestId,
+        result: { _tag: 'Expired' },
+      })
+    if (
+      result._tag !== 'Page' ||
+      !text(result.snapshot) ||
+      !integer(result.total, 0, 1000) ||
+      !integer(result.offset, 0, result.total) ||
+      !Array.isArray(result.lines) ||
+      result.offset + result.lines.length > result.total
+    ) {
+      return invalid()
+    }
+    if (result.lines.length > 200) return limit()
+    const lines: string[] = []
+    let characters = 0
+    for (const line of result.lines) {
+      if (typeof line !== 'string' || !unicode(line) || /[\0\r\n]/.test(line)) return invalid()
+      characters += line.length
+      if (characters > 1_000_000) return limit()
+      lines.push(line)
+    }
+    return ok({
+      type: 'History',
+      generation: value.generation,
+      requestId: value.requestId,
+      result: { _tag: 'Page', snapshot: result.snapshot, total: result.total, offset: result.offset, lines },
     })
   }
   if (
