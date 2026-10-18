@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { ConfigurationField, ConfigurationIssue } from '../utils/configuration.ts'
 import { configurationFields, configurationRecord, installedRepositoriesKey } from '../utils/configuration.ts'
+import { cronProblem, describePlan, parsePlan } from '../utils/cron-builder.ts'
 import SettingsFields from './_SettingsFields.vue'
 
 const props = withDefaults(
@@ -66,6 +67,12 @@ function stringValues(field: ConfigurationField): string[] {
 }
 function entries(key: string): Record<string, unknown>[] {
   return Array.isArray(props.values[key]) ? (props.values[key] as unknown[]).map(configurationRecord) : []
+}
+/** A schedule entry is titled by what it says, such as `Every day at 07:00`, not by its expression. */
+function entryCron(entry: Record<string, unknown>): string {
+  if (typeof entry.cron !== 'string' || entry.cron.trim() === '') return ''
+  // A mistyped expression stays as typed. The builder below it names the problem.
+  return cronProblem(entry.cron) === undefined ? describePlan(parsePlan(entry.cron)) : entry.cron
 }
 function setEntry(key: string, index: number, value: Record<string, unknown>): void {
   set(
@@ -170,7 +177,7 @@ function issueText(field: ConfigurationField): string {
               aria-hidden="true"
             />
             <span class="min-w-0 flex-1 truncate font-medium text-highlighted">{{
-              entry.github || entry.name || entry.cron || `New ${field.singular ?? 'entry'}`
+              entry.github || entry.name || entryCron(entry) || `New ${field.singular ?? 'entry'}`
             }}</span>
             <span v-if="hasIssues(`${fieldPath(field.key)}[${index}]`)" class="text-error">Needs attention</span>
             <span v-else-if="entry.enabled === false" class="text-muted">Disabled</span>
@@ -255,6 +262,17 @@ function issueText(field: ConfigurationField): string {
             @update:model-value="set(field.key, $event)"
           />
         </div>
+      </div>
+
+      <div v-else-if="field.kind === 'cron'" class="min-w-0 sm:col-span-2">
+        <CronBuilder
+          :id="identifier(field.key)"
+          :label="field.label"
+          :disabled="locked(field.key)"
+          :model-value="String(displayed(field) ?? '')"
+          @update:model-value="set(field.key, $event)"
+        />
+        <p v-if="errorFor(field.key)" role="alert" class="mt-2 text-sm text-error">{{ errorFor(field.key) }}</p>
       </div>
 
       <UFormField

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useEventListener, useMediaQuery, useWindowSize } from '@vueuse/core'
 import { isTypingTarget } from '../utils/keyboard.ts'
+import { pageTabs } from '../utils/navigation.ts'
 
 /**
  * The activity rail and view tabs stay mounted across every page.
@@ -48,14 +49,7 @@ const sessionHeight = computed(() =>
 )
 const terminalHost = useTerminalHost()
 
-const tabs = [
-  { label: 'Sessions', to: '/sessions', icon: 'i-octicon-terminal-16' },
-  { label: 'Board', to: '/', icon: 'i-octicon-columns-16' },
-  { label: 'History', to: '/history', icon: 'i-octicon-history-16' },
-  { label: 'Watching', to: '/watching', icon: 'i-octicon-broadcast-16' },
-  { label: 'Routines', to: '/routines', icon: 'i-octicon-calendar-16' },
-  { label: 'Stats', to: '/stats', icon: 'i-octicon-graph-16' },
-]
+const tabs = pageTabs
 
 /** Pages reached from the bottom of the rail, which are not tabs. */
 const pageTitles: Record<string, string> = { '/settings': 'Settings', '/flow': 'How it works' }
@@ -174,15 +168,6 @@ onMounted(() => {
           >
 
           <div class="ms-auto flex items-center gap-1.5">
-            <UButton
-              v-if="terminalHost.controller.value && !sessionPage"
-              to="/sessions"
-              label="Sessions"
-              icon="i-octicon-terminal-16"
-              color="neutral"
-              variant="outline"
-              class="min-h-11 md:hidden"
-            />
             <span
               v-if="terminalHost.readOnly.value"
               class="sr-only rounded border border-default text-xs text-muted sm:not-sr-only sm:px-2 sm:py-1"
@@ -203,7 +188,10 @@ onMounted(() => {
                 {{ paused ? 'Resume' : 'Pause' }}
               </UButton>
             </div>
-            <OverflowMenu v-if="terminalHost.controller.value" @keyboard="keyboardOpen = true" />
+            <!-- Below md the bottom bar carries More, except on Sessions where the bar is hidden. -->
+            <div v-if="terminalHost.controller.value" :class="sessionPage ? undefined : 'hidden md:block'">
+              <OverflowMenu @keyboard="keyboardOpen = true" />
+            </div>
             <BrowserAuthControls class="md:hidden" />
           </div>
         </div>
@@ -220,6 +208,12 @@ onMounted(() => {
           <slot />
         </div>
       </main>
+
+      <MobileActionBar
+        v-if="terminalHost.controller.value && !sessionPage"
+        :unhealthy-repositories="unhealthyRepositories"
+        @keyboard="keyboardOpen = true"
+      />
     </div>
 
     <SystemSlideover />

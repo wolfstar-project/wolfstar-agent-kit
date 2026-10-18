@@ -1,4 +1,5 @@
 import type { InjectionKey, Ref } from 'vue'
+import { DEFAULT_CRON } from './cron-builder.ts'
 
 /** Provided by Settings so a repository field anywhere in the form can offer the App's repositories. */
 export const installedRepositoriesKey: InjectionKey<Ref<string[]>> = Symbol('installedRepositories')
@@ -22,7 +23,7 @@ interface FieldBase {
 export type ConfigurationField = FieldBase &
   (
     | {
-        kind: 'text' | 'multiline' | 'date' | 'boolean' | 'list' | 'issues' | 'checks' | 'repository'
+        kind: 'text' | 'multiline' | 'date' | 'boolean' | 'list' | 'issues' | 'checks' | 'repository' | 'cron'
         fallback?: string | boolean | string[]
       }
     | { kind: 'number'; fallback?: number; min?: number; max?: number; step?: number }
@@ -46,6 +47,8 @@ const repository = (key: string, label: string): FieldBase & { kind: 'repository
   kind: 'repository',
   placeholder: 'owner/repository',
 })
+/** One schedule, built from choices. It still stores a five-field cron expression. */
+const cron = (key: string, label: string): FieldBase & { kind: 'cron' } => ({ key, label, kind: 'cron' })
 const number = (key: string, label: string, fallback?: number): Extract<ConfigurationField, { kind: 'number' }> => ({
   key,
   label,
@@ -148,11 +151,12 @@ const routineFields: ConfigurationField[] = [
   group('on', 'Schedule', [
     {
       key: 'schedule',
-      label: 'Cron expressions',
+      label: 'Run times',
       kind: 'entries',
       singular: 'schedule',
-      fields: [text('cron', 'Cron expression')],
-      initial: { cron: '' },
+      empty: 'No schedules. Add one to choose when this routine runs.',
+      fields: [cron('cron', 'Schedule')],
+      initial: { cron: DEFAULT_CRON },
     },
   ]),
 ]
