@@ -56,6 +56,8 @@ export interface TestEdge {
   objects: Map<string, string>
   relayed: RelayedDelivery[]
   dashboard: DashboardCall[]
+  /** WebSocket upgrades, which reach the Durable Object's fetch instead of RPC. */
+  upgrades: DashboardCall[]
   restarts: { forgetCodexLogin: boolean }[]
   github: { url: string; method: string }[]
 }
@@ -73,6 +75,7 @@ export function createTestEdge(
   const objects = new Map<string, string>()
   const relayed: RelayedDelivery[] = []
   const dashboard: DashboardCall[] = []
+  const upgrades: DashboardCall[] = []
   const restarts: { forgetCodexLogin: boolean }[] = []
   const github: { url: string; method: string }[] = []
 
@@ -104,6 +107,10 @@ export function createTestEdge(
         body: await request.text(),
       })
       return new Response('dashboard')
+    },
+    fetch: async (request) => {
+      upgrades.push({ url: request.url, method: request.method, headers: request.headers, body: '' })
+      return new Response('upgraded')
     },
   }
 
@@ -137,5 +144,5 @@ export function createTestEdge(
     now: () => options.now ?? Date.parse('2026-10-14T12:00:00.000Z'),
   } as unknown as EdgeDependencies
 
-  return { dependencies, setup: () => setup, sent, objects, relayed, dashboard, restarts, github }
+  return { dependencies, setup: () => setup, sent, objects, relayed, dashboard, upgrades, restarts, github }
 }

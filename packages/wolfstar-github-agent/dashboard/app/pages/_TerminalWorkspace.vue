@@ -217,11 +217,13 @@ const forceTotal = computed(() => (capacity.value._tag === 'Available' ? capacit
 const capacityReason = computed(() =>
   loading.value
     ? 'Connecting to the terminal host.'
-    : capacity.value._tag === 'Unavailable'
-      ? terminalFailureCopy.CapacityUnavailable
-      : capacity.value.regular._tag === 'AtCapacity'
-        ? 'Waiting to start'
-        : '',
+    : providers.value.length === 0
+      ? terminalFailureCopy.ProviderUnavailable
+      : capacity.value._tag === 'Unavailable'
+        ? terminalFailureCopy.CapacityUnavailable
+        : capacity.value.regular._tag === 'AtCapacity'
+          ? 'Waiting to start'
+          : '',
 )
 
 async function refresh() {
@@ -614,6 +616,7 @@ watch(
           <div class="flex gap-2">
             <select
               v-model="provider"
+              :disabled="providers.length === 0"
               aria-label="Agent provider"
               class="min-h-11 min-w-0 flex-1 rounded border border-default bg-default px-2 text-base focus-visible:outline-2 focus-visible:outline-primary"
             >

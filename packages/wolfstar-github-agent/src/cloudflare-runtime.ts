@@ -288,7 +288,8 @@ export function renderRuntimeConfig(inputs: CloudflareRuntimeInputs, paths: Runt
       ...object(saved.github),
       ...base.github,
     },
-    server: { ...object(saved.server), ...base.server },
+    // The dashboard is the session host here, so Agent sessions start on unless Settings turned them off.
+    server: { agent_sessions: true, ...object(saved.server), ...base.server },
     webhook: { ...object(saved.webhook), ...base.webhook },
     storage: base.storage,
     mutations_enabled: inputs.mutationsEnabled,
