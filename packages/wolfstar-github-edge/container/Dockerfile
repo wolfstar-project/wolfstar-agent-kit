@@ -38,9 +38,11 @@ COPY --chown=node:node . .
 
 # pnpm comes from `packageManager`. The Claude and Codex CLIs come with their SDKs.
 # node-gyp builds node-pty against the headers this image already ships, instead of downloading them.
+# The edge Worker is deployed from outside this image. Leaving it out keeps wrangler and workerd
+# out of the largest layer, which is the one the registry has to commit.
 ENV npm_config_nodedir=/usr/local
 RUN corepack install \
-  && pnpm install --frozen-lockfile \
+  && pnpm install --frozen-lockfile --filter '!wolfstar-github-edge' \
   && pnpm --filter wolfstar-github-agent dashboard:build
 
 # The Agent tools the sandbox mounts: codex, opencode v2, gh, wt, rg, fd. Each download is checksum checked.
