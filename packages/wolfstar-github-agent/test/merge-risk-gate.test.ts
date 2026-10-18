@@ -67,7 +67,7 @@ function attempt(mergeRisk: MergeRiskRecord | null, confidence = 100): ReviewRun
     headSha: 'abc123',
     id: 'attempt-1',
     mergeRisk,
-    model: 'gpt-5.6-sol',
+    model: 'gpt-6-astra',
     outcome: { _tag: 'Ready', confidence },
     provider: 'codex',
     publications: [publication],

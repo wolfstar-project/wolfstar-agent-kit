@@ -6031,7 +6031,7 @@ describe('journal store', () => {
           headSha,
           provider: 'codex',
           sessionId: `session-${number}`,
-          model: 'gpt-5.6-sol',
+          model: 'gpt-6-astra',
           agentVersion: '1.2.3',
           skillDigest: 'f'.repeat(64),
           startedAt: '2026-08-13T01:01:00.000Z',
@@ -6070,7 +6070,7 @@ describe('journal store', () => {
         headSha: task.pullRequest.headSha,
         provider: 'codex',
         sessionId: 'session-1',
-        model: 'gpt-5.6-sol',
+        model: 'gpt-6-astra',
         agentVersion: '1.2.3',
         skillDigest: 'f'.repeat(64),
         startedAt: '2026-08-13T01:01:00.000Z',
@@ -6941,7 +6941,7 @@ describe('agent selection', () => {
 
     expect(store.getAgentSelection()).toEqual({ _tag: 'FollowsConfiguration' })
     expect(store.getDashboardSnapshot('2026-08-18T01:00:00.000Z').agentProfile.roles.issue_work.model).toBe(
-      'gpt-5.6-terra',
+      'gpt-6.1-sol',
     )
   })
 
@@ -6997,7 +6997,7 @@ describe('agent selection', () => {
 
     expect(cleared).toEqual({ _tag: 'FollowsConfiguration' })
     expect(profile.provider).toBe('codex')
-    expect(profile.roles.issue_work).toEqual({ model: 'gpt-5.6-terra', reasoningEffort: 'medium' })
+    expect(profile.roles.issue_work).toEqual({ model: 'gpt-6.1-sol', reasoningEffort: 'medium' })
   })
 
   it('reads the configured Agent provider again after a restart', () => {

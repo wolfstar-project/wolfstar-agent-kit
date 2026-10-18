@@ -46,7 +46,7 @@ function harness(boundary: 'enable' | 'fallback' | 'retarget', every = false) {
       headSha: pullRequest.headSha,
       provider: 'codex',
       sessionId: 'session',
-      model: 'gpt-5.6-sol',
+      model: 'gpt-6-astra',
       agentVersion: '0.0.0',
       skillDigest: 'd'.repeat(64),
       startedAt: started,

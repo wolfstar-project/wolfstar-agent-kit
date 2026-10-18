@@ -25,7 +25,7 @@ function reviewAgent(overrides: Partial<ReviewAgent> = {}): ReviewAgent {
     headSha: 'abc1234',
     provider: 'codex',
     sessionId: 'session-1',
-    model: 'gpt-5.6-sol',
+    model: 'gpt-6-astra',
     agentVersion: '1.0.0',
     skillDigest: 'sha256:0',
     startedAt: '2026-08-20T11:00:00.000Z',

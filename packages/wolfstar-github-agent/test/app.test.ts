@@ -86,8 +86,10 @@ function createApp(
   root = dashboardRoot,
   overrides: Partial<AgentAppOptions['store']> = {},
   pullRequestDiff?: AgentAppOptions['pullRequestDiff'],
+  configuration?: AgentAppOptions['configuration'],
 ) {
   return createAgentApp({
+    ...(configuration === undefined ? {} : { configuration }),
     ...(desktop === undefined ? {} : { desktop }),
     ...(repairRecovery === undefined ? {} : { repairRecovery }),
     ...(pullRequestDiff === undefined ? {} : { pullRequestDiff }),
@@ -117,6 +119,43 @@ function createApp(
 }
 
 describe('dashboard HTTP app', () => {
+  it('requires private authenticated access and a matching origin to edit host configuration', async () => {
+    const view = { path: '/private/config.yml', revision: 'revision', values: { mutations_enabled: false } }
+    const read = vi.fn(async () => ({ _tag: 'Ok' as const, value: view }))
+    const save = vi.fn(async (_input: unknown) => ({ _tag: 'Ok' as const, value: view }))
+    const app = createApp(undefined, undefined, undefined, dashboardRoot, {}, undefined, { read, save })
+    const url = `${allowedOrigin}/api/configuration`
+    expect((await app.request(url, { headers: { host: allowedHost } })).status).toBe(401)
+    const headers = { host: allowedHost, authorization }
+    expect((await app.request(url, { headers: { ...headers, 'x-wolfstar-agent-ingress': 'public' } })).status).toBe(403)
+    expect(read).not.toHaveBeenCalled()
+    expect(await (await app.request(url, { headers })).json()).toEqual(view)
+    expect((await app.request(url, { method: 'POST', headers, body: '{}' })).status).toBe(403)
+    expect(save).not.toHaveBeenCalled()
+    const response = await app.request(url, {
+      method: 'POST',
+      headers: { ...headers, origin: allowedOrigin },
+      body: JSON.stringify(view),
+    })
+    expect(response.status).toBe(200)
+    expect(save).toHaveBeenCalledWith(view)
+  })
+  it('reports configuration validation errors and conflicts to the form', async () => {
+    const read = async () => ({
+      _tag: 'Err' as const,
+      error: { _tag: 'Invalid' as const, issues: [{ path: '$.server.port', message: 'Invalid port.' }] },
+    })
+    const save = async () => ({ _tag: 'Err' as const, error: { _tag: 'Conflict' as const } })
+    const app = createApp(undefined, undefined, undefined, dashboardRoot, {}, undefined, { read, save })
+    const headers = { host: allowedHost, authorization, origin: allowedOrigin }
+    const response = await app.request(`${allowedOrigin}/api/configuration`, { headers })
+    expect(response.status).toBe(422)
+    expect(await response.json()).toMatchObject({
+      data: { issues: [{ path: '$.server.port', message: 'Invalid port.' }] },
+    })
+    const conflict = await app.request(`${allowedOrigin}/api/configuration`, { method: 'POST', headers, body: '{}' })
+    expect(conflict.status).toBe(409)
+  })
   it('serves only tracked exact Revision diffs and refuses public ingress', async () => {
     const base = 'a'.repeat(40)
     const head = 'b'.repeat(40)
@@ -715,7 +754,7 @@ describe('dashboard HTTP app', () => {
     const rejected = await app.request(`http://${allowedHost}/api/agents/select`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ _tag: 'Pinned', provider: 'opencode', model: 'gpt-5.6-sol' }),
+      body: JSON.stringify({ _tag: 'Pinned', provider: 'opencode', model: 'gpt-6-astra' }),
     })
 
     expect(switched.status).toBe(200)

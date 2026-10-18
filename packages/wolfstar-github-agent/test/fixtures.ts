@@ -105,8 +105,8 @@ export function dashboardSnapshot(overrides: Partial<DashboardSnapshot> = {}): D
     agentStart: { _tag: 'WritesDisabled' },
     agentProviderOrder: ['opencode', 'claude', 'codex'],
     agentModels: {
-      claude: ['claude-opus-4-8', 'claude-sonnet-5', 'claude-fable-5'],
-      codex: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
+      claude: ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5-1'],
+      codex: ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-luna'],
       opencode: ['zai-coding-plan/glm-5.3-flash'],
     },
     reasoningEfforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],

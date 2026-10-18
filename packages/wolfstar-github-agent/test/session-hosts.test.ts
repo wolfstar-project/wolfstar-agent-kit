@@ -25,7 +25,7 @@ function fixture(availableSlots?: (host: SessionHost) => number) {
     host: 'desktop' as const,
     projectId: 'pkg/demo',
     provider: 'codex' as const,
-    model: 'gpt-5.6-sol',
+    model: 'gpt-6-astra',
     reasoningEffort: 'high' as const,
     prompt: 'Fix this',
     requestId: 'request',

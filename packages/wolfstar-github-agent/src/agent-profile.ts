@@ -18,16 +18,16 @@ export const CODEX_AGENT_PROFILE = {
   authentication: 'chatgpt',
   maximumActiveAgents: 4,
   roles: {
-    adversarial_review: { model: 'gpt-5.6-sol', reasoningEffort: 'high' },
-    baseline_repair: { model: 'gpt-5.6-terra', reasoningEffort: 'medium' },
-    conflict_resolution: { model: 'gpt-5.6-terra', reasoningEffort: 'medium' },
-    pull_request_triage: { model: 'gpt-5.6-luna', reasoningEffort: 'low' },
-    issue_triage: { model: 'gpt-5.6-terra', reasoningEffort: 'medium' },
-    issue_work: { model: 'gpt-5.6-terra', reasoningEffort: 'medium' },
-    batch_plan: { model: 'gpt-5.6-terra', reasoningEffort: 'medium' },
-    review_fix: { model: 'gpt-5.6-terra', reasoningEffort: 'medium' },
-    routine_scan: { model: 'gpt-5.6-terra', reasoningEffort: 'medium' },
-    routine_fix: { model: 'gpt-5.6-terra', reasoningEffort: 'medium' },
+    adversarial_review: { model: 'gpt-6-astra', reasoningEffort: 'high' },
+    baseline_repair: { model: 'gpt-6.1-sol', reasoningEffort: 'medium' },
+    conflict_resolution: { model: 'gpt-6.1-sol', reasoningEffort: 'medium' },
+    pull_request_triage: { model: 'gpt-6-luna', reasoningEffort: 'low' },
+    issue_triage: { model: 'gpt-6.1-sol', reasoningEffort: 'medium' },
+    issue_work: { model: 'gpt-6.1-sol', reasoningEffort: 'medium' },
+    batch_plan: { model: 'gpt-6.1-sol', reasoningEffort: 'medium' },
+    review_fix: { model: 'gpt-6.1-sol', reasoningEffort: 'medium' },
+    routine_scan: { model: 'gpt-6.1-sol', reasoningEffort: 'medium' },
+    routine_fix: { model: 'gpt-6.1-sol', reasoningEffort: 'medium' },
   },
 } as const satisfies AgentProfile
 
@@ -36,16 +36,16 @@ export const CLAUDE_AGENT_PROFILE = {
   authentication: 'claude-code',
   maximumActiveAgents: 4,
   roles: {
-    adversarial_review: { model: 'claude-opus-4-8', reasoningEffort: 'high' },
-    baseline_repair: { model: 'claude-sonnet-5', reasoningEffort: 'medium' },
-    conflict_resolution: { model: 'claude-sonnet-5', reasoningEffort: 'medium' },
-    pull_request_triage: { model: 'claude-fable-5', reasoningEffort: 'low' },
-    issue_triage: { model: 'claude-sonnet-5', reasoningEffort: 'medium' },
-    issue_work: { model: 'claude-sonnet-5', reasoningEffort: 'medium' },
-    batch_plan: { model: 'claude-sonnet-5', reasoningEffort: 'medium' },
-    review_fix: { model: 'claude-sonnet-5', reasoningEffort: 'medium' },
-    routine_scan: { model: 'claude-sonnet-5', reasoningEffort: 'medium' },
-    routine_fix: { model: 'claude-sonnet-5', reasoningEffort: 'medium' },
+    adversarial_review: { model: 'claude-opus-5-5', reasoningEffort: 'high' },
+    baseline_repair: { model: 'claude-sonnet-5-5', reasoningEffort: 'medium' },
+    conflict_resolution: { model: 'claude-sonnet-5-5', reasoningEffort: 'medium' },
+    pull_request_triage: { model: 'claude-fable-5-1', reasoningEffort: 'low' },
+    issue_triage: { model: 'claude-sonnet-5-5', reasoningEffort: 'medium' },
+    issue_work: { model: 'claude-sonnet-5-5', reasoningEffort: 'medium' },
+    batch_plan: { model: 'claude-sonnet-5-5', reasoningEffort: 'medium' },
+    review_fix: { model: 'claude-sonnet-5-5', reasoningEffort: 'medium' },
+    routine_scan: { model: 'claude-sonnet-5-5', reasoningEffort: 'medium' },
+    routine_fix: { model: 'claude-sonnet-5-5', reasoningEffort: 'medium' },
   },
 } as const satisfies AgentProfile
 
@@ -92,10 +92,23 @@ export const AGENT_ROLES = [
   'routine_fix',
 ] as const satisfies readonly AgentRole[]
 
-/** Every model an Agent provider answers with, in the order the controls list them. */
+/**
+ * Every model an Agent provider answers with, in the order the controls list them.
+ *
+ * The current generation comes first. The previous one stays selectable so a
+ * pinned selection or a configuration that names it keeps working.
+ */
 export const AGENT_MODELS = {
-  claude: ['claude-opus-4-8', 'claude-sonnet-5', 'claude-fable-5'],
-  codex: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-6.1-sol'],
+  claude: [
+    'claude-opus-5-5',
+    'claude-sonnet-5-5',
+    'claude-fable-5-1',
+    'claude-haiku-5-5',
+    'claude-opus-4-8',
+    'claude-sonnet-5',
+    'claude-fable-5',
+  ],
+  codex: ['gpt-6.1-sol', 'gpt-6-astra', 'gpt-6-luna', 'gpt-6-sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'],
   opencode: [
     'zai-coding-plan/glm-5.3-flash',
     'zai-coding-plan/glm-5.3',

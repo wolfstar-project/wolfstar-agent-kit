@@ -8,7 +8,7 @@ import { codexAgentEvent, createCodexProvider } from '../src/codex-provider.ts'
 
 function request(overrides: Partial<AgentTurnRequest> = {}): AgentTurnRequest {
   return {
-    model: 'gpt-5.6-terra',
+    model: 'gpt-6.1-sol',
     outputSchema: { type: 'object' },
     prompt: 'Resolve the conflict.',
     reasoningEffort: 'medium',
@@ -212,7 +212,7 @@ describe('createCodexProvider', () => {
     ])
     expect(threadOptions).toEqual(
       expect.objectContaining({
-        model: 'gpt-5.6-terra',
+        model: 'gpt-6.1-sol',
         modelReasoningEffort: 'medium',
         workingDirectory: '/tmp/worktree',
         approvalPolicy: 'never',
