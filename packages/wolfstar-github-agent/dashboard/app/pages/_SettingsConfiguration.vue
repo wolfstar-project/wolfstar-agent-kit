@@ -4,6 +4,7 @@ import { useEventListener } from '@vueuse/core'
 import {
   CONFIGURATION_SECTIONS,
   configurationFailure,
+  installedRepositoriesKey,
   configurationIssueSection,
   configurationSectionFields,
 } from '../utils/configuration.ts'
@@ -118,8 +119,19 @@ async function save(): Promise<void> {
     document.querySelector<HTMLElement>('[data-settings-fields] [aria-invalid="true"]')?.focus()
   }
 }
+/** The repositories the GitHub App sees. A failed read leaves the repository fields as plain text. */
+const installedRepositories = ref<string[]>([])
+provide(installedRepositoriesKey, installedRepositories)
+async function loadInstalledRepositories(): Promise<void> {
+  try {
+    installedRepositories.value = (await $fetch<{ repositories: string[] }>('/api/installed-repositories')).repositories
+  } catch {
+    installedRepositories.value = []
+  }
+}
 onMounted(() => {
   void load()
+  void loadInstalledRepositories()
 })
 onBeforeRouteLeave(() => !dirty.value || window.confirm('Leave without saving configuration changes?'))
 useEventListener(window, 'beforeunload', (event: BeforeUnloadEvent) => {

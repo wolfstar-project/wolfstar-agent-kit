@@ -47,6 +47,8 @@ The setup page takes an API token with the Workers AI Read permission. Leave the
 
 When Workers AI is the only provider, the Container pins `cloudflare-workers-ai/@cf/moonshotai/kimi-k2.7-code` the first time the controller starts, because every opencode role defaults to a GLM Coding Plan model. It leaves a selection you already chose alone. With other providers configured, pin a Workers AI model from the Agent selection yourself.
 
+The same login feeds Settings → Agents → Cloudflare classification. The Container saves the token to `/home/node/.config/wolfstar-github-agent/classification-token`, so enter that path as the Token file, with the account ID and a model: `typesafe/jev`, `@cf/cloudflare/clef`, `@cf/cloudflare/clef-flash` or `@cf/cloudflare/clef-omni`.
+
 Each model exposes its own reasoning variants, and opencode refuses one a model lacks. The controller maps a role's effort to the closest variant the model has, and runs `kimi-k2.7-code` without one.
 
 ## Cloudflare Access

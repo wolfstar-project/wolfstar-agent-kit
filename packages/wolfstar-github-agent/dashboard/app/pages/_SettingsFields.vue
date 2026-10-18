@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { ConfigurationField, ConfigurationIssue } from '../utils/configuration.ts'
-import { configurationFields, configurationRecord } from '../utils/configuration.ts'
+import { configurationFields, configurationRecord, installedRepositoriesKey } from '../utils/configuration.ts'
 import SettingsFields from './_SettingsFields.vue'
 
 const props = withDefaults(
@@ -17,6 +17,14 @@ const props = withDefaults(
 )
 const emit = defineEmits<{ update: [values: Record<string, unknown>] }>()
 const added = reactive<Record<string, number>>({})
+const installedRepositories = inject(installedRepositoriesKey, ref<string[]>([]))
+/** The App's repositories, plus a value already saved that the App does not list. */
+function repositoryItems(field: ConfigurationField): string[] {
+  const current = String(displayed(field) ?? '')
+  return current === '' || installedRepositories.value.includes(current)
+    ? installedRepositories.value
+    : [current, ...installedRepositories.value]
+}
 const allFields = computed(() =>
   (props.includeUnknown ? configurationFields(props.values, props.fields) : props.fields).filter(
     (field) => field.visibleWhen === undefined || props.values[field.visibleWhen] === true,
@@ -353,6 +361,18 @@ function issueText(field: ConfigurationField): string {
           class="min-h-11 w-full"
           @update:model-value="set(field.key, $event)"
         />
+        <USelectMenu
+          v-else-if="field.kind === 'repository' && installedRepositories.length > 0"
+          :id="identifier(field.key)"
+          :disabled="locked(field.key)"
+          :items="repositoryItems(field)"
+          :model-value="String(displayed(field) ?? '')"
+          :placeholder="field.placeholder"
+          create-item
+          class="min-h-11 w-full"
+          @create="set(field.key, $event)"
+          @update:model-value="set(field.key, String($event ?? ''))"
+        />
         <UInputTags
           v-else-if="field.kind === 'list'"
           :id="identifier(field.key)"
@@ -360,7 +380,11 @@ function issueText(field: ConfigurationField): string {
           :model-value="stringValues(field)"
           :placeholder="field.placeholder ?? 'Add a value…'"
           class="w-full"
-          :ui="{ base: 'min-h-11 text-sm', itemDelete: 'min-h-11 min-w-11', input: 'min-h-11' }"
+          :ui="{
+            base: 'min-h-11 text-sm',
+            itemDelete: 'relative size-6 justify-center after:absolute after:-inset-2 after:content-[\'\']',
+            input: 'min-h-11',
+          }"
           @update:model-value="tags(field, $event)"
         />
         <div v-else-if="field.kind === 'checks'" class="space-y-3">

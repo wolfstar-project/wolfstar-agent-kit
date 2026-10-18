@@ -187,6 +187,8 @@ export interface RuntimePaths {
   privateKey: string
   dashboardPassword: string
   webhookSecret: string
+  /** The Workers AI token, for the Settings `classification.token_path` field. Written only with a Workers AI login. */
+  classificationToken: string
   storage: string
   /** The controller only trusts checkouts under these two roots. */
   checkoutRoot: string
@@ -212,6 +214,7 @@ export function runtimePaths(home: string, repositoryRoot: string = join(home, '
     // The controller reads the password beside the configuration, under this fixed name.
     dashboardPassword: join(configDirectory, 'dashboard-password'),
     webhookSecret: join(configDirectory, 'webhook-secret'),
+    classificationToken: join(configDirectory, 'classification-token'),
     storage: join(home, '.local', 'share', 'wolfstar-github-agent', 'state.sqlite'),
     checkoutRoot: join(home, 'pkg'),
     sitesRoot: join(home, 'sites'),

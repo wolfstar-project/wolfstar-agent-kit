@@ -105,6 +105,9 @@ async function writeInputs(inputs: CloudflareRuntimeInputs, paths: RuntimePaths)
   await writeSecret(paths.privateKey, inputs.privateKey)
   await writeSecret(paths.dashboardPassword, inputs.dashboardPassword)
   await writeSecret(paths.webhookSecret, inputs.webhookSecret)
+  // The classification service reads its token from a file, so the Workers AI login is offered as one.
+  if (inputs.providers.workersAi !== null)
+    await writeSecret(paths.classificationToken, inputs.providers.workersAi.apiToken)
   // The controller trusts only checkouts under these roots, and checks they exist.
   await mkdir(paths.checkoutRoot, { recursive: true })
   await mkdir(paths.sitesRoot, { recursive: true })
