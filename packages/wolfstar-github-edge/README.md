@@ -75,7 +75,7 @@ With both set, the Worker checks the Access token on every request except `/webh
 | Webhook intake       | Worker                                | Checks the signature with the App's secret, answers 204, queues the delivery    |
 | Webhook relay        | Queue consumer                        | Retries from 10 seconds to 15 minutes, 20 times, then the dead letter queue     |
 | Setup and secrets    | Durable Object storage                | The App key, webhook secret, dashboard password, and provider logins            |
-| Controller           | Container, `standard-4`               | 4 vCPU, 12 GiB, 20 GB disk. Two Agents at once                                  |
+| Controller           | Container, `standard-2`               | 1 vCPU, 6 GiB, 12 GB disk. One Agent at a time                                  |
 | Journal              | R2, `controller/state.sqlite`         | Restored at start, saved every 5 minutes and on shutdown                        |
 | Codex login          | R2, `controller/codex-auth.json`      | Codex rotates its refresh token, so the newest copy is kept                     |
 | Large webhook bodies | R2, `deliveries/`                     | Above 100 KB. Deleted once delivered, expired after 7 days                      |

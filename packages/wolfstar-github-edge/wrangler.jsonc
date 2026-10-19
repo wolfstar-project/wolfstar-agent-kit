@@ -22,8 +22,10 @@
       "class_name": "ControllerContainer",
       "image": "./container/Dockerfile",
       "image_build_context": "../..",
-      // 4 vCPU, 12 GiB, 20 GB disk: the largest standard size. The controller runs two Agents at once in it.
-      "instance_type": "standard-4",
+      // 1 vCPU, 6 GiB, 12 GB disk. The controller never sleeps, so memory and disk are billed all month:
+      // standard-4 (12 GiB) cost about twice as much for a second concurrent Agent. One Agent runs at a time here.
+      "instance_type": "standard-2",
+      // One controller. Raising this multiplies the always-on cost.
       "max_instances": 1,
       // Debugging through `wrangler containers ssh <instance>`. Only listed keys connect, and only through Wrangler.
       "authorized_keys": [
