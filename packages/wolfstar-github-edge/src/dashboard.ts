@@ -27,6 +27,10 @@ export async function proxyDashboard(request: Request, controller: ControllerPor
   const headers = new Headers(request.headers)
   if (origin === url.origin) headers.set('origin', CONTROLLER_ORIGIN)
 
+  // An Agent session streams its terminal over a WebSocket, which only the Durable Object's fetch carries.
+  if (request.headers.get('upgrade')?.toLowerCase() === 'websocket')
+    return controller.fetch(new Request(target, { method: 'GET', headers }))
+
   return controller.proxyDashboard(
     new Request(target, {
       method: request.method,

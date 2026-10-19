@@ -44,4 +44,9 @@ export interface ControllerPort {
   relayWebhook: (delivery: RelayedDelivery) => Promise<number | null>
   /** One dashboard request, already translated to the controller's own origin. */
   proxyDashboard: (request: Request) => Promise<Response>
+  /**
+   * The Durable Object's own fetch handler. A WebSocket, such as an Agent
+   * session's terminal stream, cannot cross RPC, so upgrades go this way.
+   */
+  fetch: (request: Request) => Promise<Response>
 }

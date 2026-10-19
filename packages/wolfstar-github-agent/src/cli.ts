@@ -794,8 +794,20 @@ const command = defineCommand({
       (!isAbsolute(capacityCommand) || capacityCommand.includes('\0') || capacityCommand.length > 4096)
     )
       throw new Error('The host capacity command requires an absolute path.')
+    const sessionHostLabel = process.env.WOLFSTAR_SESSION_HOST_LABEL?.trim()
+    const sessionProcessHost = process.env.WOLFSTAR_SESSION_PROCESS_HOST
+    if (sessionProcessHost !== undefined && sessionProcessHost !== 'systemd' && sessionProcessHost !== 'process')
+      throw new Error('WOLFSTAR_SESSION_PROCESS_HOST must be systemd or process.')
     const service = await startAgentService({
       ...(capacityCommand === undefined ? {} : { capacityCommand }),
+      ...(sessionHostLabel || sessionProcessHost
+        ? {
+            sessionHost: {
+              label: sessionHostLabel || 'Hogwild',
+              processHost: sessionProcessHost ?? 'systemd',
+            },
+          }
+        : {}),
       ...(classification._tag === 'Enabled' && classificationToken !== null
         ? {
             classification: {

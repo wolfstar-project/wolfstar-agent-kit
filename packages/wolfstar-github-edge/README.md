@@ -87,6 +87,8 @@ Every 5 minutes, and on a clean shutdown, the Container saves each linked worktr
 
 The controller keeps every check it has on Hogwild: the webhook signature, the dashboard password, Host and Origin. The Worker translates the public hostname to the one the controller expects, and refuses a state changing request whose Origin is not the public one.
 
+The dashboard is also the Agent session host, which the Sessions page and the Hosts panel name Edge. There is no Hogwild to set up. Sessions are on by default, and `server.agent_sessions` in Settings turns them off. Each session helper runs as a detached process in the Container, because it has no systemd, and `container/wolfstar-host-capacity` admits it against the slot policy and the Container's free memory. A session's terminal stream is a WebSocket, which cannot cross Durable Object RPC, so the Worker sends upgrades through the Durable Object's `fetch`. Claude Code sessions run the CLI the Agent SDK ships, so they use the same version as the controller's own turns.
+
 ## Limits
 
 - **A restart loses up to 5 minutes of journal.** The journal is backed up every 5 minutes and on a clean shutdown. GitHub holds the durable workflow state, and Recovery rebuilds the rest.
@@ -94,6 +96,7 @@ The controller keeps every check it has on Hogwild: the webhook signature, the d
 - **Checkouts are cloned again after a restart.** The Container disk does not survive a restart, so each start clones every repository the App reaches. Large repositories make that start slower.
 - **New repositories need a restart.** The controller matches repositories to checkouts when it starts. Installing the App through GitHub's page restarts it for you.
 - **`gh` inside an Agent is not signed in.** Agents read GitHub through the controller. A provider task that shells out to `gh` for a private repository fails.
+- **Sessions end with the Container.** A restart or a deploy stops every session, and the Sessions page shows it as interrupted.
 - **Updates ship with a deploy.** The dashboard update control reports that, instead of pulling a checkout.
 
 ## Develop

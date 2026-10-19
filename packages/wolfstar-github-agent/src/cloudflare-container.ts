@@ -497,6 +497,11 @@ async function main(): Promise<void> {
           WOLFSTAR_GITHUB_AGENT_COMMIT: deployedCommit,
           // The controller asks a host broker for capacity. This one has a single account to account for.
           WOLFSTAR_HOST_CAPACITY_COMMAND: paths.hostCapacityCommand,
+          // The dashboard is the session host. It has no systemd, so sessions run as detached processes.
+          WOLFSTAR_SESSION_HOST_LABEL: 'Edge',
+          WOLFSTAR_SESSION_PROCESS_HOST: 'process',
+          // Sessions find codex and opencode where the image installed them.
+          PATH: [process.env.PATH, paths.toolsBin].filter(Boolean).join(':'),
         },
         stdio: 'inherit',
       },

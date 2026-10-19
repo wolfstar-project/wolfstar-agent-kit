@@ -263,6 +263,22 @@ describe('dashboard configuration across Container recreation', () => {
       },
     })
   })
+  it('turns Agent sessions on, because the dashboard is the session host, unless Settings turned them off', () => {
+    const render = (configuration: Record<string, unknown>) => {
+      const loaded = readRuntimeInputs({
+        ...environment,
+        [RUNTIME_VARIABLES.configuration]: JSON.stringify(configuration),
+      })
+      if (loaded._tag !== 'Ok') throw new Error('The inputs did not load.')
+      return parseConfigText(renderRuntimeConfig(loaded.value, runtimePaths(homedir())))
+    }
+
+    expect(render({})).toMatchObject({ _tag: 'Ok', value: { server: { agentSessions: true } } })
+    expect(render({ server: { agent_sessions: false } })).toMatchObject({
+      _tag: 'Ok',
+      value: { server: { agentSessions: false } },
+    })
+  })
   it('rejects a malformed saved configuration before starting', () => {
     expect(readRuntimeInputs({ ...environment, [RUNTIME_VARIABLES.configuration]: 'invalid' })._tag).toBe('Err')
   })

@@ -119,6 +119,12 @@ export class ControllerContainer extends Container<Env> {
     return response.status
   }
 
+  /** The Worker sends WebSocket upgrades here, because a WebSocket cannot cross RPC. */
+  override async fetch(request: Request): Promise<Response> {
+    if (!(await this.prepare())) return new Response('Setup is not complete.', { status: 503 })
+    return this.containerFetch(request, DASHBOARD_PORT)
+  }
+
   async proxyDashboard(request: Request): Promise<Response> {
     if (!(await this.prepare())) return new Response('Setup is not complete.', { status: 503 })
     if (new URL(request.url).pathname !== '/api/configuration') return this.containerFetch(request, DASHBOARD_PORT)

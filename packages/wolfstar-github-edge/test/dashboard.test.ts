@@ -52,6 +52,26 @@ describe('dashboard proxy', () => {
     expect(edge.dashboard[0]?.headers.get('authorization')).toBe('Basic YWdlbnQ6eA==')
   })
 
+  it('sends a WebSocket upgrade through the Durable Object fetch, translating the Origin', async () => {
+    const edge = createTestEdge({ setup: READY_SETUP })
+
+    const response = await handleRequest(
+      new Request(`${ORIGIN}/api/terminal/sessions/a/stream`, {
+        headers: { upgrade: 'websocket', origin: ORIGIN, cookie: 'controller_session=valid' },
+      }),
+      edge.dependencies,
+    )
+
+    expect(await response.text()).toBe('upgraded')
+    expect(edge.dashboard).toHaveLength(0)
+    expect(edge.upgrades[0]).toMatchObject({
+      url: 'http://wolfstar-github-agent.localhost/api/terminal/sessions/a/stream',
+      method: 'GET',
+    })
+    expect(edge.upgrades[0]?.headers.get('origin')).toBe(CONTROLLER_ORIGIN)
+    expect(edge.upgrades[0]?.headers.get('upgrade')).toBe('websocket')
+  })
+
   it('redirects plain HTTP to HTTPS', async () => {
     const edge = createTestEdge({ setup: READY_SETUP })
 

@@ -10,8 +10,8 @@ import { createTerminalAdmissionCli } from './terminal-admission.ts'
 import { buildTerminalArtifact } from './terminal-artifact.ts'
 import { probeTerminalHelper } from './terminal-helper-client.ts'
 import { createTerminalManager } from './terminal-manager.ts'
+import { createTerminalProcessHostFor } from './terminal-process-host.ts'
 import { createTerminalServer } from './terminal-server.ts'
-import { createTerminalSystemdHost } from './terminal-systemd.ts'
 import { createTerminalWorktreeAdapter } from './terminal-worktree.ts'
 
 export async function createTerminalRuntime(
@@ -25,6 +25,8 @@ export async function createTerminalRuntime(
     lockEntry?: string
     observer?: Parameters<typeof createTerminalServer>[0]['observer']
     controllerReadOnly?: boolean
+    /** Where helpers run. Hogwild uses systemd; a Container uses detached processes under the terminal directory. */
+    processHost?: 'systemd' | 'process'
   },
 ) {
   await mkdir(config.directory, { recursive: true, mode: 0o700 })
@@ -56,6 +58,10 @@ export async function createTerminalRuntime(
     active = false
     ownershipLost?.()
   })
+  const processHostKind =
+    config.processHost === 'process'
+      ? ({ _tag: 'Process', directory: join(config.directory, 'units') } as const)
+      : ({ _tag: 'Systemd' } as const)
   async function initialize() {
     const artifact = await buildTerminalArtifact({
       source: config.helperSource,
@@ -87,7 +93,8 @@ export async function createTerminalRuntime(
       claimScript: artifact.claimScript,
       bootId: (await readFile('/proc/sys/kernel/random/boot_id', 'utf8')).trim(),
       admission: createTerminalAdmissionCli(config.admissionCli),
-      processHost: createTerminalSystemdHost(process.execPath),
+      processHost: createTerminalProcessHostFor(processHostKind, process.execPath),
+      processHostKind,
       ...createTerminalWorktreeAdapter(artifact.claimScript),
       ready: (intent) => probeTerminalHelper(config.directory, intent),
       now: () => new Date(),

@@ -8,6 +8,7 @@ import type {
   TerminalResult,
   TerminalSession,
 } from './terminal-protocol.ts'
+import type { TerminalProcessHostKind } from './terminal-process-host.ts'
 import type { TerminalIntent } from './terminal-storage.ts'
 import type { TerminalArtifact, TerminalProcessHost } from './terminal-systemd.ts'
 import { randomUUID } from 'node:crypto'
@@ -36,6 +37,8 @@ export interface TerminalHelperConfig {
   admissionCli: string
   claimScript: string
   protectedPaths: string[]
+  /** Absent means systemd, which every helper written before this field used. */
+  processHost?: TerminalProcessHostKind
 }
 export async function createTerminalManager(options: {
   directory: string
@@ -50,6 +53,7 @@ export async function createTerminalManager(options: {
   admissionCli: string
   claimScript: string
   processHost: TerminalProcessHost
+  processHostKind?: TerminalProcessHostKind
   memoryGiB: number
   recoverWorktree: (project: TerminalProject, sessionId: string) => Promise<string | null>
   releaseWorktree: (sessionId: string, path: string) => Promise<void>
@@ -322,6 +326,7 @@ export async function createTerminalManager(options: {
       admissionCli: options.admissionCli,
       claimScript: options.claimScript,
       protectedPaths: [options.directory, ...(options.protectedPaths ?? [])],
+      ...(options.processHostKind ? { processHost: options.processHostKind } : {}),
     }
     const config = join(options.directory, 'sessions', identity.id, 'helper.json')
     await writeTerminalJson(config, helper)
