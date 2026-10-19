@@ -233,8 +233,8 @@ export const CONTAINER_DASHBOARD_ORIGIN = 'https://wolfstar-github-agent.localho
 /**
  * The controller configuration for one Container.
  *
- * A standard-4 instance has 12 GiB. Four per Agent with two for the
- * controller suggests two Agents at once, where the Hogwild defaults would
+ * A standard-2 instance has 6 GiB. Four per Agent with two for the
+ * controller suggests one Agent at a time, where the Hogwild defaults would
  * suggest none.
  */
 export function renderRuntimeConfig(inputs: CloudflareRuntimeInputs, paths: RuntimePaths): string {
