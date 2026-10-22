@@ -13,9 +13,9 @@ import { createTerminalAdmissionCli } from './terminal-admission.ts'
 import { writeTerminalHistory } from './terminal-history.ts'
 import { createTerminalOwner } from './terminal-owner.ts'
 import { parseTerminalClientMessage, parseTerminalJson } from './terminal-protocol.ts'
-import { inspectOwnTerminalScope } from './terminal-process-host.ts'
 import { createTerminalPreparationRunner, prepareTerminalSandbox, withCodexProjectTrust } from './terminal-sandbox.ts'
 import { writeTerminalJson } from './terminal-storage.ts'
+import { createTerminalSystemdHost } from './terminal-systemd.ts'
 import { createTerminalWorktreeAdapter } from './terminal-worktree.ts'
 
 const execute = promisify(execFile)
@@ -30,7 +30,7 @@ export async function runTerminalHelper(config: TerminalHelperConfig) {
   const wasm = await readFile(config.wasm)
   if (createHash('sha256').update(wasm).digest('hex') !== config.wasmDigest)
     throw new Error('Terminal helper engine changed')
-  const scope = await inspectOwnTerminalScope(config.processHost, config.intent.unit)
+  const scope = await createTerminalSystemdHost(process.execPath).inspect(config.intent.unit)
   if (!scope.invocationId || scope.mainPid !== process.pid) throw new Error('Terminal helper identity is unavailable')
   const admission = createTerminalAdmissionCli(config.admissionCli)
   const bound = await admission.bind({
@@ -106,12 +106,6 @@ export async function runTerminalHelper(config: TerminalHelperConfig) {
   pty.onData((bytes) => owner.output(bytes))
   pty.onExit(() => {
     owner.exited()
-    if (config.processHost?._tag === 'Process') {
-      // Without systemd the provider's own session holds its descendants. Stop them, then this helper.
-      stopProcessGroup(pty.pid)
-      process.kill(process.pid, 'SIGTERM')
-      return
-    }
     // systemd stops the whole owned cgroup, including surviving provider descendants.
     void execute('systemctl', ['--user', 'stop', config.intent.unit], {
       timeout: 15000,
@@ -245,18 +239,9 @@ export async function runTerminalHelper(config: TerminalHelperConfig) {
     for (const socket of sockets) socket.destroy()
     server.close()
     owner.dispose()
-    if (config.processHost?._tag === 'Process') stopProcessGroup(pty.pid)
     process.exit(0)
   })
   return { owner, server }
-}
-function stopProcessGroup(pid: number) {
-  try {
-    process.kill(-pid, 'SIGKILL')
-  } catch (cause) {
-    if ((cause as NodeJS.ErrnoException).code !== 'ESRCH')
-      console.error('Terminal provider stop failed', cause instanceof Error ? cause.message : String(cause))
-  }
 }
 async function main() {
   const configPath = process.argv[2]

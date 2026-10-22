@@ -1,93 +1,87 @@
 import { describe, expect, it } from 'vitest'
 import { handleRequest } from '../src/app.ts'
-import { CONTROLLER_ORIGIN } from '../src/dashboard.ts'
-import { ORIGIN, READY_SETUP, createTestEdge } from './fixtures.ts'
+import { controllerOrigin } from '../src/dashboard.ts'
+import { CONTROLLER_URL, ORIGIN, createTestEdge } from './fixtures.ts'
 
 describe('dashboard proxy', () => {
-  it('sends a read to the controller under its own Host, keeping the path and query', async () => {
-    const edge = createTestEdge({ setup: READY_SETUP })
+  it('sends a read to the controller, keeping the path and query', async () => {
+    const edge = createTestEdge()
 
     const response = await handleRequest(new Request(`${ORIGIN}/api/state?limit=5`), edge.dependencies)
 
     expect(await response.text()).toBe('dashboard')
-    expect(edge.dashboard[0]).toMatchObject({
-      url: 'http://wolfstar-github-agent.localhost/api/state?limit=5',
-      method: 'GET',
-    })
+    expect(edge.controller[0]).toMatchObject({ url: `${CONTROLLER_URL}/api/state?limit=5`, method: 'GET' })
   })
 
   it('translates the exact public Origin on a write and keeps the body', async () => {
-    const edge = createTestEdge({ setup: READY_SETUP })
+    const edge = createTestEdge()
 
     await handleRequest(
       new Request(`${ORIGIN}/api/pause`, { method: 'POST', headers: { origin: ORIGIN }, body: '{"paused":true}' }),
       edge.dependencies,
     )
 
-    expect(edge.dashboard[0]?.headers.get('origin')).toBe(CONTROLLER_ORIGIN)
-    expect(edge.dashboard[0]?.body).toBe('{"paused":true}')
+    expect(edge.controller[0]?.headers.get('origin')).toBe(CONTROLLER_URL)
+    expect(edge.controller[0]?.body).toBe('{"paused":true}')
   })
 
   it('refuses a write with a missing or foreign Origin before the controller sees it', async () => {
-    const edge = createTestEdge({ setup: READY_SETUP })
+    const edge = createTestEdge()
 
-    for (const headers of [{}, { origin: 'https://evil.example' }, { origin: CONTROLLER_ORIGIN }]) {
+    for (const headers of [{}, { origin: 'https://evil.example' }, { origin: CONTROLLER_URL }]) {
       const response = await handleRequest(
         new Request(`${ORIGIN}/api/pause`, { method: 'POST', headers }),
         edge.dependencies,
       )
       expect(response.status).toBe(403)
     }
-    expect(edge.dashboard).toHaveLength(0)
+    expect(edge.controller).toHaveLength(0)
   })
 
   it('passes the Authorization header through, because the controller checks the password', async () => {
-    const edge = createTestEdge({ setup: READY_SETUP })
+    const edge = createTestEdge()
 
     await handleRequest(
       new Request(`${ORIGIN}/`, { headers: { authorization: 'Basic YWdlbnQ6eA==' } }),
       edge.dependencies,
     )
 
-    expect(edge.dashboard[0]?.headers.get('authorization')).toBe('Basic YWdlbnQ6eA==')
+    expect(edge.controller[0]?.headers.get('authorization')).toBe('Basic YWdlbnQ6eA==')
   })
 
-  it('sends a WebSocket upgrade through the Durable Object fetch, translating the Origin', async () => {
-    const edge = createTestEdge({ setup: READY_SETUP })
+  it('sends a WebSocket upgrade to the controller, translating the Origin', async () => {
+    const edge = createTestEdge()
 
-    const response = await handleRequest(
+    await handleRequest(
       new Request(`${ORIGIN}/api/terminal/sessions/a/stream`, {
-        headers: { upgrade: 'websocket', origin: ORIGIN, cookie: 'controller_session=valid' },
+        headers: { upgrade: 'websocket', origin: ORIGIN },
       }),
       edge.dependencies,
     )
 
-    expect(await response.text()).toBe('upgraded')
-    expect(edge.dashboard).toHaveLength(0)
-    expect(edge.upgrades[0]).toMatchObject({
-      url: 'http://wolfstar-github-agent.localhost/api/terminal/sessions/a/stream',
-      method: 'GET',
-    })
-    expect(edge.upgrades[0]?.headers.get('origin')).toBe(CONTROLLER_ORIGIN)
-    expect(edge.upgrades[0]?.headers.get('upgrade')).toBe('websocket')
+    expect(edge.controller[0]).toMatchObject({ url: `${CONTROLLER_URL}/api/terminal/sessions/a/stream`, method: 'GET' })
+    expect(edge.controller[0]?.headers.get('origin')).toBe(CONTROLLER_URL)
+    expect(edge.controller[0]?.headers.get('upgrade')).toBe('websocket')
   })
 
   it('redirects plain HTTP to HTTPS', async () => {
-    const edge = createTestEdge({ setup: READY_SETUP })
+    const edge = createTestEdge()
 
     const response = await handleRequest(new Request('http://agent.example.com/history?x=1'), edge.dependencies)
 
     expect(response.status).toBe(308)
     expect(response.headers.get('location')).toBe('https://agent.example.com/history?x=1')
   })
+})
 
-  it('sends every dashboard path to setup until setup is complete', async () => {
-    const edge = createTestEdge()
+describe('controller origin', () => {
+  it('keeps only the origin of an https address', () => {
+    expect(controllerOrigin('https://agent.example.com/some/path?x=1')).toBe('https://agent.example.com')
+  })
 
-    const response = await handleRequest(new Request(`${ORIGIN}/history`), edge.dependencies)
-
-    expect(response.status).toBe(303)
-    expect(response.headers.get('location')).toBe(`${ORIGIN}/setup`)
-    expect(edge.dashboard).toHaveLength(0)
+  it('refuses a missing, malformed, or plain HTTP address', () => {
+    expect(() => controllerOrigin(undefined)).toThrow('not a URL')
+    expect(() => controllerOrigin('agent.example.com')).toThrow('not a URL')
+    expect(() => controllerOrigin('http://agent.example.com')).toThrow('https')
   })
 })

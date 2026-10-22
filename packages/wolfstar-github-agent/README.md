@@ -79,7 +79,6 @@ Saving validates the complete service configuration and its referenced files, re
 Select **Restart after current work** to apply the saved file. A pinned Agent selection still overrides the default provider.
 Configuration editing requires private dashboard access; the public ingress cannot read or change the host file.
 Provider credentials remain in their existing local login or secret files.
-Cloudflare deployments expose the same editor and persist operational settings in Durable Object storage, so a fresh Container restores them. Deployment-owned ports, internal origins, database location, credential paths and the allowed GitHub owners are labeled read-only. The owner boundary is shared with checkout provisioning and webhook admission. Provider secrets remain in Provider logins and never appear in the configuration response.
 
 New configurations opt out of inherited repository schedules with `routines_from_repositories: false`. Use Routines to add `routine_overrides` per repository, with explicit names, cron expressions, time zones, modes and enabled state. An empty routine list disables that repository's schedules. Existing configurations that omit this setting retain repository schedules until changed.
 

@@ -165,8 +165,6 @@ export interface StartAgentServiceOptions {
   userAccess?: GitHubUserAccess
   dashboardPassword: string
   capacityCommand?: string
-  /** The Agent session host, when it is not Hogwild's systemd. The Cloudflare Container sets it. */
-  sessionHost?: { label: string; processHost: 'systemd' | 'process' }
   githubPrivateKey: string
   gitIdentity: GitIdentity
   logger: Pick<ConsolaInstance, 'error' | 'info'>
@@ -2232,9 +2230,6 @@ export async function startAgentService(options: StartAgentServiceOptions): Prom
             : {}),
           memoryGiB: config.agent.memoryPerAgentGiB,
           admissionCli: maintenanceAdmission.capacityCommand,
-          ...(options.sessionHost
-            ? { hostLabel: options.sessionHost.label, processHost: options.sessionHost.processHost }
-            : {}),
           codexMode: config.server.agentSessionsCodexMode,
           protectedPaths: [
             dirname(config.storage.path),

@@ -1,4 +1,4 @@
-import type { ControllerPort, WebhookDelivery } from './env.ts'
+import type { WebhookDelivery } from './env.ts'
 import { verifyWebhookSignature } from './signature.ts'
 
 /** GitHub caps a delivery at 25 MB. The Caddy route used the same limit. */
@@ -21,7 +21,11 @@ const MAXIMUM_RETRY_DELAY_SECONDS = 15 * 60
  * of delivery identities. The Queue delivers at least once, so it relies on that.
  */
 export interface WebhookDependencies {
-  controller: ControllerPort
+  /** The GitHub App's webhook secret. Undefined until it is set, and every delivery is refused then. */
+  secret: string | undefined
+  /** The controller's origin. */
+  controllerUrl: string
+  fetch: typeof fetch
   webhooks: Queue<WebhookDelivery>
   bodies: R2Bucket
 }
@@ -33,9 +37,9 @@ export async function acceptWebhook(request: Request, dependencies: WebhookDepen
   const bytes = await request.arrayBuffer()
   if (bytes.byteLength > MAXIMUM_BODY_BYTES) return new Response('Body is too large.', { status: 413 })
 
-  // The secret comes from the GitHub App the setup created. Before setup there is nothing to verify against.
-  const secret = (await dependencies.controller.readSetup()).app?.webhookSecret
-  if (secret === undefined) return new Response('Setup is not complete.', { status: 503 })
+  // Without the secret there is nothing to verify against.
+  const secret = dependencies.secret
+  if (secret === undefined || secret === '') return new Response('The webhook secret is not set.', { status: 503 })
 
   const signature = request.headers.get('x-hub-signature-256')
   if (signature === null || !(await verifyWebhookSignature(secret, bytes, signature))) {
@@ -71,7 +75,6 @@ export type RelayOutcome = { _tag: 'Delivered' } | { _tag: 'Rejected'; status: n
  * The controller verifies the original signature again, so the Worker adds no
  * trust of its own. A 4xx answer will not change on retry, apart from 408 and
  * 429, so it is dropped and logged. Polling still reads that repository.
- * Before setup is complete there is no controller, and polling covers that too.
  */
 export async function relayDelivery(
   message: WebhookDelivery,
@@ -86,20 +89,25 @@ export async function relayDelivery(
     text = await object.text()
   }
 
-  let status: number | null
+  let status: number
   try {
-    status = await dependencies.controller.relayWebhook({
-      delivery: message.delivery,
-      event: message.event,
-      signature: message.signature,
-      text,
+    const response = await dependencies.fetch(`${dependencies.controllerUrl}/webhook`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-github-delivery': message.delivery,
+        'x-github-event': message.event,
+        'x-hub-signature-256': message.signature,
+      },
+      body: text,
     })
+    await response.body?.cancel()
+    status = response.status
   } catch {
-    // The Container is starting, restarting, or being replaced by a deploy.
+    // The controller is restarting or unreachable.
     return { _tag: 'Retry' }
   }
 
-  if (status === null) return { _tag: 'Rejected', status: 503 }
   if (status >= 200 && status < 300) return { _tag: 'Delivered' }
   if (status >= 500 || status === 408 || status === 429) return { _tag: 'Retry' }
   return { _tag: 'Rejected', status }

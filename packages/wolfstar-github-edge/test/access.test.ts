@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { accessSettings, clearAccessKeys } from '../src/access.ts'
 import { handleRequest } from '../src/app.ts'
-import { ORIGIN, READY_SETUP, createTestEdge, sign } from './fixtures.ts'
+import { ORIGIN, createTestEdge, sign } from './fixtures.ts'
 
 const TEAM = 'https://wolfstar.cloudflareaccess.com'
 const AUD = 'access-application-audience-tag'
@@ -48,9 +48,8 @@ async function token(
 
 function protectedEdge() {
   const edge = createTestEdge({
-    setup: READY_SETUP,
     now: NOW,
-    github: async (url) =>
+    external: async (url) =>
       url === `${TEAM}/cdn-cgi/access/certs`
         ? Response.json({ keys: [{ ...publicJwk, kid: 'key-1' }] })
         : new Response(null, { status: 404 }),
@@ -73,14 +72,14 @@ describe('Cloudflare Access check', () => {
     expect(await response.text()).toBe('dashboard')
   })
 
-  it('refuses a request without a token, before setup or the dashboard sees it', async () => {
+  it('refuses a request without a token, before the dashboard sees it', async () => {
     const edge = protectedEdge()
 
-    for (const path of ['/', '/history', '/setup', '/setup/providers', '/webhook/']) {
+    for (const path of ['/', '/history', '/webhook/']) {
       const response = await handleRequest(new Request(`${ORIGIN}${path}`), edge.dependencies)
       expect(response.status).toBe(403)
     }
-    expect(edge.dashboard).toHaveLength(0)
+    expect(edge.controller).toHaveLength(0)
   })
 
   it('refuses a token for another application, another team, a wrong key, or past its expiry', async () => {
@@ -102,7 +101,7 @@ describe('Cloudflare Access check', () => {
       )
       expect(response.status).toBe(403)
     }
-    expect(edge.dashboard).toHaveLength(0)
+    expect(edge.controller).toHaveLength(0)
   })
 
   it('keeps the webhook open to GitHub, which authenticates by signature instead', async () => {

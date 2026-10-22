@@ -9,8 +9,8 @@ export const AGENT_ACTOR_LOGIN = 'wolfstar-github-agent[bot]'
  * The login one GitHub App posts as.
  *
  * GitHub names an App's bot after the App's slug. A deployment that created its
- * own App, such as the Cloudflare setup page, has a slug of its own, and the
- * controller only recognises comments written under the login it expects.
+ * own App has a slug of its own, and the controller only recognises comments
+ * written under the login it expects.
  */
 export function agentActorLogin(appSlug: string | undefined): string {
   return appSlug === undefined ? AGENT_ACTOR_LOGIN : `${appSlug.toLowerCase()}[bot]`

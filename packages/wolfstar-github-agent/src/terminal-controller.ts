@@ -5,7 +5,6 @@ import type { AgentSessionsCodexMode } from './types.ts'
 import { timingSafeEqual } from 'node:crypto'
 import { constants } from 'node:fs'
 import { access } from 'node:fs/promises'
-import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -38,13 +37,6 @@ export function terminalDashboardAccess(request: IncomingMessage, password: stri
   )
 }
 
-function runnable(path: string): Promise<boolean> {
-  return access(path, constants.X_OK).then(
-    () => true,
-    () => false,
-  )
-}
-
 async function executable(name: string): Promise<string> {
   for (const directory of (process.env.PATH ?? '').split(':').filter(Boolean)) {
     const path = join(directory, name)
@@ -57,35 +49,6 @@ async function executable(name: string): Promise<string> {
     if (available) return path
   }
   return join(homedir(), '.local', 'bin', name)
-}
-
-/**
- * The Claude Code binary the Agent SDK ships, for a host where `claude` is not installed.
- *
- * The SDK pins the CLI it was built for, so a terminal session runs the same
- * Claude Code the controller's own turns do. The Container has nothing else.
- */
-export function bundledClaude(): string | null {
-  let sdk: string
-  try {
-    sdk = createRequire(import.meta.url).resolve('@anthropic-ai/claude-agent-sdk')
-  } catch {
-    return null
-  }
-  const fromSdk = createRequire(sdk)
-  // The package manager installs only the package matching this platform and libc.
-  const platform =
-    process.platform === 'linux'
-      ? [`linux-${process.arch}`, `linux-${process.arch}-musl`]
-      : [`${process.platform}-${process.arch}`]
-  for (const name of platform) {
-    try {
-      return fromSdk.resolve(`@anthropic-ai/claude-agent-sdk-${name}/claude`)
-    } catch {
-      // Only the package for this platform is installed.
-    }
-  }
-  return null
 }
 
 export function createTerminalDiffRequests(now: () => number) {
@@ -141,25 +104,20 @@ export async function createControllerTerminals(options: {
   codexMode: AgentSessionsCodexMode
   browserAuth?: BrowserAuth
   publicBrowserAuth?: BrowserAuth
-  /** The name the Sessions page shows for this host. */
-  hostLabel?: string
-  processHost?: 'systemd' | 'process'
 }) {
-  const [codex, installedClaude, opencode, projects] = await Promise.all([
+  const [codex, claude, opencode, projects] = await Promise.all([
     executable('codex'),
     executable('claude'),
     executable('opencode'),
     discoverDesktopSessionProjects(homedir()),
   ])
-  const claude = (await runnable(installedClaude)) ? installedClaude : (bundledClaude() ?? installedClaude)
   const providerArguments = controllerTerminalProviderArguments(options.codexMode)
   const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'mjs'
   return createTerminalRuntime({
     directory: options.directory,
     origin: options.origin,
     origins: [...new Set([options.origin, options.listenOrigin])],
-    hostLabel: options.hostLabel ?? 'Hogwild',
-    ...(options.processHost ? { processHost: options.processHost } : {}),
+    hostLabel: 'Hogwild',
     controller: true,
     projects: projects.map(({ id, name, path }) => ({ id, name, path })),
     providers: {

@@ -2,7 +2,7 @@ import type { WebhookDelivery } from '../src/env.ts'
 import { describe, expect, it } from 'vitest'
 import { handleQueue, handleRequest } from '../src/app.ts'
 import { MAXIMUM_INLINE_BYTES, retryDelaySeconds } from '../src/webhook.ts'
-import { ORIGIN, READY_SETUP, createTestEdge, sign } from './fixtures.ts'
+import { CONTROLLER_URL, ORIGIN, createTestEdge, sign } from './fixtures.ts'
 
 const DELIVERY = '72d3162e-cc78-11e3-81ab-4c9367dc0958'
 
@@ -45,7 +45,7 @@ function batchOf(messages: WebhookDelivery[], attempts = 1) {
 
 describe('webhook intake', () => {
   it('queues a signed delivery and answers 204 before the controller sees it', async () => {
-    const edge = createTestEdge({ setup: READY_SETUP })
+    const edge = createTestEdge()
     const body = JSON.stringify({ repository: { full_name: 'wolfstar-project/plugins' } })
 
     const response = await handleRequest(await deliver(body), edge.dependencies)
@@ -54,18 +54,18 @@ describe('webhook intake', () => {
     expect(edge.sent).toEqual([
       { delivery: DELIVERY, event: 'pull_request', signature: await sign(body), body: { _tag: 'Inline', text: body } },
     ])
-    expect(edge.relayed).toHaveLength(0)
+    expect(edge.controller).toHaveLength(0)
   })
 
-  it('answers 503 before setup created the App, because there is no secret to verify with', async () => {
-    const edge = createTestEdge()
+  it('answers 503 while the webhook secret is not set, because there is nothing to verify with', async () => {
+    const edge = createTestEdge({ secret: undefined })
 
     expect((await handleRequest(await deliver('{}'), edge.dependencies)).status).toBe(503)
     expect(edge.sent).toHaveLength(0)
   })
 
   it('rejects a wrong, missing, or malformed signature without queueing', async () => {
-    const edge = createTestEdge({ setup: READY_SETUP })
+    const edge = createTestEdge()
 
     for (const signature of [await sign('{}', 'another-secret'), 'sha256=nothex', '']) {
       const response = await handleRequest(await deliver('{}', { 'x-hub-signature-256': signature }), edge.dependencies)
@@ -75,7 +75,7 @@ describe('webhook intake', () => {
   })
 
   it('rejects a delivery identity that is missing or unsafe as a storage key', async () => {
-    const edge = createTestEdge({ setup: READY_SETUP })
+    const edge = createTestEdge()
 
     for (const delivery of ['', '../escape', 'a'.repeat(129)]) {
       const response = await handleRequest(await deliver('{}', { 'x-github-delivery': delivery }), edge.dependencies)
@@ -85,7 +85,7 @@ describe('webhook intake', () => {
   })
 
   it('moves a body too large for a Queue message into R2', async () => {
-    const edge = createTestEdge({ setup: READY_SETUP })
+    const edge = createTestEdge()
     const body = JSON.stringify({ padding: 'x'.repeat(MAXIMUM_INLINE_BYTES) })
 
     expect((await handleRequest(await deliver(body), edge.dependencies)).status).toBe(204)
@@ -95,12 +95,12 @@ describe('webhook intake', () => {
   })
 
   it('serves only POST on the exact webhook path', async () => {
-    const edge = createTestEdge({ setup: READY_SETUP })
+    const edge = createTestEdge()
 
     expect((await handleRequest(new Request(`${ORIGIN}/webhook`), edge.dependencies)).status).toBe(405)
     // `/webhook/` belongs to the dashboard, which keeps its own authentication.
     await handleRequest(new Request(`${ORIGIN}/webhook/`), edge.dependencies)
-    expect(edge.dashboard.map((call) => call.url)).toEqual(['http://wolfstar-github-agent.localhost/webhook/'])
+    expect(edge.controller.map((call) => call.url)).toEqual([`${CONTROLLER_URL}/webhook/`])
   })
 })
 
@@ -113,26 +113,32 @@ describe('webhook relay', () => {
   }
 
   it('forwards the original signature, event, and body to the controller', async () => {
-    const edge = createTestEdge({ setup: READY_SETUP })
+    const edge = createTestEdge()
     const { batch, recorded } = batchOf([message])
 
     await handleQueue(batch, edge.dependencies)
 
-    expect(edge.relayed).toEqual([
-      { delivery: DELIVERY, event: 'issues', signature: message.signature, text: '{"action":"opened"}' },
-    ])
+    expect(edge.controller).toHaveLength(1)
+    expect(edge.controller[0]).toMatchObject({
+      url: `${CONTROLLER_URL}/webhook`,
+      method: 'POST',
+      body: '{"action":"opened"}',
+    })
+    expect(edge.controller[0]?.headers.get('x-github-delivery')).toBe(DELIVERY)
+    expect(edge.controller[0]?.headers.get('x-github-event')).toBe('issues')
+    expect(edge.controller[0]?.headers.get('x-hub-signature-256')).toBe(message.signature)
     expect(recorded[0]).toMatchObject({ acked: true, retriedAfter: null })
   })
 
-  it('retries with backoff while the controller is starting or failing', async () => {
+  it('retries with backoff while the controller is unreachable or failing', async () => {
     for (const relay of [
       async () => {
-        throw new Error('container starting')
+        throw new Error('controller unreachable')
       },
       async () => 502,
       async () => 429,
     ]) {
-      const edge = createTestEdge({ setup: READY_SETUP, relay })
+      const edge = createTestEdge({ relay })
       const { batch, recorded } = batchOf([message], 3)
 
       await handleQueue(batch, edge.dependencies)
@@ -141,9 +147,9 @@ describe('webhook relay', () => {
     }
   })
 
-  it('drops a delivery the controller refuses, or one that arrives before setup is complete', async () => {
-    for (const relay of [async () => 401, async () => null]) {
-      const edge = createTestEdge({ setup: READY_SETUP, relay })
+  it('drops a delivery the controller refuses', async () => {
+    for (const relay of [async () => 401, async () => 404]) {
+      const edge = createTestEdge({ relay })
       const { batch, recorded } = batchOf([message])
 
       await handleQueue(batch, edge.dependencies)
@@ -153,18 +159,18 @@ describe('webhook relay', () => {
   })
 
   it('reads a stored body from R2 and deletes it once the controller answers', async () => {
-    const edge = createTestEdge({ setup: READY_SETUP })
+    const edge = createTestEdge()
     edge.objects.set(`deliveries/${DELIVERY}`, '{"large":true}')
     const { batch } = batchOf([{ ...message, body: { _tag: 'Stored', key: `deliveries/${DELIVERY}` } }])
 
     await handleQueue(batch, edge.dependencies)
 
-    expect(edge.relayed[0]?.text).toBe('{"large":true}')
+    expect(edge.controller[0]?.body).toBe('{"large":true}')
     expect(edge.objects.size).toBe(0)
   })
 
   it('keeps a stored body while the delivery waits for a retry', async () => {
-    const edge = createTestEdge({ setup: READY_SETUP, relay: async () => 503 })
+    const edge = createTestEdge({ relay: async () => 503 })
     edge.objects.set(`deliveries/${DELIVERY}`, '{"large":true}')
     const { batch } = batchOf([{ ...message, body: { _tag: 'Stored', key: `deliveries/${DELIVERY}` } }])
 

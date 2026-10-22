@@ -19,7 +19,7 @@ import { discoverLocalCheckouts } from './repository-discovery.ts'
 import { err } from './result.ts'
 import { describePreflightIssues, loadServiceInputs } from './service-preflight.ts'
 import { combineServiceState } from './service-state.ts'
-import { createDeployedServiceUpdateSource, createGitServiceUpdateSource } from './service-update.ts'
+import { createGitServiceUpdateSource } from './service-update.ts'
 import { startAgentService } from './service.ts'
 import { stopWithin } from './shutdown.ts'
 import { openJournalStore } from './store.ts'
@@ -776,38 +776,19 @@ const command = defineCommand({
     const classification = config.classification
     const webhook = config.webhook
 
-    // The Cloudflare Container has no checkout to pull. A deploy replaces it.
-    const serviceUpdate =
-      process.env.WOLFSTAR_GITHUB_AGENT_UPDATES === 'deploy'
-        ? createDeployedServiceUpdateSource({
-            deployedCommit: process.env.WOLFSTAR_GITHUB_AGENT_COMMIT ?? 'unknown',
-            now: () => new Date(),
-          })
-        : createGitServiceUpdateSource({
-            repositoryRoot: process.cwd(),
-            now: () => new Date(),
-            onError: (error) => consola.error(error),
-          })
+    const serviceUpdate = createGitServiceUpdateSource({
+      repositoryRoot: process.cwd(),
+      now: () => new Date(),
+      onError: (error) => consola.error(error),
+    })
     const capacityCommand = process.env.WOLFSTAR_HOST_CAPACITY_COMMAND
     if (
       capacityCommand !== undefined &&
       (!isAbsolute(capacityCommand) || capacityCommand.includes('\0') || capacityCommand.length > 4096)
     )
       throw new Error('The host capacity command requires an absolute path.')
-    const sessionHostLabel = process.env.WOLFSTAR_SESSION_HOST_LABEL?.trim()
-    const sessionProcessHost = process.env.WOLFSTAR_SESSION_PROCESS_HOST
-    if (sessionProcessHost !== undefined && sessionProcessHost !== 'systemd' && sessionProcessHost !== 'process')
-      throw new Error('WOLFSTAR_SESSION_PROCESS_HOST must be systemd or process.')
     const service = await startAgentService({
       ...(capacityCommand === undefined ? {} : { capacityCommand }),
-      ...(sessionHostLabel || sessionProcessHost
-        ? {
-            sessionHost: {
-              label: sessionHostLabel || 'Hogwild',
-              processHost: sessionProcessHost ?? 'systemd',
-            },
-          }
-        : {}),
       ...(classification._tag === 'Enabled' && classificationToken !== null
         ? {
             classification: {
