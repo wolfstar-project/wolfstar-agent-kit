@@ -9,9 +9,6 @@ catalogs:
     '@anthropic-ai/claude-agent-sdk':
       specifier: ^0.3.302
       version: 0.3.302
-    '@cloudflare/containers':
-      specifier: ^0.3.0
-      version: 0.3.7
     '@cloudflare/workers-types':
       specifier: ^5.20261012.1
       version: 5.20261013.1
@@ -278,10 +275,10 @@ importers:
         version: 12.1.0
       vitepress:
         specifier: 'catalog:'
-        version: 1.6.4(@algolia/client-search@5.59.0)(@types/node@26.6.5)(fuse.js@7.5.0)(jiti@2.7.0)(lightningcss@1.33.0)(postcss@8.5.28)(search-insights@2.17.3)(terser@5.51.2)(typescript@6.0.3)(yaml@2.9.1)
+        version: 1.6.4(@algolia/client-search@5.59.0)(@types/node@26.6.5)(fuse.js@7.5.0)(jiti@2.7.0)(lightningcss@1.33.0)(postcss@8.5.30)(search-insights@2.17.3)(terser@5.51.2)(typescript@6.0.3)(yaml@2.9.1)
       vitepress-plugin-mermaid:
         specifier: 'catalog:'
-        version: 2.0.17(mermaid@12.1.0)(vitepress@1.6.4(@algolia/client-search@5.59.0)(@types/node@26.6.5)(fuse.js@7.5.0)(jiti@2.7.0)(lightningcss@1.33.0)(postcss@8.5.28)(search-insights@2.17.3)(terser@5.51.2)(typescript@6.0.3)(yaml@2.9.1))
+        version: 2.0.17(mermaid@12.1.0)(vitepress@1.6.4(@algolia/client-search@5.59.0)(@types/node@26.6.5)(fuse.js@7.5.0)(jiti@2.7.0)(lightningcss@1.33.0)(postcss@8.5.30)(search-insights@2.17.3)(terser@5.51.2)(typescript@6.0.3)(yaml@2.9.1))
 
   packages/wolfstar-github-agent:
     dependencies:
@@ -411,10 +408,6 @@ importers:
         version: 3.3.13(typescript@6.0.3)
 
   packages/wolfstar-github-edge:
-    dependencies:
-      '@cloudflare/containers':
-        specifier: 'catalog:'
-        version: 0.3.7
     devDependencies:
       '@cloudflare/workers-types':
         specifier: 'catalog:'
@@ -842,9 +835,6 @@ packages:
   '@clack/prompts@1.8.1':
     resolution: {integrity: sha512-dlT1m5e/0yUL0kRNcQn7yGLVThkgbB0Ga/1AmfDDC/8ik6AIiSf2QLQO2zPYvefsHP0aFgxO93cVLCCfDp7kzQ==}
     engines: {node: '>= 20.12.0'}
-
-  '@cloudflare/containers@0.3.7':
-    resolution: {integrity: sha512-DM9dm3FnIBSyiSJ1FLavKwl/lk3oAmTaynCzZQ9pZR0ncRPquSxkxd8Nu2MFILxmDDsPkxKsSNEh9mHHMty4Fw==}
 
   '@cloudflare/kv-asset-handler@0.4.2':
     resolution: {integrity: sha512-SIOD2DxrRRwQ+jgzlXCqoEFiKOFqaPjhnNTGKXSRLvp1HiOvapLaFG2kEr9dYQTYe8rKrd9uvDUzmAITeNyaHQ==}
@@ -8523,8 +8513,6 @@ snapshots:
       fast-wrap-ansi: 0.2.2
       sisteransi: 1.0.5
 
-  '@cloudflare/containers@0.3.7': {}
-
   '@cloudflare/kv-asset-handler@0.4.2': {}
 
   '@cloudflare/kv-asset-handler@0.5.0': {}
@@ -15885,14 +15873,14 @@ snapshots:
       terser: 5.51.2
       yaml: 2.9.1
 
-  vitepress-plugin-mermaid@2.0.17(mermaid@12.1.0)(vitepress@1.6.4(@algolia/client-search@5.59.0)(@types/node@26.6.5)(fuse.js@7.5.0)(jiti@2.7.0)(lightningcss@1.33.0)(postcss@8.5.28)(search-insights@2.17.3)(terser@5.51.2)(typescript@6.0.3)(yaml@2.9.1)):
+  vitepress-plugin-mermaid@2.0.17(mermaid@12.1.0)(vitepress@1.6.4(@algolia/client-search@5.59.0)(@types/node@26.6.5)(fuse.js@7.5.0)(jiti@2.7.0)(lightningcss@1.33.0)(postcss@8.5.30)(search-insights@2.17.3)(terser@5.51.2)(typescript@6.0.3)(yaml@2.9.1)):
     dependencies:
       mermaid: 12.1.0
-      vitepress: 1.6.4(@algolia/client-search@5.59.0)(@types/node@26.6.5)(fuse.js@7.5.0)(jiti@2.7.0)(lightningcss@1.33.0)(postcss@8.5.28)(search-insights@2.17.3)(terser@5.51.2)(typescript@6.0.3)(yaml@2.9.1)
+      vitepress: 1.6.4(@algolia/client-search@5.59.0)(@types/node@26.6.5)(fuse.js@7.5.0)(jiti@2.7.0)(lightningcss@1.33.0)(postcss@8.5.30)(search-insights@2.17.3)(terser@5.51.2)(typescript@6.0.3)(yaml@2.9.1)
     optionalDependencies:
       '@mermaid-js/mermaid-mindmap': 9.3.0
 
-  vitepress@1.6.4(@algolia/client-search@5.59.0)(@types/node@26.6.5)(fuse.js@7.5.0)(jiti@2.7.0)(lightningcss@1.33.0)(postcss@8.5.28)(search-insights@2.17.3)(terser@5.51.2)(typescript@6.0.3)(yaml@2.9.1):
+  vitepress@1.6.4(@algolia/client-search@5.59.0)(@types/node@26.6.5)(fuse.js@7.5.0)(jiti@2.7.0)(lightningcss@1.33.0)(postcss@8.5.30)(search-insights@2.17.3)(terser@5.51.2)(typescript@6.0.3)(yaml@2.9.1):
     dependencies:
       '@docsearch/css': 3.8.2
       '@docsearch/js': 3.8.2(@algolia/client-search@5.59.0)(search-insights@2.17.3)
@@ -15913,7 +15901,7 @@ snapshots:
       vite: 6.4.4(@types/node@26.6.5)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.51.2)(yaml@2.9.1)
       vue: 3.5.43(typescript@6.0.3)
     optionalDependencies:
-      postcss: 8.5.28
+      postcss: 8.5.30
     transitivePeerDependencies:
       - '@algolia/client-search'
       - '@types/node'

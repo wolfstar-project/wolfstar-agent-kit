@@ -11,9 +11,6 @@
     "test:run": "vitest run",
     "typecheck": "tsc --noEmit"
   },
-  "dependencies": {
-    "@cloudflare/containers": "catalog:"
-  },
   "devDependencies": {
     "@cloudflare/workers-types": "catalog:",
     "typescript": "catalog:",

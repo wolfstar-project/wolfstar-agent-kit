@@ -11,10 +11,9 @@ const props = withDefaults(
     path?: string
     issues?: ConfigurationIssue[]
     includeUnknown?: boolean
-    lockedPaths?: string[]
     columns?: boolean
   }>(),
-  { path: '$', issues: () => [], includeUnknown: true, columns: false, lockedPaths: () => [] },
+  { path: '$', issues: () => [], includeUnknown: true, columns: false },
 )
 const emit = defineEmits<{ update: [values: Record<string, unknown>] }>()
 const added = reactive<Record<string, number>>({})
@@ -35,7 +34,6 @@ const standard = computed(() => allFields.value.filter((field) => !field.advance
 const advanced = computed(() =>
   allFields.value.filter((field) => field.advanced).map((field) => ({ ...field, advanced: false })),
 )
-const locked = (key: string): boolean => props.lockedPaths.includes(`${props.path}.${key}`)
 const fieldPath = (key: string): string => `${props.path}.${key}`
 const identifier = (key: string): string =>
   `configuration-${fieldPath(key)
@@ -148,7 +146,6 @@ function issueText(field: ConfigurationField): string {
           :fields="field.fields"
           :path="fieldPath(field.key)"
           :issues="issues"
-          :locked-paths="lockedPaths"
           :columns="field.layout === 'columns'"
           @update="setGroup(field, $event)"
         />
@@ -188,7 +185,6 @@ function issueText(field: ConfigurationField): string {
               :fields="field.fields"
               :path="`${fieldPath(field.key)}[${index}]`"
               :issues="issues"
-              :locked-paths="lockedPaths"
               @update="setEntry(field.key, index, $event)"
             />
             <UButton
@@ -255,7 +251,6 @@ function issueText(field: ConfigurationField): string {
           <USwitch
             v-else
             :id="identifier(field.key)"
-            :disabled="locked(field.key)"
             :model-value="Boolean(displayed(field))"
             :aria-label="field.label"
             :aria-describedby="field.hint ? `${identifier(field.key)}-help` : undefined"
@@ -268,7 +263,6 @@ function issueText(field: ConfigurationField): string {
         <CronBuilder
           :id="identifier(field.key)"
           :label="field.label"
-          :disabled="locked(field.key)"
           :model-value="String(displayed(field) ?? '')"
           @update:model-value="set(field.key, $event)"
         />
@@ -278,7 +272,7 @@ function issueText(field: ConfigurationField): string {
       <UFormField
         v-else
         :label="field.label"
-        :description="locked(field.key) ? 'Managed by the Cloudflare deployment.' : field.hint"
+        :description="field.hint"
         :error="errorFor(field.key)"
         :name="fieldPath(field.key)"
         :for="identifier(field.key)"
@@ -287,7 +281,6 @@ function issueText(field: ConfigurationField): string {
         <div
           v-if="field.kind === 'order'"
           :id="identifier(field.key)"
-          :disabled="locked(field.key)"
           class="divide-y divide-default rounded-md border border-default"
           role="group"
           :aria-label="field.label"
@@ -350,7 +343,6 @@ function issueText(field: ConfigurationField): string {
         <UCheckboxGroup
           v-else-if="field.kind === 'multi-choice'"
           :id="identifier(field.key)"
-          :disabled="locked(field.key)"
           :model-value="stringValues(field)"
           :items="
             field.choices.map((value) => ({
@@ -368,7 +360,6 @@ function issueText(field: ConfigurationField): string {
         <USelect
           v-else-if="field.kind === 'choice'"
           :id="identifier(field.key)"
-          :disabled="locked(field.key)"
           :items="
             field.choices.map((value) => ({
               value,
@@ -382,7 +373,6 @@ function issueText(field: ConfigurationField): string {
         <USelectMenu
           v-else-if="field.kind === 'repository' && installedRepositories.length > 0"
           :id="identifier(field.key)"
-          :disabled="locked(field.key)"
           :items="repositoryItems(field)"
           :model-value="String(displayed(field) ?? '')"
           :placeholder="field.placeholder"
@@ -394,7 +384,6 @@ function issueText(field: ConfigurationField): string {
         <UInputTags
           v-else-if="field.kind === 'list'"
           :id="identifier(field.key)"
-          :disabled="locked(field.key)"
           :model-value="stringValues(field)"
           :placeholder="field.placeholder ?? 'Add a value…'"
           class="w-full"
@@ -429,7 +418,6 @@ function issueText(field: ConfigurationField): string {
         <UInput
           v-else-if="field.kind === 'issues'"
           :id="identifier(field.key)"
-          :disabled="locked(field.key)"
           :model-value="issueText(field)"
           placeholder="all or 658, 700"
           class="w-full"
@@ -443,14 +431,12 @@ function issueText(field: ConfigurationField): string {
           :id="identifier(field.key)"
           :model-value="String(displayed(field) ?? '')"
           :label="field.label"
-          :disabled="locked(field.key)"
           :required="!field.optional"
           @update:model-value="set(field.key, $event)"
         />
         <UInput
           v-else-if="field.kind === 'number'"
           :id="identifier(field.key)"
-          :disabled="locked(field.key)"
           type="number"
           :min="field.min"
           :max="field.max"
@@ -464,7 +450,6 @@ function issueText(field: ConfigurationField): string {
         <UTextarea
           v-else-if="field.kind === 'multiline'"
           :id="identifier(field.key)"
-          :disabled="locked(field.key)"
           :model-value="String(displayed(field) ?? '')"
           :rows="4"
           class="w-full"
@@ -473,7 +458,6 @@ function issueText(field: ConfigurationField): string {
         <UInput
           v-else
           :id="identifier(field.key)"
-          :disabled="locked(field.key)"
           type="text"
           :model-value="String(displayed(field) ?? '')"
           :placeholder="field.placeholder"
@@ -483,7 +467,7 @@ function issueText(field: ConfigurationField): string {
           @update:model-value="set(field.key, String($event))"
         />
         <UButton
-          v-if="field.optional && values[field.key] !== undefined && !locked(field.key)"
+          v-if="field.optional && values[field.key] !== undefined"
           color="neutral"
           variant="ghost"
           class="mt-2 min-h-11"
@@ -506,7 +490,6 @@ function issueText(field: ConfigurationField): string {
           :fields="advanced"
           :path="path"
           :issues="issues"
-          :locked-paths="lockedPaths"
           :include-unknown="false"
           @update="emit('update', $event)"
         />

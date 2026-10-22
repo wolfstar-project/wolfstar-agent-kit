@@ -1,27 +1,31 @@
 import type { AccessSettings } from './access.ts'
-import type { ControllerPort, WebhookDelivery } from './env.ts'
+import type { WebhookDelivery } from './env.ts'
 import { hasAccessToken } from './access.ts'
-import { controllerAuthenticates, proxyDashboard } from './dashboard.ts'
-import { handleSetup, isReady } from './setup.ts'
+import { proxyDashboard } from './dashboard.ts'
 import { acceptWebhook, consumeWebhooks } from './webhook.ts'
 
 /** Everything the routes need, so tests run them without Cloudflare bindings. */
 export interface EdgeDependencies {
-  controller: ControllerPort
+  /** The controller's origin. */
+  controllerUrl: string
+  /** The GitHub App's webhook secret. */
+  webhookSecret: string | undefined
   webhooks: Queue<WebhookDelivery>
   state: R2Bucket
-  allowedOwners: string[]
   /** Cloudflare Access in front of everything but `/webhook`. Null when Access is not set up. */
   access: AccessSettings | null
   fetch: typeof fetch
   now: () => number
 }
 
-export function parseAllowedOwners(value: string | undefined): string[] {
-  return (value ?? '')
-    .split(',')
-    .map((owner) => owner.trim())
-    .filter((owner) => owner !== '')
+function webhookDependencies(dependencies: EdgeDependencies) {
+  return {
+    secret: dependencies.webhookSecret,
+    controllerUrl: dependencies.controllerUrl,
+    fetch: dependencies.fetch,
+    webhooks: dependencies.webhooks,
+    bodies: dependencies.state,
+  }
 }
 
 export async function handleRequest(request: Request, dependencies: EdgeDependencies): Promise<Response> {
@@ -34,39 +38,16 @@ export async function handleRequest(request: Request, dependencies: EdgeDependen
   // Only this exact path reaches the webhook relay. `/webhook/` stays a dashboard route.
   if (url.pathname === '/webhook') {
     if (request.method !== 'POST') return new Response('Method not allowed.', { status: 405 })
-    return acceptWebhook(request, {
-      controller: dependencies.controller,
-      webhooks: dependencies.webhooks,
-      bodies: dependencies.state,
-    })
+    return acceptWebhook(request, webhookDependencies(dependencies))
   }
 
   // Everything past here is for a person, so it needs the Access sign-in when Access is set up.
   if (dependencies.access !== null && !(await hasAccessToken(request, dependencies.access, dependencies)))
     return new Response('Sign in through Cloudflare Access.', { status: 403 })
 
-  const setup = await handleSetup(request, {
-    store: {
-      read: dependencies.controller.readSetup,
-      write: dependencies.controller.writeSetup,
-      restart: dependencies.controller.restart,
-    },
-    allowedOwners: dependencies.allowedOwners,
-    fetch: dependencies.fetch,
-    now: dependencies.now,
-    authenticate: (candidate) => controllerAuthenticates(candidate, dependencies.controller),
-  })
-  if (setup !== null) return setup
-
-  // Until setup is complete there is no controller to show.
-  if (!isReady(await dependencies.controller.readSetup())) return Response.redirect(`${url.origin}/setup`, 303)
-  return proxyDashboard(request, dependencies.controller)
+  return proxyDashboard(request, dependencies)
 }
 
 export async function handleQueue(batch: MessageBatch<WebhookDelivery>, dependencies: EdgeDependencies): Promise<void> {
-  await consumeWebhooks(batch, {
-    controller: dependencies.controller,
-    webhooks: dependencies.webhooks,
-    bodies: dependencies.state,
-  })
+  await consumeWebhooks(batch, webhookDependencies(dependencies))
 }

@@ -5,41 +5,22 @@
   "compatibility_date": "2026-10-13",
   "upload_source_maps": true,
   "observability": { "enabled": true },
-  // The setup page builds the GitHub App webhook URL from the hostname it is opened on.
-  // A preview URL would register a second hostname, so only the workers.dev route serves.
+  // The GitHub App webhook and the Access application name one hostname.
+  // A preview URL would be a second hostname outside Access, so only the workers.dev route serves.
   "workers_dev": true,
   "preview_urls": false,
-  // The only setting a deploy needs: the GitHub owners the agent may act on.
-  // Everything else comes from the setup page at /setup on the deployed URL.
   "vars": {
-    "ALLOWED_OWNERS": "wolfstar-project",
+    // Where webhooks and the dashboard go: the controller's public https origin, with no path.
+    "CONTROLLER_URL": "https://agent.harlanzw.com",
     // Cloudflare Access in front of every route but /webhook. Clear both to turn the check off.
     "ACCESS_TEAM_DOMAIN": "https://wolfstar.cloudflareaccess.com",
     "ACCESS_AUD": "808350b0ce80d953105d631f4e9db423289eb1e973f45de04eb38ca53341242e",
   },
-  "containers": [
-    {
-      "class_name": "ControllerContainer",
-      "image": "./container/Dockerfile",
-      "image_build_context": "../..",
-      // 1 vCPU, 6 GiB, 12 GB disk. The controller never sleeps, so memory and disk are billed all month:
-      // standard-4 (12 GiB) cost about twice as much for a second concurrent Agent. One Agent runs at a time here.
-      "instance_type": "standard-2",
-      // One controller. Raising this multiplies the always-on cost.
-      "max_instances": 1,
-      // Debugging through `wrangler containers ssh <instance>`. Only listed keys connect, and only through Wrangler.
-      "authorized_keys": [
-        {
-          "name": "redstar-debug",
-          "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ8jxFkElZEn21sfrkv4yeYwyfMl1o+QZmS+J1HCD3mb wolfstar-debug",
-        },
-      ],
-    },
+  // The Container and its Durable Object held the controller. Version 2 removes the class and its stored setup.
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ControllerContainer"] },
+    { "tag": "v2", "deleted_classes": ["ControllerContainer"] },
   ],
-  "durable_objects": {
-    "bindings": [{ "name": "CONTROLLER", "class_name": "ControllerContainer" }],
-  },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ControllerContainer"] }],
   "queues": {
     "producers": [{ "binding": "WEBHOOKS", "queue": "wolfstar-github-webhooks" }],
     "consumers": [
@@ -53,8 +34,4 @@
     ],
   },
   "r2_buckets": [{ "binding": "STATE", "bucket_name": "wolfstar-github-agent-state" }],
-  // Worktree snapshots. The namespace is created with its first repository.
-  "artifacts": [{ "binding": "ARTIFACTS", "namespace": "wolfstar-agent" }],
-  // Starts the controller again after a deploy or a host move.
-  "triggers": { "crons": ["*/5 * * * *"] },
 }

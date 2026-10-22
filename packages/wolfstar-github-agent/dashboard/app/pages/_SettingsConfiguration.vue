@@ -14,47 +14,10 @@ import SettingsAccount from './_SettingsAccount.vue'
 type LoadState = { _tag: 'Loading' } | { _tag: 'Failed'; message: string } | { _tag: 'Ready'; view: ConfigurationView }
 const state = ref<LoadState>({ _tag: 'Loading' })
 const draft = ref<Record<string, unknown>>({})
-const slots = useSlots()
 const sections = CONFIGURATION_SECTIONS
 const active = ref<ConfigurationSectionId>('automation')
-/** Settings the Cloudflare deployment keeps, opened from inside the section they belong to. */
-const SUBSECTIONS = [
-  {
-    id: 'providers',
-    section: 'agents',
-    label: 'Provider logins',
-    description: 'Sign in to Claude, Codex, GLM and Workers AI for the Cloudflare deployment.',
-  },
-  {
-    id: 'github-account',
-    section: 'github',
-    label: 'GitHub App and your account',
-    description: 'Install the App on more repositories, connect your own account, and allow writes.',
-  },
-] as const
-type SubsectionId = (typeof SUBSECTIONS)[number]['id']
-const subsection = ref<SubsectionId>()
-const entries = computed(() =>
-  SUBSECTIONS.filter((entry) => entry.section === active.value && slots[entry.id] !== undefined),
-)
-const opened = computed(() => SUBSECTIONS.find((entry) => entry.id === subsection.value))
-watch(active, () => {
-  subsection.value = undefined
-})
 function showIssue(path: string): void {
   active.value = configurationIssueSection(path)
-  subsection.value = undefined
-}
-async function openSubsection(id: SubsectionId): Promise<void> {
-  subsection.value = id
-  await nextTick()
-  document.getElementById('settings-subsection-title')?.focus()
-}
-async function closeSubsection(): Promise<void> {
-  const id = subsection.value
-  subsection.value = undefined
-  await nextTick()
-  document.getElementById(`settings-entry-${id}`)?.focus()
 }
 const saving = ref(false)
 const problem = ref<{ message: string; issues: ConfigurationIssue[] }>()
@@ -252,68 +215,20 @@ useEventListener(window, 'beforeunload', (event: BeforeUnloadEvent) => {
           </div>
 
           <SettingsAccount v-if="active === 'account'" />
-          <div v-else-if="opened" class="space-y-5">
-            <UButton
-              :label="`Back to ${section.label}`"
-              icon="i-octicon-arrow-left-16"
-              color="neutral"
-              variant="ghost"
-              class="min-h-11"
-              @click="closeSubsection"
-            />
-            <h2
-              id="settings-subsection-title"
-              tabindex="-1"
-              class="text-base font-medium text-highlighted outline-none"
-            >
-              {{ opened.label }}
-            </h2>
-            <slot :name="opened.id" />
-          </div>
-          <template v-else>
-            <div v-if="entries.length" class="mb-7 space-y-3">
-              <UButton
-                v-for="entry in entries"
-                :id="`settings-entry-${entry.id}`"
-                :key="entry.id"
-                color="neutral"
-                variant="outline"
-                class="min-h-16 w-full justify-between gap-4 p-4 text-start"
-                :aria-label="`Open ${entry.label}`"
-                @click="openSubsection(entry.id)"
-              >
-                <span class="min-w-0 space-y-1 whitespace-normal">
-                  <span class="block text-sm font-medium text-highlighted">{{ entry.label }}</span>
-                  <span class="block text-sm font-normal text-muted">{{ entry.description }}</span>
-                </span>
-                <UIcon name="i-octicon-chevron-right-16" class="size-4 shrink-0 text-muted" aria-hidden="true" />
-              </UButton>
-            </div>
-          </template>
-          <form
-            v-show="active !== 'account' && !opened"
-            id="local-configuration-form"
-            novalidate
-            @submit.prevent="save"
-          >
+          <form v-show="active !== 'account'" id="local-configuration-form" novalidate @submit.prevent="save">
             <fieldset :disabled="saving" data-settings-fields class="min-w-0">
               <SettingsFields
                 :key="active"
                 :values="draft"
                 :fields="fields"
                 :issues="problem?.issues ?? []"
-                :locked-paths="view.managedPaths ?? []"
                 :include-unknown="false"
                 @update="draft = $event"
               />
             </fieldset>
           </form>
-          <p
-            v-if="active === 'agents' && !opened"
-            class="mt-6 border-t border-default pt-4 text-sm leading-relaxed text-muted"
-          >
-            A pinned Agent selection overrides these defaults.
-            {{ slots.providers ? '' : 'Provider logins stay on this machine.' }}
+          <p v-if="active === 'agents'" class="mt-6 border-t border-default pt-4 text-sm leading-relaxed text-muted">
+            A pinned Agent selection overrides these defaults. Provider logins stay on this machine.
           </p>
         </div>
       </div>

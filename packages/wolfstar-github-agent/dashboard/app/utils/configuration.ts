@@ -6,7 +6,6 @@ export const installedRepositoriesKey: InjectionKey<Ref<string[]>> = Symbol('ins
 
 export interface ConfigurationView {
   path: string
-  managedPaths?: string[]
   revision: string
   values: Record<string, unknown>
 }
@@ -294,8 +293,8 @@ export const CONFIGURATION_FIELDS: ConfigurationField[] = [
       text('account_id', 'Account ID'),
       {
         ...text('token_path', 'Token file'),
-        hint: 'Absolute path of a file that holds the Cloudflare API token, not the token itself. With a Workers AI login on the Cloudflare deployment, use /home/node/.config/wolfstar-github-agent/classification-token.',
-        placeholder: '/home/node/.config/wolfstar-github-agent/classification-token',
+        hint: 'Absolute path of a file that holds the Cloudflare API token, not the token itself.',
+        placeholder: '/home/wolfstar/.config/wolfstar-github-agent/classification-token',
       },
       { ...text('gateway_id', 'AI Gateway ID'), optional: true },
       {
