@@ -1,5 +1,5 @@
-import type { AgentFeedback, AgentRole, DashboardSnapshot, ReviewAgent, ReviewGateState } from '../../../src/types.ts'
-import type { CardBadge, HistoryCategory, HistoryRecord } from './dashboard.ts'
+import type { AgentFeedback, DashboardSnapshot, ReviewAgent, ReviewGateState } from '../../../src/types.ts'
+import type { CardBadge, HistoryCategory, HistoryRecord, WorkKey } from './dashboard.ts'
 import {
   buildHistory,
   historyCategory,
@@ -21,7 +21,7 @@ import {
 export type HistoryRow = HistoryRecord
 
 /** The outcome chips, in chip order. Names follow the GLOSSARY, not the internal category. */
-export type OutcomeFilter = 'all' | 'ready' | 'findings' | 'pending' | 'blocked' | 'superseded'
+export type OutcomeFilter = 'all' | 'ready' | 'findings' | 'pending' | 'blocked' | 'skipped' | 'superseded'
 
 export const outcomeFilters: ReadonlyArray<{ label: string; value: OutcomeFilter }> = [
   { label: 'All', value: 'all' },
@@ -29,6 +29,7 @@ export const outcomeFilters: ReadonlyArray<{ label: string; value: OutcomeFilter
   { label: 'Findings', value: 'findings' },
   { label: 'Pending', value: 'pending' },
   { label: 'Blocked', value: 'blocked' },
+  { label: 'Skipped', value: 'skipped' },
   { label: 'Superseded', value: 'superseded' },
 ]
 
@@ -37,6 +38,7 @@ const filterCategories: Record<Exclude<OutcomeFilter, 'all'>, HistoryCategory> =
   findings: 'issues',
   pending: 'pending',
   blocked: 'failed',
+  skipped: 'skipped',
   superseded: 'superseded',
 }
 
@@ -52,9 +54,16 @@ export function outcomeFilterMatches(row: HistoryRow, filter: OutcomeFilter): bo
  */
 export type HistoryRange =
   | { _tag: 'All' }
-  | { _tag: 'Stats'; from: string | undefined; to: string | undefined; work: AgentRole | undefined }
+  | {
+      _tag: 'Stats'
+      from: string | undefined
+      to: string | undefined
+      work: WorkKey | undefined
+      repository?: string
+      routine?: string
+    }
 
-const agentRoles: ReadonlySet<string> = new Set<AgentRole>([
+const workKeys: ReadonlySet<string> = new Set<WorkKey>([
   'conflict_resolution',
   'review_fix',
   'baseline_repair',
@@ -75,17 +84,29 @@ export function historyRangeFromQuery(query: Record<string, unknown>): HistoryRa
   const from = queryString(query.from)
   const to = queryString(query.to)
   const workValue = queryString(query.work)
-  const work = workValue !== undefined && agentRoles.has(workValue) ? (workValue as AgentRole) : undefined
-  if (from === undefined && to === undefined && work === undefined) return { _tag: 'All' }
-  return { _tag: 'Stats', from, to, work }
+  const work = workValue !== undefined && workKeys.has(workValue) ? (workValue as WorkKey) : undefined
+  const repository = queryString(query.repository)
+  const routine = queryString(query.routine)
+  if (from === undefined && to === undefined && work === undefined && repository === undefined && routine === undefined)
+    return { _tag: 'All' }
+  return {
+    _tag: 'Stats',
+    from,
+    to,
+    work,
+    ...(repository === undefined ? {} : { repository }),
+    ...(routine === undefined ? {} : { routine }),
+  }
 }
 
-export function historyRowWork(row: HistoryRow): AgentRole {
+export function historyRowWork(row: HistoryRow): WorkKey {
   switch (row._tag) {
     case 'Review':
       return 'adversarial_review'
     case 'Routine':
       return 'routine_scan'
+    case 'TriageSkip':
+      return 'pull_request_triage'
     case 'Task':
       return taskWork(row.task)
   }
@@ -100,6 +121,16 @@ function localDate(at: string): string {
 
 function rangeMatches(row: HistoryRow, range: HistoryRange): boolean {
   if (range._tag === 'All') return true
+  const repository =
+    row._tag === 'Routine'
+      ? row.run.repository
+      : row._tag === 'Task'
+        ? row.task.repository
+        : row._tag === 'Review'
+          ? row.agent.repository
+          : row.skip.repository
+  if (range.repository !== undefined && repository !== range.repository) return false
+  if (range.routine !== undefined && (row._tag !== 'Routine' || row.run.name !== range.routine)) return false
   if (range.work !== undefined && historyRowWork(row) !== range.work) return false
   const date = localDate(row.at)
   if (range.from !== undefined && date < range.from) return false
@@ -113,7 +144,7 @@ export function historyRows(
   range: HistoryRange = { _tag: 'All' },
 ): HistoryRow[] {
   const reviews = snapshot.agents.filter((agent): agent is ReviewAgent => agent._tag === 'ReviewAgent')
-  return buildHistory(reviews, snapshot.tasks, snapshot.routineRuns).filter(
+  return buildHistory(reviews, snapshot.tasks, snapshot.routineRuns, snapshot.triageSkips).filter(
     (row) => outcomeFilterMatches(row, filter) && rangeMatches(row, range),
   )
 }
@@ -130,6 +161,15 @@ export function historyRowBadge(row: HistoryRow): CardBadge {
       }
     case 'Task':
       return { label: row.task.state._tag, tone: taskStateTone(row.task), uppercase: false }
+    // The confidence is the decision. A rule skip has none, and the badge says
+    // so by carrying the word alone.
+    case 'TriageSkip':
+      return {
+        label: 'Skipped',
+        tone: 'neutral',
+        confidence: row.skip.confidence ?? undefined,
+        uppercase: false,
+      }
     case 'Routine': {
       const presentation = routineRunPresentation(row.run)
       return {
@@ -234,6 +274,8 @@ export function historyRowUrl(row: HistoryRow, snapshot: DashboardSnapshot): str
   switch (row._tag) {
     case 'Review':
       return row.agent.subjectUrl
+    case 'TriageSkip':
+      return row.skip.url
     case 'Task':
       return taskSubjectUrl(row.task)
     case 'Routine': {

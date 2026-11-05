@@ -1,0 +1,76 @@
+# Worktrunk user configuration.
+#
+# Canonical worktree location for every repository: a sibling of the repository
+# root, named `<repo>.<branch-slug>`.
+worktree-path = "../{{ repo }}.{{ branch | sanitize }}"
+
+# Keep the primary checkout current without touching local work. Every switch
+# fetches origin, so `--base origin/main` resolves to current GitHub state. A
+# dirty, off-main, or diverged primary skips only the fast-forward and warns;
+# the hook never edits, stashes, resets, or cleans the primary checkout. A
+# pre-switch failure stops the switch before Worktrunk creates anything.
+[pre-switch]
+primary = """
+# Wolfstar GitHub Agent owns its checkouts and names itself here. The control
+# checkout rule below applies to a person.
+if [ -n "$WOLFSTAR_GITHUB_AGENT" ]; then
+  exit 0
+fi
+primary="{{ primary_worktree_path }}"
+repo="{{ repo }}"
+if ! git -C "$primary" remote get-url origin >/dev/null 2>&1; then
+  echo "Worktree switch stopped: $repo has no origin remote." >&2
+  exit 1
+fi
+if ! timeout --signal=TERM --kill-after=10s 60s git -C "$primary" -c credential.interactive=never fetch --quiet --prune origin; then
+  echo "Worktree switch stopped: origin fetch failed for $repo." >&2
+  exit 1
+fi
+primary_branch="$(git -C "$primary" symbolic-ref --quiet --short HEAD || echo 'detached HEAD')"
+if [ "$primary_branch" != main ]; then
+  echo "Warning: $repo primary checkout is on $primary_branch, not main. Fetched origin; skipped the main fast-forward." >&2
+  exit 0
+fi
+changed="$(git -C "$primary" status --porcelain=v1 --untracked-files=normal | wc -l)"
+if [ "$changed" -gt 0 ]; then
+  echo "Warning: $repo primary checkout has $changed changed files. Fetched origin; skipped the main fast-forward." >&2
+  exit 0
+fi
+git -C "$primary" -c core.hooksPath=/dev/null merge --ff-only --quiet refs/remotes/origin/main 2>/dev/null
+if [ "$(git -C "$primary" rev-parse HEAD)" != "$(git -C "$primary" rev-parse refs/remotes/origin/main)" ]; then
+  echo "Warning: $repo primary main has commits that origin/main does not have. Fetched origin; skipped the main fast-forward." >&2
+  exit 0
+fi
+"""
+
+[pre-start]
+pnpm = """
+if [ -f {{ primary_worktree_path }}/pnpm-lock.yaml ] && [ -f pnpm-lock.yaml ]; then
+  timeout --signal=TERM --kill-after=10s 180s pnpm install --frozen-lockfile --prefer-offline --ignore-scripts --ignore-pnpmfile --reporter=append-only
+fi
+"""
+env = """
+repository_env="$HOME/.local/bin/wolfstar-repository-env"
+if [ ! -x "$repository_env" ]; then
+  echo "Worktree setup stopped: the repository environment helper is missing." >&2
+  exit 1
+fi
+"$repository_env" seed "{{ primary_worktree_path }}" "$PWD"
+"""
+state = """
+# Seed writable state only. Each worktree generates its own Nuxt paths.
+for state_dir in .data .wrangler/state; do
+  source_state="{{ primary_worktree_path }}/$state_dir"
+  if [ -d "$source_state" ] && [ ! -e "$state_dir" ] && git -C "{{ primary_worktree_path }}" check-ignore --quiet -- "$state_dir"; then
+    if lsof -t +D "$source_state" 2>/dev/null | grep --quiet .; then
+      echo "Worktree setup stopped: $state_dir is active in the primary worktree." >&2
+      exit 1
+    fi
+    mkdir -p "$(dirname "$state_dir")"
+    cp --archive --reflink=auto "$source_state" "$state_dir"
+  fi
+done
+"""
+
+[list]
+json-schema = 2

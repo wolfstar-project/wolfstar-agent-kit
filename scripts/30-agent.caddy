@@ -1,0 +1,41 @@
+@agent host agent.wolfstar.rocks
+
+handle @agent {
+	@agentHttp header X-Forwarded-Proto http
+	redir @agentHttp https://agent.wolfstar.rocks{uri} 308
+
+	# Interactive desktop sessions are reachable only through Tailscale.
+	@desktopSessions path /api/sessions /api/sessions/* /api/desktop/sessions /api/desktop/sessions/* /api/items/pull-request-diff
+	handle @desktopSessions {
+		respond "Connect through Tailscale to use desktop sessions." 403
+	}
+
+	handle /webhook {
+		request_body {
+			max_size 25MB
+		}
+		reverse_proxy 127.0.0.1:3211
+	}
+
+	handle {
+		@agentForeignWebSocket {
+			header_regexp Upgrade (?i)^websocket$
+			not header Origin https://agent.wolfstar.rocks
+		}
+		respond @agentForeignWebSocket "Request origin is not allowed." 403
+
+		@agentForeignOrigin {
+			not method GET HEAD
+			not header Origin https://agent.wolfstar.rocks
+		}
+		respond @agentForeignOrigin "Request origin is not allowed." 403
+
+		reverse_proxy 127.0.0.1:3210 {
+			header_up Host hogwild.tailcad325.ts.net
+			# The Service also refuses public requests to desktop session routes.
+			header_up X-Wolfstar-Agent-Ingress public
+			# Translate only the exact public origin. Preserve every other value.
+			header_up Origin "^https://agent[.]wolfstar[.]rocks$" "https://hogwild.tailcad325.ts.net"
+		}
+	}
+}

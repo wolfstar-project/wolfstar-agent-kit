@@ -3,7 +3,9 @@
 #
 #   service.sh update [REF]   move to REF (default origin/main), rebuild, restart
 #   service.sh prepare-update [REF]   move to REF and rebuild without restarting
+#   service.sh resolve-update [REF]   fetch and print REF without changing checkout
 #   service.sh restart        restart the revision already deployed
+#   service.sh revision       print the deployed commit
 #   service.sh status         report what is deployed and whether it answers
 #
 # The service runs from its own checkout, never from this one, so switching a
@@ -15,6 +17,9 @@ SERVICE_CHECKOUT="${WOLFSTAR_GITHUB_AGENT_CHECKOUT:-$HOME/.local/share/wolfstar-
 SERVICE_UNIT=wolfstar-github-agent
 HEALTH_URL=http://127.0.0.1:3210/health
 CONFIG_FILE="$HOME/.config/wolfstar-github-agent/config.yml"
+# The unit runs the service with this Node. The check below must use the same
+# one, because a different version can accept source this one rejects.
+SERVICE_NODE="${WOLFSTAR_GITHUB_AGENT_NODE:-$HOME/.local/lib/wolfstar-github-agent/node}"
 PASSWORD_FILE="$HOME/.config/wolfstar-github-agent/dashboard-password"
 
 HEALTH_HOST=$(node --input-type=commonjs - "$CONFIG_FILE" <<'NODE'
@@ -96,11 +101,45 @@ restart_and_verify() {
   report
 }
 
+# Reads the live configuration with the revision that is about to run, while the
+# running process keeps serving. A key that revision rejects, such as one naming
+# an Agent role it retired, fails here. Starting instead leaves systemd retrying
+# a process that can never start, which takes the service down until a person
+# edits the configuration.
+#
+# Both paths that start a process run this: a deploy, where the revision is new,
+# and a restart, where the configuration is what moved.
+resolve_node() {
+  local node_bin="$SERVICE_NODE"
+  if [ ! -x "$node_bin" ]; then
+    node_bin=$(command -v node || true)
+  fi
+  if [ -z "$node_bin" ]; then
+    echo "No Node runtime is available." >&2
+    exit 1
+  fi
+  printf '%s\n' "$node_bin"
+}
+
+check_config() {
+  local node_bin
+  node_bin=$(resolve_node)
+  if ! (cd "$SERVICE_CHECKOUT" \
+    && "$node_bin" --experimental-strip-types packages/wolfstar-github-agent/src/cli.ts \
+      check-config --config "$CONFIG_FILE"); then
+    echo "The new revision rejects $CONFIG_FILE, so the running revision keeps serving." >&2
+    echo "Fix the configuration, then deploy again." >&2
+    exit 1
+  fi
+}
+
 prepare_update() {
   require_checkout
-  local pnpm_bin ref before
+  local pnpm_bin node_bin ref before target_commit loaded_script
   pnpm_bin=$(resolve_pnpm)
+  node_bin=$(resolve_node)
   ref="${1:-origin/main}"
+  loaded_script=$(git hash-object "${BASH_SOURCE[0]}")
   # The checkout is a deployment. Anything local in it is a mistake worth
   # seeing rather than silently overwriting.
   if [ -n "$(git -C "$SERVICE_CHECKOUT" status --porcelain)" ]; then
@@ -112,15 +151,35 @@ prepare_update() {
   git -C "$SERVICE_CHECKOUT" fetch --quiet origin
   before="$(git -C "$SERVICE_CHECKOUT" rev-parse HEAD)"
   git -C "$SERVICE_CHECKOUT" reset --hard --quiet "$ref"
-  if [ "$before" = "$(git -C "$SERVICE_CHECKOUT" rev-parse HEAD)" ]; then
+  target_commit="$(git -C "$SERVICE_CHECKOUT" rev-parse HEAD)"
+  if [ "$before" = "$target_commit" ]; then
     echo "Already on $(deployed)"
   else
     echo "Moved to $(deployed)"
   fi
+  # Git replaced the file, but this shell still holds its previous functions.
+  # Load target preparation before installing anything. Keep restart ownership
+  # here so update restarts once and prepare-update never restarts.
+  if [ "$loaded_script" != "$(git hash-object "$SERVICE_CHECKOUT/scripts/service.sh")" ]; then
+    bash "$SERVICE_CHECKOUT/scripts/service.sh" prepare-update "$target_commit"
+    return
+  fi
   echo "Installing dependencies"
   (cd "$SERVICE_CHECKOUT" && "$pnpm_bin" install --frozen-lockfile >/dev/null)
+  echo "Restoring Brundlefly Skills"
+  (cd "$SERVICE_CHECKOUT" && "$pnpm_bin" sync:skills)
+  echo "Refreshing Agent Skills"
+  "$node_bin" --experimental-strip-types "$SERVICE_CHECKOUT/scripts/worker-skills.ts"
+  echo "Refreshing OpenCode worker configuration"
+  "$node_bin" --experimental-strip-types "$SERVICE_CHECKOUT/scripts/opencode-v2-migrate.ts" --worker
+  echo "Syncing Agent instructions"
+  bash "$SERVICE_CHECKOUT/scripts/sync-agent-context.sh" local >/dev/null
+  echo "Installing Worktrunk settings"
+  bash "$SERVICE_CHECKOUT/scripts/worktrunk-config.sh" update >/dev/null
   echo "Building the dashboard"
   (cd "$SERVICE_CHECKOUT/packages/wolfstar-github-agent" && "$pnpm_bin" dashboard:build >/dev/null 2>&1)
+  echo "Checking the configuration"
+  check_config
 }
 
 command="${1:-update}"
@@ -134,7 +193,19 @@ case "$command" in
     ;;
   restart)
     require_checkout
+    # The configuration moves on its own, so the revision already deployed can
+    # stop accepting it between one start and the next.
+    check_config
     restart_and_verify
+    ;;
+  revision)
+    require_checkout
+    git -C "$SERVICE_CHECKOUT" rev-parse HEAD
+    ;;
+  resolve-update)
+    require_checkout
+    git -C "$SERVICE_CHECKOUT" fetch --quiet origin
+    git -C "$SERVICE_CHECKOUT" rev-parse --verify "${2:-origin/main}^{commit}"
     ;;
   status)
     require_checkout
@@ -148,7 +219,7 @@ case "$command" in
     ;;
   *)
     echo "Unknown command: $command" >&2
-    echo "Use update, prepare-update, restart, or status." >&2
+    echo "Use update, prepare-update, resolve-update, restart, revision, or status." >&2
     exit 1
     ;;
 esac

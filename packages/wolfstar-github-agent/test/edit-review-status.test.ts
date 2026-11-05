@@ -1,6 +1,6 @@
 import type { Octokit } from 'octokit'
 import { describe, expect, it, vi } from 'vitest'
-import { ok } from '../src/result.ts'
+import { err, ok } from '../src/result.ts'
 import { repositoryMapping } from './fixtures.ts'
 
 const hoisted = vi.hoisted(() => {
@@ -52,6 +52,7 @@ const progressBody = '<!-- wolfstar-agent-progress --> claimed agent progress'
 function source() {
   return createGitHubAgentSource({
     actorLogin: () => 'wolfstar-agent[bot]',
+    ownAppId: 98114,
     tokens: {
       getToken: () => Promise.resolve(ok({ token: 'token', expiresAt: '2026-08-14T02:00:00.000Z' })),
       invalidate: () => undefined,
@@ -75,6 +76,40 @@ describe('editReviewStatus compare and swap', () => {
     expect(result).toEqual(
       ok({ _tag: 'Edited', commentId: 5, url: 'https://github.com/wolfstar-project/example/pull/24#issuecomment-5' }),
     )
+  })
+
+  it('keeps finding controls when the gate refresh only confirms its original body', async () => {
+    hoisted.state.writes = 0
+    hoisted.state.remoteBody = `${publishedBody}\n  - [ ] Ask an agent to verify and fix this finding <!-- logged-finding: ${'f'.repeat(64)} -->`
+    const result = await source().editReviewStatus(
+      repositoryMapping(),
+      24,
+      5,
+      publishedBody,
+      publishedBody,
+      new AbortController().signal,
+    )
+    expect(result).toEqual(
+      ok({ _tag: 'Edited', commentId: 5, url: 'https://github.com/wolfstar-project/example/pull/24#issuecomment-5' }),
+    )
+    expect(hoisted.state.writes).toBe(0)
+    expect(hoisted.state.remoteBody).toContain('Ask an agent')
+  })
+
+  it('refuses a finding status write after its publication lease is lost', async () => {
+    hoisted.state.writes = 0
+    hoisted.state.remoteBody = publishedBody
+    const result = await source().editReviewStatus(
+      repositoryMapping(),
+      24,
+      5,
+      publishedBody,
+      'updated body',
+      new AbortController().signal,
+      () => err('The lease expired.'),
+    )
+    expect(result).toEqual(err('The lease expired.'))
+    expect(hoisted.state.writes).toBe(0)
   })
 
   it('reports Changed when a concurrent writer replaces the comment around the edit', async () => {
@@ -101,5 +136,32 @@ describe('editReviewStatus compare and swap', () => {
       new AbortController().signal,
     )
     expect(result).toEqual(ok({ _tag: 'Changed' }))
+  })
+
+  it('reports Foreign without writing when another actor owns the comment', async () => {
+    hoisted.state.remoteBody = publishedBody
+    hoisted.state.writes = 0
+    hoisted.octokit.rest.issues.getComment = () =>
+      Promise.resolve({
+        data: {
+          id: 5,
+          html_url: 'https://github.com/wolfstar-project/example/pull/24#issuecomment-5',
+          issue_url: 'https://github.com/wolfstar-project/example/issues/24',
+          user: { login: 'someone-else' },
+          body: publishedBody,
+        },
+      })
+    const result = await source().editReviewStatus(
+      repositoryMapping(),
+      24,
+      5,
+      publishedBody,
+      'updated body',
+      new AbortController().signal,
+    )
+    expect(hoisted.state.writes).toBe(0)
+    expect(result).toEqual(
+      ok({ _tag: 'Foreign', reason: 'The stored automated review comment belongs to another GitHub actor.' }),
+    )
   })
 })

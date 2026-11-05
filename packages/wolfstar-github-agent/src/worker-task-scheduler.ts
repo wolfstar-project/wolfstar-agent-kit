@@ -1,7 +1,7 @@
 import type { AgentPermitPool } from './agent-permit-pool.ts'
 import type { AgentTokenUsage } from './agent-provider.ts'
 import type { Result } from './result.ts'
-import { err } from './result.ts'
+import { err, ok } from './result.ts'
 /**
  * The least a scheduler needs to lease one unit of work.
  *
@@ -114,20 +114,29 @@ export function createWorkerTaskScheduler<
         .finally(() => clearInterval(heartbeat))
       if (executionController.signal.aborted) return
       if (result._tag === 'Ok') {
-        const completed = options.complete({
-          ...result.value,
-          taskId: task.id,
-          workerId: options.workerId,
-          fence: task.state.fence,
-          at: options.now().toISOString(),
-        })
-        if (completed) return
+        // A completion error must release the owned lease before this worker moves on.
+        const completion = await Promise.resolve()
+          .then(() =>
+            options.complete({
+              ...result.value,
+              taskId: task.id,
+              workerId: options.workerId,
+              fence: task.state.fence,
+              at: options.now().toISOString(),
+            }),
+          )
+          .then((completed) => (completed ? ok(undefined) : err('The Task lease changed before completion.')))
+          .catch((error: unknown) => {
+            options.onError(error)
+            return err(error instanceof Error ? error.message : 'Task completion failed unexpectedly.')
+          })
+        if (completion._tag === 'Ok') return
         options.fail({
           taskId: task.id,
           workerId: options.workerId,
           fence: task.state.fence,
           at: options.now().toISOString(),
-          reason: 'The Task lease changed before completion.',
+          reason: completion.error,
         })
         return
       }

@@ -1,6 +1,9 @@
 import type { ThreadEvent, ThreadOptions } from '@openai/codex-sdk'
 import type { AgentEvent, AgentTurnRequest } from '../src/agent-provider.ts'
-import { describe, expect, it } from 'vitest'
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { describe, expect, it, vi } from 'vitest'
 import { codexAgentEvent, createCodexProvider } from '../src/codex-provider.ts'
 
 function request(overrides: Partial<AgentTurnRequest> = {}): AgentTurnRequest {
@@ -33,6 +36,21 @@ async function collect(events: AsyncIterable<AgentEvent>): Promise<AgentEvent[]>
   return items
 }
 
+it('attributes missing worker configuration to sandbox setup before the model starts', async () => {
+  vi.stubEnv('HOME', '/missing/codex-worker-test')
+  try {
+    expect(await collect(createCodexProvider().runTurn(request()))).toEqual([
+      {
+        _tag: 'Failed',
+        reason: expect.stringContaining('The Codex Agent worker isolation failed:'),
+        cause: 'sandbox-setup',
+      },
+    ])
+  } finally {
+    vi.unstubAllEnvs()
+  }
+})
+
 const messageEvents = [
   { type: 'thread.started', thread_id: 'session-1' },
   { type: 'item.completed', item: { id: 'message-1', type: 'agent_message', text: '{"outcome":"resolved"}' } },
@@ -47,6 +65,47 @@ const messageEvents = [
     },
   },
 ] as ThreadEvent[]
+
+it('does not accept model-written comparison evidence without the isolated reader', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'codex-evidence-controller-'))
+  vi.stubEnv('HOME', home)
+  const comparison = {
+    id: '5b7a9978-6b09-4d3e-a978-bebef7e65091',
+    taskId: 'a'.repeat(64),
+    revisionId: 'b'.repeat(64),
+    baseSha: 'c'.repeat(40),
+    issuedAt: new Date().toISOString(),
+    targets: [{ path: '/', strategy: 'mobile' as const, metric: 'lcp' as const }],
+  }
+  try {
+    const client = { startThread: () => thread(messageEvents), resumeThread: () => thread(messageEvents) }
+    const events = await collect(
+      createCodexProvider({ createCodex: () => client }).runTurn(
+        request({
+          taskId: comparison.taskId,
+          routineContext: { repository: 'wolfstar-project/example', routineName: 'vitals-review' },
+          vitalsComparison: comparison,
+        }),
+      ),
+    )
+    const retained = join(home, 'scratch/vitals-review', comparison.taskId, comparison.id)
+    expect(events.filter((event) => event._tag === 'VitalsComparison')).toEqual([
+      {
+        _tag: 'VitalsComparison',
+        result: {
+          _tag: 'Unavailable',
+          requestId: comparison.id,
+          reason: 'The performance evidence reader requires an isolated Agent.',
+        },
+        retainedDirectory: retained,
+      },
+    ])
+    expect((await stat(retained)).mode & 0o777).toBe(0o700)
+  } finally {
+    vi.unstubAllEnvs()
+    await rm(home, { recursive: true, force: true })
+  }
+})
 
 describe('codexAgentEvent', () => {
   it('maps a finished command to its output and exit code', () => {
@@ -86,6 +145,92 @@ describe('codexAgentEvent', () => {
 })
 
 describe('createCodexProvider', () => {
+  it.each([null, 'saved-session'])(
+    'uses controller isolation for a mutation turn with session %s',
+    async (sessionId) => {
+      const starts: ThreadOptions[] = []
+      const start = (options: ThreadOptions) => {
+        starts.push(options)
+        return thread(messageEvents)
+      }
+      const provider = createCodexProvider({
+        createCodex: () => ({ startThread: start, resumeThread: (_id, options) => start(options) }),
+      })
+      await collect(provider.runTurn(request({ sessionId })))
+      expect(starts).toEqual([expect.objectContaining({ sandboxMode: 'danger-full-access', approvalPolicy: 'never' })])
+    },
+  )
+
+  it.each(['complete', 'cancel', 'fail'])(
+    'attaches pixels outside the Worktree and cleans them after %s',
+    async (outcome) => {
+      let path = ''
+      const image = {
+        mime: 'image/png' as const,
+        data: 'iVBORw0KGgoAAAANSUhEUgAAABQAAAAKCAYAAAC0VX7mAAAAF0lEQVR4nGNkoDIYNZByMGog5YDqBgIAFJEAC2Vie2MAAAAASUVORK5CYII=',
+        label: 'Before: diagram',
+        source: 'https://github.com/user-attachments/assets/a',
+      }
+      const provider = createCodexProvider({
+        createCodex: () => ({
+          startThread: () => ({
+            runStreamed: async (input) => {
+              if (typeof input === 'string') throw new Error('Pixel attachment missing.')
+              const attachment = input.find((part) => part.type === 'local_image')
+              if (attachment?.type !== 'local_image') throw new Error('Pixel attachment missing.')
+              path = attachment.path
+              expect(path.startsWith('/tmp/worktree')).toBe(false)
+              expect(await readFile(path)).toEqual(Buffer.from(image.data, 'base64'))
+              return {
+                events: (async function* () {
+                  yield messageEvents[0]!
+                  if (outcome === 'fail') throw new Error('Fixture failure.')
+                  yield* messageEvents.slice(1)
+                })(),
+              }
+            },
+          }),
+          resumeThread: () => {
+            throw new Error('Unexpected resume.')
+          },
+        }),
+      })
+      const events = provider.runTurn(request({ media: [image] }))
+      if (outcome === 'cancel') {
+        const iterator = events[Symbol.asyncIterator]()
+        await iterator.next()
+        await iterator.return?.()
+      } else if (outcome === 'fail') {
+        await expect(collect(events)).rejects.toThrow('Fixture failure.')
+      } else {
+        await collect(events)
+      }
+      await expect(readFile(path)).rejects.toMatchObject({ code: 'ENOENT' })
+    },
+  )
+
+  it('starts Codex with the worktree .env layered over the service environment', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'codex-env-'))
+    await writeFile(join(workspace, '.env'), 'CLOUDFLARE_API_TOKEN=from-repo\n')
+    let codexOptions: { env?: Record<string, string> } | undefined
+    const provider = createCodexProvider({
+      createCodex: (options) => {
+        codexOptions = options
+        return {
+          startThread: () => thread(messageEvents),
+          resumeThread: () => {
+            throw new Error('A new turn must not resume.')
+          },
+        }
+      },
+    })
+
+    await collect(provider.runTurn(request({ workspace, taskId: 'owner/site:daily-checkin:2026-09-15T07:00:00.000Z' })))
+
+    expect(codexOptions?.env?.DAILY_CHECKIN_DIR).toMatch(/\/daily-checkin\/owner\/site$/)
+    expect(codexOptions?.env?.CLOUDFLARE_API_TOKEN).toBe('from-repo')
+  })
+
   it('pins the model, reasoning effort, and worktree on a new thread', async () => {
     let threadOptions: ThreadOptions | undefined
     const provider = createCodexProvider({

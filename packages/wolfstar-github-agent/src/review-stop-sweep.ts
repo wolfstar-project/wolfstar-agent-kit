@@ -1,15 +1,23 @@
 import type { GitHubAgentSource } from './github-agent-source.ts'
 import type { Result } from './result.ts'
+import type { ReviewCheckRunReport, ReviewCheckRunUpdate } from './review-check-run.ts'
 import type { JournalStore, StoppedReview, StoppedReviewDisposition } from './store.ts'
 import type { RepositoryMapping } from './types.ts'
 import { err, ok } from './result.ts'
-import { AUTOMATED_REVIEW_MARKER, automatedDisclosure } from './review-comment.ts'
+import { mirrorReviewCheckRun, reviewCheckRunUpdate } from './review-check-run.ts'
+import {
+  AUTOMATED_REVIEW_MARKER,
+  automatedDisclosure,
+  reviewFindingCodeLink,
+  reviewFindingFollowUp,
+} from './review-comment.ts'
 import { cleanLine, updatedAtLabel } from './text.ts'
 
 export type StoppedReviewOutcome =
   | { _tag: 'Published'; repository: string; pullRequestNumber: number }
   | { _tag: 'CommentGone'; repository: string; pullRequestNumber: number }
   | { _tag: 'Superseded'; repository: string; pullRequestNumber: number }
+  | { _tag: 'Retired'; repository: string; pullRequestNumber: number; reason: string }
 
 export type { StoppedReviewDisposition }
 
@@ -25,8 +33,12 @@ export interface StoppedReviewSweep {
 }
 
 export interface ReviewStopSweepOptions {
-  github: Pick<GitHubAgentSource, 'clearAgentLabels' | 'editReviewStatus' | 'getPullRequestReviewSnapshot'>
+  github: Pick<
+    GitHubAgentSource,
+    'clearAgentLabels' | 'editReviewStatus' | 'getPullRequestReviewSnapshot' | 'upsertReviewCheckRun'
+  >
   now: () => Date
+  reportCheckRun: ReviewCheckRunReport
   repositories: RepositoryMapping[]
   store: Pick<
     JournalStore,
@@ -42,6 +54,37 @@ export interface ReviewStopSweepOptions {
    * now and the next pass carries on.
    */
   budgetMilliseconds?: number
+}
+
+/**
+ * Closes the Review check run a stopped review leaves in progress.
+ *
+ * The comment and the check run must not disagree: a comment that says STOPPED
+ * beside a check run that says in progress reads as a stalled Review on every
+ * `gh pr checks`. A stopped Review settled nothing, so the check run concludes
+ * `neutral`, never a verdict. Skipped for a superseded or foreign comment,
+ * because another Task owns the Review there and carries the check run itself.
+ */
+async function completeStoppedReviewCheckRun(
+  options: ReviewStopSweepOptions,
+  mapping: RepositoryMapping,
+  review: StoppedReview,
+  body: string,
+  at: string,
+  signal: AbortSignal,
+): Promise<void> {
+  const update: ReviewCheckRunUpdate | null = reviewCheckRunUpdate(
+    { taskKind: review.taskKind, phase: 'terminal', desiredOutcome: 'SKIPPED', body },
+    at,
+  )
+  if (update === null) return
+  await mirrorReviewCheckRun(
+    { publisher: options.github, report: options.reportCheckRun },
+    mapping,
+    review.headSha,
+    update,
+    signal,
+  )
 }
 
 export function stoppedReviewComment(
@@ -64,13 +107,23 @@ export function stoppedReviewComment(
 
 ${automatedDisclosure({ kind: 'review', disclaimer: `It is not Wolfstar's personal review or approval.`, updatedAt: updatedAtLabel(at) })}
 
-GitHub ${action} this pull request. No further automated Review will run.`
+GitHub ${action} this pull request.${
+      disposition._tag === 'Merged'
+        ? `
+
+${review.findings.length === 0 ? 'No material findings were recorded.' : review.findings.map((finding) => (finding._tag === 'Open' ? `- ${cleanLine(finding.summary)}${reviewFindingCodeLink(review.repository, review.headSha, finding)} Next: ${finding.resolution === 'Dismissal' ? 'Decide a safe follow-up for the merged change.' : cleanLine(finding.nextAction)}` : finding._tag === 'Logged' ? `- Logged (${finding.impact}/100): ${cleanLine(finding.summary)}${reviewFindingCodeLink(review.repository, review.headSha, finding)} ${reviewFindingFollowUp(finding)}` : `- Fixed: ${cleanLine(finding.summary)}`)).join('\n')}
+
+${cleanLine(review.reason)}`
+        : ' No further automated Review will run.'
+    }`
   }
   if (review.taskKind === 'review_fix') {
     const findings = review.findings.map((finding) =>
       finding._tag === 'Fixed'
         ? `- **Fixed:** ${cleanLine(finding.summary)}`
-        : `- **Open:** ${cleanLine(finding.summary)}${/[.!?]$/.test(cleanLine(finding.summary)) ? '' : '.'} Next: ${cleanLine(finding.nextAction)}`,
+        : finding._tag === 'Logged'
+          ? `- **Logged (${finding.impact}/100):** ${cleanLine(finding.summary)}${reviewFindingCodeLink(review.repository, review.headSha, finding)} ${reviewFindingFollowUp(finding)}`
+          : `- **Open:** ${cleanLine(finding.summary)}${/[.!?]$/.test(cleanLine(finding.summary)) ? '' : '.'}${reviewFindingCodeLink(review.repository, review.headSha, finding)} Next: ${cleanLine(finding.nextAction)}`,
     )
     return `${AUTOMATED_REVIEW_MARKER}
 <!-- reviewed-sha: ${review.headSha} -->
@@ -90,7 +143,7 @@ ${automatedDisclosure({ kind: 'review', disclaimer: `It is not Wolfstar's person
 
 The automated review stopped. Reason: ${cleanLine(review.reason)}
 
-Push a new commit to start a new review. To review this commit again, comment \`/wolfstar-agent rerun\`.`
+Push a new commit to start a new review. To review this commit again, comment \`@wolfstar-agent rerun\`.`
 }
 
 /**
@@ -153,6 +206,9 @@ export async function publishStoppedReviews(
     if (edited._tag === 'Err') return err(`${review.repository}#${review.pullRequestNumber}: ${edited.error}`)
     const closure = disposition._tag === 'Stopped' ? null : disposition
     if (edited.value._tag === 'Missing') {
+      // The comment is gone, but the check run it mirrored is not. Close it.
+      // It gates nothing: a failure reaches a person through the report.
+      await completeStoppedReviewCheckRun(options, mapping, review, body, at, signal)
       if (closure !== null) {
         const labels = await options.github.clearAgentLabels(mapping, review.pullRequestNumber, signal)
         if (labels._tag === 'Err') return err(`${review.repository}#${review.pullRequestNumber}: ${labels.error}`)
@@ -182,7 +238,12 @@ export async function publishStoppedReviews(
       })
       return ok({ _tag: 'CommentGone', repository: review.repository, pullRequestNumber: review.pullRequestNumber })
     }
-    if (edited.value._tag === 'Changed') {
+    // Changed: another Task now owns the comment. Foreign: the stored id names
+    // a comment another actor or pull request owns, which no pass can change.
+    // Both end this publication; the closure still records that the pull
+    // request left, so the row stops asking.
+    if (edited.value._tag === 'Changed' || edited.value._tag === 'Foreign') {
+      const foreign = edited.value._tag === 'Foreign' ? edited.value.reason : null
       if (closure !== null) {
         const labels = await options.github.clearAgentLabels(mapping, review.pullRequestNumber, signal)
         if (labels._tag === 'Err') return err(`${review.repository}#${review.pullRequestNumber}: ${labels.error}`)
@@ -206,10 +267,23 @@ export async function publishStoppedReviews(
         taskId: review.taskId,
         commentId: review.commentId,
         at,
-        reason: 'Another Task replaced the canonical comment.',
+        reason: foreign ?? 'Another Task replaced the canonical comment.',
       })
-      return ok({ _tag: 'Superseded', repository: review.repository, pullRequestNumber: review.pullRequestNumber })
+      return ok(
+        foreign === null
+          ? { _tag: 'Superseded', repository: review.repository, pullRequestNumber: review.pullRequestNumber }
+          : {
+              _tag: 'Retired',
+              repository: review.repository,
+              pullRequestNumber: review.pullRequestNumber,
+              reason: foreign,
+            },
+      )
     }
+    // The comment is closed. Close the check run it mirrored. It gates
+    // nothing: a failure reaches a person through the report, and the row
+    // still settles, because no later pass can grant a missing permission.
+    await completeStoppedReviewCheckRun(options, mapping, review, body, at, signal)
     const labels = await options.github.clearAgentLabels(mapping, review.pullRequestNumber, signal)
     if (labels._tag === 'Err') return err(`${review.repository}#${review.pullRequestNumber}: ${labels.error}`)
     const recorded = options.store.recordStoppedReviewStatus({

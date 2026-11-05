@@ -1,0 +1,926 @@
+import type { AgentEvent } from '../src/agent-provider.ts'
+import type { DesktopTurn } from '../src/desktop-broker.ts'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, expect, it, vi } from 'vitest'
+import { createCodexProvider } from '../src/codex-provider.ts'
+import { createDesktopBroker } from '../src/desktop-broker.ts'
+import { executeDesktopTurn } from '../src/desktop-execute.ts'
+import { DESKTOP_PROTOCOL } from '../src/desktop-protocol.ts'
+import {
+  applyDesktopFiles,
+  DESKTOP_WORKTREE_LIMITS,
+  desktopCommand,
+  desktopHistoryBundle,
+  desktopRepositoryPath,
+  desktopTaskKey,
+  desktopWorktreeRefusal,
+  exportDesktopWorktree,
+  importDesktopWorktree,
+  isDesktopBranch,
+  prepareDesktopWorktree,
+  worktrunkFailure,
+} from '../src/desktop-worktree.ts'
+import { createHostAgentPool } from '../src/host-capacity.ts'
+
+const directories: string[] = []
+afterEach(async () => {
+  await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })))
+})
+
+async function fixture() {
+  const root = await mkdtemp(join(tmpdir(), 'desktop-worktree-test-'))
+  directories.push(root)
+  const repository = join(root, 'repository')
+  await mkdir(repository)
+  const git = (args: string[]) => desktopCommand('git', ['-c', 'core.hooksPath=/dev/null', ...args], repository)
+  await git(['init', '-b', 'main'])
+  await git(['config', 'user.name', 'Agent test'])
+  await git(['config', 'user.email', 'agent@example.invalid'])
+  await writeFile(join(repository, 'file.txt'), 'original\n')
+  await git(['add', '.'])
+  await git(['commit', '-m', 'test: seed'])
+  await git(['remote', 'add', 'origin', 'https://github.com/wolfstar-project/example.git'])
+  const transfer = join(root, 'transfer')
+  await mkdir(transfer)
+  return { root, repository, git, transfer }
+}
+
+it('carries the controller collector snapshot without other ignored files', async () => {
+  const f = await fixture()
+  await writeFile(join(f.repository, '.gitignore'), 'node_modules/\n.env\n')
+  await f.git(['add', '.gitignore'])
+  await f.git(['commit', '-m', 'test: ignore private files'])
+  const path = 'node_modules/.cache/wolfstar-checkin/github.json'
+  const snapshot = JSON.stringify({
+    schemaVersion: 1,
+    repository: 'wolfstar-project/example',
+    checkout: { sha: await f.git(['rev-parse', 'HEAD']) },
+  })
+  await mkdir(join(f.repository, 'node_modules/.cache/wolfstar-checkin'), { recursive: true })
+  await writeFile(join(f.repository, path), snapshot, { mode: 0o600 })
+  await writeFile(join(f.repository, '.env'), 'PRIVATE_TOKEN=secret\n')
+  const exported = await exportDesktopWorktree(f.repository, f.transfer)
+  expect(exported.files.map((file) => file.path)).toEqual([path])
+  expect(Buffer.from(exported.files[0]!.data, 'base64').toString()).toBe(snapshot)
+  const receiver = join(f.root, 'receiver')
+  await mkdir(receiver)
+  await applyDesktopFiles(receiver, exported, f.transfer)
+  expect(await readFile(join(receiver, path), 'utf8')).toBe(snapshot)
+})
+
+/**
+ * A checkout with a reachable origin, as every real repository has.
+ *
+ * `fixture` deliberately has no origin refs, so it exercises the whole-history
+ * fallback. This one exercises the ordinary path, where the two hosts share a
+ * remote and only local work travels.
+ */
+async function sharedFixture() {
+  const f = await fixture()
+  const origin = join(f.root, 'origin.git')
+  await desktopCommand('git', ['init', '--bare', '-b', 'main', origin], f.root)
+  await f.git(['remote', 'set-url', 'origin', origin])
+  await f.git(['push', 'origin', 'main'])
+  await f.git(['fetch', 'origin'])
+  return { ...f, origin }
+}
+
+it('round trips committed changes, binary edits, and untracked files into the owned Worktree', async () => {
+  const f = await fixture()
+  const initial = await exportDesktopWorktree(f.repository, f.transfer)
+  await writeFile(join(f.repository, 'file.txt'), 'committed\n')
+  await f.git(['add', '.'])
+  await f.git(['commit', '-m', 'fix: update'])
+  await writeFile(join(f.repository, 'file.txt'), 'edited again\n')
+  await writeFile(join(f.repository, 'asset.bin'), Buffer.from([0, 255, 1]))
+  const changed = await exportDesktopWorktree(f.repository, f.transfer)
+  await f.git(['reset', '--hard', initial.head])
+  await rm(join(f.repository, 'asset.bin'))
+  await importDesktopWorktree(f.repository, initial, changed, f.transfer)
+  expect(await f.git(['rev-parse', 'HEAD'])).toBe(changed.head)
+  expect(await readFile(join(f.repository, 'file.txt'), 'utf8')).toBe('edited again\n')
+  expect(await readFile(join(f.repository, 'asset.bin'))).toEqual(Buffer.from([0, 255, 1]))
+})
+
+it('refuses a result after the controller Worktree changed', async () => {
+  const f = await fixture()
+  const initial = await exportDesktopWorktree(f.repository, f.transfer)
+  await writeFile(join(f.repository, 'file.txt'), 'another task changed this\n')
+  await expect(importDesktopWorktree(f.repository, initial, initial, f.transfer)).rejects.toThrow(
+    'changed during desktop execution',
+  )
+  expect(await readFile(join(f.repository, 'file.txt'), 'utf8')).toBe('another task changed this\n')
+})
+
+it('refuses file paths outside the Worktree or inside Git metadata', async () => {
+  const f = await fixture()
+  const initial = await exportDesktopWorktree(f.repository, f.transfer)
+  for (const path of ['../outside', '.git/config', '/tmp/outside'])
+    await expect(
+      applyDesktopFiles(f.repository, { ...initial, files: [{ path, data: 'dGVzdA==', mode: 0o600 }] }, f.transfer),
+    ).rejects.toThrow('outside the Worktree')
+})
+
+it('prepares a real Worktrunk checkout from the transferred commit', async () => {
+  const f = await fixture()
+  const initial = await exportDesktopWorktree(f.repository, f.transfer)
+  const { workspace } = await prepareDesktopWorktree(
+    initial,
+    join(f.root, 'desktop'),
+    join(f.root, 'desktop-transfer'),
+    'task-one',
+  )
+  expect(await desktopCommand('git', ['rev-parse', 'HEAD'], workspace)).toBe(initial.head)
+  expect(await readFile(join(workspace, 'file.txt'), 'utf8')).toBe('original\n')
+})
+
+it('round trips a pending merge with a base-added file and retains its merge parents', async () => {
+  const f = await fixture()
+  await f.git(['checkout', '-b', 'feature'])
+  await writeFile(join(f.repository, 'file.txt'), 'feature\n')
+  await f.git(['commit', '-am', 'fix: change feature'])
+  const head = await f.git(['rev-parse', 'HEAD'])
+  await f.git(['checkout', 'main'])
+  await writeFile(join(f.repository, 'file.txt'), 'base\n')
+  await mkdir(join(f.repository, 'docs'))
+  await writeFile(join(f.repository, 'docs/video-runbook.md'), 'Existing base content.\n')
+  await f.git(['add', '.'])
+  await f.git(['commit', '-m', 'docs: add base runbook'])
+  const base = await f.git(['rev-parse', 'HEAD'])
+  await f.git(['checkout', 'feature'])
+  await expect(f.git(['merge', '--no-commit', '--no-ff', base])).rejects.toThrow()
+  const initial = await exportDesktopWorktree(f.repository, f.transfer)
+  const desktop = await prepareDesktopWorktree(
+    initial,
+    join(f.root, 'desktop'),
+    join(f.root, 'desktop-transfer'),
+    'merge-task',
+  )
+  try {
+    expect(await desktopCommand('git', ['ls-files', '--', 'docs/video-runbook.md'], desktop.workspace)).toBe(
+      'docs/video-runbook.md',
+    )
+    await writeFile(join(desktop.workspace, 'file.txt'), 'feature and base\n')
+    await writeFile(join(desktop.workspace, 'unrelated.txt'), 'Untracked worker output.\n')
+    const result = await exportDesktopWorktree(desktop.workspace, join(f.root, 'desktop-transfer'), {
+      against: initial.head,
+    })
+    expect(result.files.map((file) => file.path)).toEqual(['unrelated.txt'])
+    await importDesktopWorktree(f.repository, initial, result, f.transfer)
+    expect(await f.git(['rev-parse', 'MERGE_HEAD'])).toBe(base)
+    expect(await f.git(['ls-files', '--others', '--exclude-standard'])).toBe('unrelated.txt')
+    expect(await f.git(['ls-files', '--', 'docs/video-runbook.md'])).toBe('docs/video-runbook.md')
+    expect(await readFile(join(f.repository, 'docs/video-runbook.md'), 'utf8')).toBe('Existing base content.\n')
+    await f.git(['commit', '-m', 'fix: reconcile merge'])
+    expect(await f.git(['show', '--no-patch', '--format=%P', 'HEAD'])).toBe(`${head} ${base}`)
+  } finally {
+    await desktop.release()
+  }
+})
+
+it('imports one desktop result and rejects late duplicate completion', async () => {
+  const f = await fixture()
+  const broker = createDesktopBroker({ now: () => 1 })
+  broker.report({ protocol: DESKTOP_PROTOCOL, memoryGiB: 16, reservedGiB: 0, agents: 0, actions: 0 })
+  const iterator = broker
+    .provider('codex')
+    .runTurn({
+      model: 'test',
+      outputSchema: {},
+      prompt: 'test',
+      sessionId: null,
+      signal: new AbortController().signal,
+      workspace: f.repository,
+    })
+    [Symbol.asyncIterator]()
+  const response = iterator.next()
+  let turn: ReturnType<typeof broker.claim> = null
+  await vi.waitFor(() => {
+    turn = broker.claim()
+    expect(turn).not.toBeNull()
+  })
+  const claimed = turn as unknown as DesktopTurn
+  expect(broker.claim()).toBeNull()
+  expect(broker.events(claimed.id, [{ _tag: 'Message', text: 'finished' }], 0)).toBe(true)
+  expect(broker.complete(claimed.id, claimed.worktree, null)).toBe(true)
+  expect(await response).toEqual({ done: false, value: { _tag: 'Message', text: 'finished' } })
+  expect((await iterator.next()).done).toBe(true)
+  expect(broker.complete(claimed.id, claimed.worktree, null)).toBe(false)
+})
+
+it('fences the previous desktop identity after a capacity deferral', async () => {
+  const f = await fixture()
+  const broker = createDesktopBroker({ now: () => 1 })
+  broker.report({ protocol: DESKTOP_PROTOCOL, memoryGiB: 16, reservedGiB: 0, agents: 0, actions: 0 })
+  const controller = new AbortController()
+  const iterator = broker
+    .provider('codex')
+    .runTurn({
+      model: 'test',
+      outputSchema: {},
+      prompt: '',
+      sessionId: null,
+      signal: controller.signal,
+      workspace: f.repository,
+    })
+    [Symbol.asyncIterator]()
+  const response = iterator.next()
+  const stopped = expect(response).rejects.toThrow()
+  let first: DesktopTurn | null = null
+  await vi.waitFor(() => {
+    first = broker.claim()
+    expect(first).not.toBeNull()
+  })
+  const previous = first as unknown as DesktopTurn
+  expect(broker.defer(previous.id)).toBe(true)
+  const next = broker.claim()!
+  expect(next.id).not.toBe(previous.id)
+  expect(broker.defer(previous.id)).toBe(false)
+  expect(broker.active(previous.id)).toBe(false)
+  expect(broker.events(previous.id, [{ _tag: 'Message', text: 'stale' }], 0)).toBe(false)
+  expect(broker.complete(previous.id, previous.worktree, null)).toBe(false)
+  expect(broker.active(next.id)).toBe(true)
+  controller.abort()
+  await stopped
+  expect(broker.active(next.id)).toBe(false)
+})
+
+it('keeps an active turn through stale inventory and fences duplicated event delivery', async () => {
+  const f = await fixture()
+  let now = 1
+  const broker = createDesktopBroker({ now: () => now })
+  broker.report({ protocol: DESKTOP_PROTOCOL, memoryGiB: 16, reservedGiB: 0, agents: 0, actions: 0 })
+  const iterator = broker
+    .provider('codex')
+    .runTurn({
+      model: 'test',
+      outputSchema: {},
+      prompt: '',
+      sessionId: null,
+      signal: new AbortController().signal,
+      workspace: f.repository,
+    })
+    [Symbol.asyncIterator]()
+  const first = iterator.next()
+  let turn: DesktopTurn | null = null
+  await vi.waitFor(() => {
+    turn = broker.claim()
+    expect(turn).not.toBeNull()
+  })
+  const id = (turn as unknown as DesktopTurn).id
+  now = 10_001
+  expect(broker.active(id)).toBe(true)
+  now = 20_001
+  expect(broker.active(id)).toBe(true)
+  expect(broker.available()).toBe(false)
+  const message = [{ _tag: 'Message' as const, text: 'once' }]
+  expect(broker.events(id, message, 0)).toBe(true)
+  expect(broker.events(id, message, 0)).toBe(true)
+  expect(broker.complete(id, (turn as unknown as DesktopTurn).worktree, null)).toBe(true)
+  expect(await first).toEqual({ done: false, value: message[0] })
+  expect((await iterator.next()).done).toBe(true)
+})
+
+it('pins proof callbacks to the active desktop turn and refuses cancelled or disconnected turns', async () => {
+  const f = await fixture()
+  let now = 1
+  const owners: unknown[] = []
+  const broker = createDesktopBroker({
+    now: () => now,
+    reviewProofAuthority: (owner) => {
+      owners.push(owner)
+      return {
+        reserve: async (input) =>
+          input.taskId === owner.taskId && input.headSha === owner.headSha
+            ? { _tag: 'Reserved', reservationId: 'controller-reservation' }
+            : { _tag: 'Refused', reason: 'Wrong Task.' },
+        finish: async () => {},
+      }
+    },
+  })
+  broker.report({ protocol: DESKTOP_PROTOCOL, memoryGiB: 16, reservedGiB: 0, agents: 0, actions: 0 })
+  const controller = new AbortController()
+  const policy = {
+    _tag: 'Review' as const,
+    baseSha: 'a'.repeat(40),
+    headSha: 'a'.repeat(40),
+    workerId: 'reviewer',
+    fence: 7,
+  }
+  const iterator = broker
+    .provider('codex')
+    .runTurn({
+      model: 'test',
+      outputSchema: {},
+      prompt: 'test',
+      sessionId: null,
+      taskId: 'review-task',
+      toolPolicy: policy,
+      signal: controller.signal,
+      workspace: f.repository,
+    })
+    [Symbol.asyncIterator]()
+  const response = iterator.next()
+  const stopped = expect(response).rejects.toThrow()
+  let turn: ReturnType<typeof broker.claim> = null
+  await vi.waitFor(() => {
+    turn = broker.claim()
+    expect(turn).not.toBeNull()
+  })
+  const claimed = turn as unknown as DesktopTurn
+  const input = {
+    taskId: 'review-task',
+    headSha: policy.headSha,
+    sourceSha256: 'b'.repeat(64),
+    startedAt: '2026-10-07T00:00:00.000Z',
+  }
+  expect(await broker.proof(claimed.id, 'reserve', input)).toEqual({
+    _tag: 'Reserved',
+    reservationId: 'controller-reservation',
+  })
+  expect(owners).toEqual([{ taskId: 'review-task', headSha: policy.headSha, workerId: 'reviewer', fence: 7 }])
+  expect(await broker.proof(claimed.id, 'reserve', { ...input, taskId: 'another-task' })).toEqual({
+    _tag: 'Refused',
+    reason: 'Wrong Task.',
+  })
+  await expect(broker.proof('other-turn', 'reserve', input)).rejects.toThrow('active Review')
+  now = 16_000
+  await expect(broker.proof(claimed.id, 'reserve', input)).rejects.toThrow('active Review')
+  controller.abort()
+  await stopped
+  await expect(broker.proof(claimed.id, 'reserve', input)).rejects.toThrow('active Review')
+})
+
+it('revokes cancelled desktop work before accepting another result', async () => {
+  const f = await fixture()
+  const broker = createDesktopBroker({ now: () => 1 })
+  broker.report({ protocol: DESKTOP_PROTOCOL, memoryGiB: 16, reservedGiB: 0, agents: 0, actions: 0 })
+  const signal = new AbortController()
+  const iterator = broker
+    .provider('codex')
+    .runTurn({
+      model: 'test',
+      outputSchema: {},
+      prompt: 'test',
+      sessionId: null,
+      signal: signal.signal,
+      workspace: f.repository,
+    })
+    [Symbol.asyncIterator]()
+  const response = iterator.next()
+  const rejected = expect(response).rejects.toThrow()
+  let turn: ReturnType<typeof broker.claim> = null
+  await vi.waitFor(() => {
+    turn = broker.claim()
+    expect(turn).not.toBeNull()
+  })
+  const claimed = turn as unknown as DesktopTurn
+  signal.abort()
+  await rejected
+  expect(broker.active(claimed.id)).toBe(false)
+  expect(broker.complete(claimed.id, claimed.worktree, null)).toBe(false)
+})
+
+it('reports only the actual authority budget across controller restarts', async () => {
+  const broker = createDesktopBroker({ now: () => 0 })
+  expect(broker.report({ protocol: DESKTOP_PROTOCOL, memoryGiB: 16, reservedGiB: 8, agents: 1, actions: 0 })).toEqual({
+    memoryGiB: 16,
+  })
+  expect(broker.read().report?.memoryGiB).toBe(16)
+  const restarted = createDesktopBroker({ now: () => 0 })
+  expect(
+    restarted.report({ protocol: DESKTOP_PROTOCOL, memoryGiB: 20, reservedGiB: 0, agents: 0, actions: 0 }),
+  ).toEqual({ memoryGiB: 20 })
+})
+
+it('executes desktop work and maps returned paths back to the controller', async () => {
+  const f = await fixture()
+  const initial = await exportDesktopWorktree(f.repository, f.transfer)
+  const events: AgentEvent[] = []
+  const result = await executeDesktopTurn({
+    turn: {
+      id: 'test',
+      provider: 'codex',
+      request: {
+        model: 'test',
+        outputSchema: {},
+        prompt: `Work in ${f.repository}`,
+        workspace: f.repository,
+        sessionId: null,
+      },
+      worktree: initial,
+    },
+    directory: join(f.root, 'execution'),
+    repositories: join(f.root, 'repositories'),
+    signal: new AbortController().signal,
+    emit: (event) => events.push(event),
+    provider: {
+      name: 'codex',
+      async *runTurn(request) {
+        expect(request.workspace).not.toBe(f.repository)
+        expect(request.prompt).toBe(`Work in ${request.workspace}`)
+        await writeFile(join(request.workspace, 'result.txt'), 'desktop result\n')
+        yield { _tag: 'Message', text: JSON.stringify({ path: join(request.workspace, 'result.txt') }) }
+      },
+    },
+  })
+  await importDesktopWorktree(f.repository, initial, result, f.transfer)
+  expect(await readFile(join(f.repository, 'result.txt'), 'utf8')).toBe('desktop result\n')
+  expect(events).toContainEqual({ _tag: 'Message', text: JSON.stringify({ path: join(f.repository, 'result.txt') }) })
+})
+
+it('reports the real failure when recovery of oversized edits is refused', async () => {
+  const f = await fixture()
+  const initial = await exportDesktopWorktree(f.repository, f.transfer)
+  const capture = vi.fn()
+  await expect(
+    executeDesktopTurn({
+      turn: {
+        id: 'test',
+        provider: 'codex',
+        request: {
+          model: 'test',
+          outputSchema: {},
+          prompt: `Work in ${f.repository}`,
+          workspace: f.repository,
+          sessionId: null,
+        },
+        worktree: initial,
+      },
+      directory: join(f.root, 'execution'),
+      repositories: join(f.root, 'repositories'),
+      signal: new AbortController().signal,
+      emit: () => {},
+      capture,
+      provider: {
+        name: 'codex',
+        async *runTurn(request) {
+          await writeFile(join(request.workspace, 'dump.bin'), Buffer.alloc(65 * 1024 * 1024, 1))
+          yield { _tag: 'Message', text: 'partial progress' }
+          throw new Error('provider died')
+        },
+      },
+    }),
+  ).rejects.toThrow('provider died')
+  expect(capture).not.toHaveBeenCalled()
+})
+
+it('refuses a result after an untracked controller file changes', async () => {
+  const f = await fixture()
+  await writeFile(join(f.repository, 'notes.txt'), 'first\n')
+  const initial = await exportDesktopWorktree(f.repository, f.transfer)
+  await writeFile(join(f.repository, 'notes.txt'), 'keep this edit\n')
+  await expect(importDesktopWorktree(f.repository, initial, initial, f.transfer)).rejects.toThrow(
+    'changed during desktop execution',
+  )
+  expect(await readFile(join(f.repository, 'notes.txt'), 'utf8')).toBe('keep this edit\n')
+})
+
+it('transfers ignored pull request diagrams required for publication', async () => {
+  const f = await fixture()
+  await writeFile(join(f.repository, '.gitignore'), '.pr-lens/\n')
+  await mkdir(join(f.repository, '.pr-lens'))
+  await writeFile(join(f.repository, '.pr-lens/overview.svg'), '<svg/>')
+  const result = await exportDesktopWorktree(f.repository, f.transfer)
+  expect(result.files.find((file) => file.path === '.pr-lens/overview.svg')?.data).toBe(
+    Buffer.from('<svg/>').toString('base64'),
+  )
+})
+
+it('keeps an input file when the desktop commits it', async () => {
+  const f = await fixture()
+  await writeFile(join(f.repository, 'new.txt'), 'keep committed file\n')
+  const initial = await exportDesktopWorktree(f.repository, f.transfer)
+  await f.git(['add', 'new.txt'])
+  await f.git(['commit', '-m', 'feat: add file'])
+  const result = await exportDesktopWorktree(f.repository, f.transfer)
+  await f.git(['reset', '--hard', initial.head])
+  await writeFile(join(f.repository, 'new.txt'), 'keep committed file\n')
+  await importDesktopWorktree(f.repository, initial, result, f.transfer)
+  expect(await readFile(join(f.repository, 'new.txt'), 'utf8')).toBe('keep committed file\n')
+})
+
+it('refuses to export a Worktree the desktop cannot carry', async () => {
+  const f = await fixture()
+  await writeFile(join(f.repository, 'notes.txt'), 'untracked\n')
+  const limits = { ...DESKTOP_WORKTREE_LIMITS, bundle: 16 }
+
+  await expect(exportDesktopWorktree(f.repository, f.transfer, { limits })).rejects.toThrow(
+    /^The desktop cannot run a turn for .+\. Its history is \d+ KiB, and the limit is 1 KiB\.$/,
+  )
+  await expect(
+    exportDesktopWorktree(f.repository, f.transfer, { limits: DESKTOP_WORKTREE_LIMITS }),
+  ).resolves.toBeDefined()
+})
+
+it('names every part that keeps a Worktree on Hogwild', () => {
+  const worktree = {
+    head: 'a'.repeat(40),
+    origin: 'https://github.com/wolfstar-project/example',
+    history: { _tag: 'Whole' as const, bundle: 'bundle' },
+    patch: 'patch',
+    files: [{ path: 'notes.txt', data: 'ZGF0YQ==', mode: 0o644 }],
+  }
+  expect(desktopWorktreeRefusal(worktree)).toBeNull()
+  expect(desktopWorktreeRefusal(worktree, { bundle: 1, patch: 8, file: 8, files: 8 })).toMatch(/^Its history is /)
+  expect(desktopWorktreeRefusal(worktree, { bundle: 8, patch: 1, file: 8, files: 8 })).toMatch(
+    /^Its uncommitted change is /,
+  )
+  expect(desktopWorktreeRefusal(worktree, { bundle: 8, patch: 8, file: 8, files: 0 })).toBe(
+    'Its untracked file count is 1, and the limit is 0.',
+  )
+  expect(desktopWorktreeRefusal(worktree, { bundle: 8, patch: 8, file: 1, files: 8 })).toMatch(
+    /^Its untracked file notes\.txt is /,
+  )
+})
+
+it('carries nothing when origin already holds the commit', async () => {
+  const f = await sharedFixture()
+
+  const exported = await exportDesktopWorktree(f.repository, f.transfer)
+
+  expect(exported.history).toEqual({ _tag: 'Held' })
+})
+
+it('carries only the commits origin does not have', async () => {
+  const f = await sharedFixture()
+  await writeFile(join(f.repository, 'file.txt'), 'local work\n')
+  await f.git(['commit', '-qam', 'feat: local work'])
+
+  const exported = await exportDesktopWorktree(f.repository, f.transfer)
+
+  expect(exported.history._tag).toBe('Incremental')
+  const carried = join(f.root, 'carried.bundle')
+  await writeFile(carried, Buffer.from(desktopHistoryBundle(exported.history), 'base64'))
+  // A repository holding nothing cannot use it. That refusal is the saving:
+  // every commit origin already has stayed behind.
+  const bare = join(f.root, 'bare')
+  await desktopCommand('git', ['init', '-q', '--bare', bare], f.root)
+  await expect(desktopCommand('git', ['bundle', 'verify', carried], bare)).rejects.toThrow(/prerequisite/i)
+})
+
+it('builds the desktop checkout from origin and unbundles only the local work', async () => {
+  const f = await sharedFixture()
+  await writeFile(join(f.repository, 'file.txt'), 'local work\n')
+  await f.git(['commit', '-qam', 'feat: local work'])
+  const exported = { ...(await exportDesktopWorktree(f.repository, f.transfer)), origin: f.origin }
+
+  const { workspace } = await prepareDesktopWorktree(
+    exported,
+    join(f.root, 'desktop'),
+    join(f.root, 'desktop-transfer'),
+    'task-one',
+  )
+
+  expect(await desktopCommand('git', ['rev-parse', 'HEAD'], workspace)).toBe(exported.head)
+  expect(await readFile(join(workspace, 'file.txt'), 'utf8')).toBe('local work\n')
+})
+
+it('reuses one control checkout across turns on the same repository', async () => {
+  const f = await sharedFixture()
+  const cache = join(f.root, 'desktop')
+  const first = { ...(await exportDesktopWorktree(f.repository, f.transfer)), origin: f.origin }
+  await prepareDesktopWorktree(first, cache, join(f.root, 'transfer-one'), 'task-one')
+  const cloned = await desktopCommand('git', ['rev-parse', '--git-dir'], join(cache, 'control'))
+  await writeFile(join(f.repository, 'file.txt'), 'second turn\n')
+  await f.git(['commit', '-qam', 'feat: second turn'])
+  const second = { ...(await exportDesktopWorktree(f.repository, f.transfer)), origin: f.origin }
+
+  const { workspace } = await prepareDesktopWorktree(second, cache, join(f.root, 'transfer-two'), 'task-one')
+
+  expect(await desktopCommand('git', ['rev-parse', '--git-dir'], join(cache, 'control'))).toBe(cloned)
+  expect(await desktopCommand('git', ['rev-parse', 'HEAD'], workspace)).toBe(second.head)
+  expect(await readFile(join(workspace, 'file.txt'), 'utf8')).toBe('second turn\n')
+})
+
+it('sends one turn of work back, not the history the controller already holds', async () => {
+  const f = await sharedFixture()
+  const initial = await exportDesktopWorktree(f.repository, f.transfer)
+  await writeFile(join(f.repository, 'file.txt'), 'desktop work\n')
+  await f.git(['commit', '-qam', 'feat: desktop work'])
+
+  const result = await exportDesktopWorktree(f.repository, f.transfer, { against: initial.head })
+
+  expect(result.history._tag).toBe('Incremental')
+  await f.git(['reset', '--hard', initial.head])
+  await importDesktopWorktree(f.repository, initial, result, f.transfer)
+  expect(await desktopCommand('git', ['rev-parse', 'HEAD'], f.repository)).toBe(result.head)
+  expect(await readFile(join(f.repository, 'file.txt'), 'utf8')).toBe('desktop work\n')
+})
+
+it('refuses a result that names a commit it never sent', async () => {
+  const f = await sharedFixture()
+  const initial = await exportDesktopWorktree(f.repository, f.transfer)
+
+  const forged = { ...initial, head: 'b'.repeat(40), history: { _tag: 'Held' as const } }
+
+  await expect(importDesktopWorktree(f.repository, initial, forged, f.transfer)).rejects.toThrow(
+    'names a commit it did not send',
+  )
+})
+
+it('separates repositories that share a name across owners', () => {
+  expect(desktopRepositoryPath('/cache', 'https://github.com/wolfstar-project/example.git')).toBe(
+    '/cache/wolfstar-project/example',
+  )
+  expect(desktopRepositoryPath('/cache', 'git@github.com:skilld-dev/example')).toBe('/cache/skilld-dev/example')
+  expect(() => desktopRepositoryPath('/cache', '/tmp/repo')).toThrow('not a GitHub repository')
+})
+
+it('stands down a desktop running another revision', async () => {
+  const f = await fixture()
+  const broker = createDesktopBroker({ now: () => 1 })
+  broker.report({ protocol: DESKTOP_PROTOCOL - 1, memoryGiB: 16, reservedGiB: 0, agents: 0, actions: 0 })
+
+  expect(broker.read().connected).toBe(true)
+  expect(broker.read().current).toBe(false)
+  expect(broker.available()).toBe(false)
+
+  const iterator = broker
+    .provider('codex')
+    .runTurn({
+      model: 'test',
+      outputSchema: {},
+      prompt: 'test',
+      sessionId: null,
+      signal: new AbortController().signal,
+      workspace: f.repository,
+    })
+    [Symbol.asyncIterator]()
+  const response = iterator.next()
+  await vi.waitFor(() => expect(broker.read().report?.protocol).toBe(DESKTOP_PROTOCOL - 1))
+  expect(broker.claim()).toBeNull()
+
+  // The same desktop, once it catches up, takes the turn already waiting.
+  broker.report({ protocol: DESKTOP_PROTOCOL, memoryGiB: 16, reservedGiB: 0, agents: 0, actions: 0 })
+  let turn: ReturnType<typeof broker.claim> = null
+  await vi.waitFor(() => {
+    turn = broker.claim()
+    expect(turn).not.toBeNull()
+  })
+  const claimed = turn as unknown as DesktopTurn
+  broker.events(claimed.id, [{ _tag: 'Message', text: 'finished' }], 0)
+  broker.complete(claimed.id, claimed.worktree, null)
+  expect(await response).toEqual({ done: false, value: { _tag: 'Message', text: 'finished' } })
+  await iterator.next()
+})
+
+it('reports the line Worktrunk failed on, not the hooks that passed', () => {
+  const stderr = [
+    '◎ Running pre-switch primary',
+    '    echo "Worktree switch stopped: origin fetch failed." >&2',
+    '◎ Running pre-start user:pnpm @ /cache/control.desktop-turn',
+    '    timeout 180s pnpm install --frozen-lockfile',
+    '✗ pre-start command failed: pnpm: exit status: 127',
+  ].join('\n')
+
+  expect(worktrunkFailure(stderr)).toBe('✗ pre-start command failed: pnpm: exit status: 127')
+  // The reason used to carry every echoed hook, so a passing check's own text
+  // decided how the failure was classified.
+  expect(worktrunkFailure(stderr)).not.toContain('fetch failed')
+  expect(worktrunkFailure('nothing marked here')).toBeNull()
+})
+
+it('gives each Task its own Worktree, so Worktrunk sets it up again', async () => {
+  const f = await sharedFixture()
+  const cache = join(f.root, 'desktop')
+  const first = { ...(await exportDesktopWorktree(f.repository, f.transfer)), origin: f.origin }
+
+  const lease = await prepareDesktopWorktree(first, cache, join(f.root, 'transfer-one'), 'task-one')
+  const one = lease.workspace
+  await lease.release()
+  // A turn leaves its work in the tree, and Worktrunk will not remove a dirty
+  // Worktree. The sweep has to clear it before asking.
+  await writeFile(join(one, 'file.txt'), 'the last Task was mid-edit\n')
+  await writeFile(join(one, 'scratch.txt'), 'untracked leftovers\n')
+  const { workspace: two } = await prepareDesktopWorktree(first, cache, join(f.root, 'transfer-two'), 'task-two')
+
+  expect(two).not.toBe(one)
+  // The first Task's Worktree is gone, so they cannot accumulate across a
+  // cache that now outlives every Task using it.
+  await expect(readFile(join(one, 'file.txt'), 'utf8')).rejects.toThrow()
+  expect(await readFile(join(two, 'file.txt'), 'utf8')).toBe('original\n')
+  expect(await desktopCommand('git', ['rev-parse', 'HEAD'], two)).toBe(first.head)
+})
+
+it('reuses one Worktree across the turns of a single Task', async () => {
+  const f = await sharedFixture()
+  const cache = join(f.root, 'desktop')
+  const snapshot = { ...(await exportDesktopWorktree(f.repository, f.transfer)), origin: f.origin }
+
+  const { workspace: one } = await prepareDesktopWorktree(snapshot, cache, join(f.root, 'transfer-one'), 'task-one')
+  const { workspace: two } = await prepareDesktopWorktree(snapshot, cache, join(f.root, 'transfer-two'), 'task-one')
+
+  expect(two).toBe(one)
+})
+
+it('refuses a Task identity that cannot name a branch', () => {
+  expect(desktopTaskKey('abc123')).toBe('abc123')
+  expect(desktopTaskKey('a'.repeat(64))).toHaveLength(24)
+  expect(desktopTaskKey('../../escape')).toBe('escape')
+  expect(() => desktopTaskKey('///')).toThrow('no usable Task identity')
+})
+
+it('sweeps a Worktree left by the cache that named them all the same', () => {
+  expect(isDesktopBranch('desktop-turn')).toBe(true)
+  expect(isDesktopBranch('desktop-turn-abc123')).toBe(true)
+  expect(isDesktopBranch('main')).toBe(false)
+  expect(isDesktopBranch('desktop-turnip')).toBe(false)
+})
+
+it('runs a Task again after its Worktree was removed and its branch was left behind', async () => {
+  const f = await sharedFixture()
+  const cache = join(f.root, 'desktop')
+  // A pull request head is never merged into main, so Worktrunk keeps its
+  // branch when it removes the Worktree.
+  await writeFile(join(f.repository, 'file.txt'), 'pull request work\n')
+  await f.git(['commit', '-qam', 'feat: pull request work'])
+  const snapshot = { ...(await exportDesktopWorktree(f.repository, f.transfer)), origin: f.origin }
+  await (await prepareDesktopWorktree(snapshot, cache, join(f.root, 'transfer-one'), 'task-one')).release()
+  await (await prepareDesktopWorktree(snapshot, cache, join(f.root, 'transfer-two'), 'task-two')).release()
+
+  const again = await prepareDesktopWorktree(snapshot, cache, join(f.root, 'transfer-three'), 'task-one')
+
+  expect(await desktopCommand('git', ['rev-parse', 'HEAD'], again.workspace)).toBe(snapshot.head)
+})
+
+it('keeps a Worktree another turn still holds', async () => {
+  const f = await sharedFixture()
+  const cache = join(f.root, 'desktop')
+  const snapshot = { ...(await exportDesktopWorktree(f.repository, f.transfer)), origin: f.origin }
+  const one = await prepareDesktopWorktree(snapshot, cache, join(f.root, 'transfer-one'), 'task-one')
+  await writeFile(join(one.workspace, 'file.txt'), 'the first Agent is mid-edit\n')
+
+  await prepareDesktopWorktree(snapshot, cache, join(f.root, 'transfer-two'), 'task-two')
+
+  expect(await readFile(join(one.workspace, 'file.txt'), 'utf8')).toBe('the first Agent is mid-edit\n')
+})
+
+it('reports a desktop Worktree that cannot be set up as a setup failure', async () => {
+  const f = await fixture()
+  const repositories = join(f.root, 'repositories')
+  // A cache left half built: the control checkout exists, and Git cannot use it.
+  await mkdir(join(repositories, 'wolfstar-project', 'example', 'control'), { recursive: true })
+  const worktree = await exportDesktopWorktree(f.repository, f.transfer)
+  const provider = {
+    name: 'codex' as const,
+    async *runTurn() {
+      yield { _tag: 'Message', text: 'the provider started' } satisfies AgentEvent
+    },
+  }
+  const turn: DesktopTurn = {
+    id: 'turn',
+    provider: 'codex',
+    request: {
+      model: 'test',
+      outputSchema: {},
+      prompt: 'test',
+      sessionId: null,
+      workspace: f.repository,
+      taskId: 'task-one',
+    },
+    worktree,
+  }
+
+  const failure = await executeDesktopTurn({
+    turn,
+    directory: join(f.root, 'turn'),
+    repositories,
+    provider,
+    signal: new AbortController().signal,
+    emit: () => {},
+  }).catch((error: unknown) => error)
+
+  expect(failure).toBeInstanceOf(Error)
+  expect((failure as Error).cause).toBe('desktop-setup')
+})
+
+it('runs the turn on Hogwild when the desktop fails before its Agent starts', async () => {
+  const f = await fixture()
+  const broker = createDesktopBroker({ now: () => 1 })
+  broker.report({ protocol: DESKTOP_PROTOCOL, memoryGiB: 16, reservedGiB: 0, agents: 0, actions: 0 })
+  let local = 1
+  const pool = createHostAgentPool({
+    localMaximum: () => local,
+    desktopMaximum: 1,
+    desktopAvailable: () => true,
+    wait: () => new Promise((resolve) => setTimeout(resolve, 10)),
+  })
+  const hogwild = {
+    name: 'codex' as const,
+    async *runTurn() {
+      yield { _tag: 'Message', text: 'hogwild' } satisfies AgentEvent
+    },
+  }
+  local = 0
+  const iterator = pool
+    .provider(hogwild, broker.provider('codex'))
+    .runTurn({
+      model: 'test',
+      outputSchema: {},
+      prompt: 'test',
+      sessionId: null,
+      signal: new AbortController().signal,
+      workspace: f.repository,
+    })
+    [Symbol.asyncIterator]()
+  const response = iterator.next()
+  let turn: ReturnType<typeof broker.claim> = null
+  await vi.waitFor(() => {
+    turn = broker.claim()
+    expect(turn).not.toBeNull()
+  })
+  const claimed = turn as unknown as DesktopTurn
+
+  broker.complete(claimed.id, null, {
+    _tag: 'SetupFailed',
+    reason: 'Worktrunk stopped: ✗ Branch desktop-turn-task-one already exists',
+  })
+  local = 1
+
+  expect(await response).toEqual({ done: false, value: { _tag: 'Message', text: 'hogwild' } })
+})
+
+it('delivers portable pixel evidence to the desktop provider and removes local files', async () => {
+  const f = await fixture()
+  const initial = await exportDesktopWorktree(f.repository, f.transfer)
+  const image = {
+    mime: 'image/png' as const,
+    data: 'iVBORw0KGgoAAAANSUhEUgAAABQAAAAKCAYAAAC0VX7mAAAAF0lEQVR4nGNkoDIYNZByMGog5YDqBgIAFJEAC2Vie2MAAAAASUVORK5CYII=',
+    label: 'Before: diagram',
+    source: 'https://github.com/user-attachments/assets/a',
+  }
+  let attachmentPath = ''
+  let providerWorkspace = ''
+  const provider = createCodexProvider({
+    createCodex: () => ({
+      startThread: (options) => {
+        providerWorkspace = options.workingDirectory!
+        return {
+          runStreamed: async (input) => {
+            if (typeof input === 'string') throw new Error('Missing pixels.')
+            const attachment = input.find((part) => part.type === 'local_image')
+            if (attachment?.type !== 'local_image') throw new Error('Missing pixels.')
+            attachmentPath = attachment.path
+            expect(await readFile(attachmentPath)).toEqual(Buffer.from(image.data, 'base64'))
+            return {
+              events: (async function* () {
+                yield {
+                  type: 'turn.completed' as const,
+                  usage: {
+                    input_tokens: 1,
+                    cached_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 1,
+                    reasoning_output_tokens: 0,
+                  },
+                }
+              })(),
+            }
+          },
+        }
+      },
+      resumeThread: () => {
+        throw new Error('Unexpected resume.')
+      },
+    }),
+  })
+  const turn = JSON.parse(
+    JSON.stringify({
+      id: 'media-turn',
+      provider: 'codex',
+      request: {
+        model: 'test',
+        outputSchema: {},
+        prompt: 'Inspect pixels.',
+        workspace: f.repository,
+        sessionId: null,
+        media: [image],
+      },
+      worktree: initial,
+    }),
+  ) as DesktopTurn
+  await executeDesktopTurn({
+    turn,
+    directory: join(f.root, 'execution'),
+    repositories: join(f.root, 'repositories'),
+    provider,
+    signal: new AbortController().signal,
+    emit: () => {},
+  })
+  expect(providerWorkspace).not.toBe(f.repository)
+  expect(attachmentPath.startsWith(providerWorkspace)).toBe(false)
+  await expect(readFile(attachmentPath)).rejects.toMatchObject({ code: 'ENOENT' })
+})
+it('reports when the controller last received a desktop report', () => {
+  let now = 100
+  const broker = createDesktopBroker({ now: () => now })
+  expect(broker.read().seenAt).toBeNull()
+  broker.report({ protocol: DESKTOP_PROTOCOL, memoryGiB: 16, reservedGiB: 0, agents: 0, actions: 0 })
+  now = 200
+  expect(broker.read().seenAt).toBe(100)
+  broker.report({ protocol: DESKTOP_PROTOCOL, memoryGiB: 16, reservedGiB: 0, agents: 0, actions: 0 })
+  expect(broker.read().seenAt).toBe(200)
+})

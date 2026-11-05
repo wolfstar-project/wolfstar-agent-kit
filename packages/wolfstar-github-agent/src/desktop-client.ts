@@ -1,0 +1,273 @@
+#!/usr/bin/env node
+import type { DesktopTurn } from './desktop-broker.ts'
+import type { DesktopFailure } from './desktop-protocol.ts'
+import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
+import process from 'node:process'
+import { createInterface } from 'node:readline'
+import { setTimeout as delay } from 'node:timers/promises'
+import { fileURLToPath } from 'node:url'
+import { checkAgentWorker } from './agent-sandbox.ts'
+import {
+  DESKTOP_AGENT_SLOT_CEILING,
+  DESKTOP_MEMORY_PER_AGENT_GIB,
+  DESKTOP_PROTOCOL,
+  readDesktopResponse,
+} from './desktop-protocol.ts'
+import { createDesktopSessionClient, createSessionHttpTransport } from './desktop-session-client.ts'
+import { createDesktopTurnLease } from './desktop-turn-client.ts'
+import { desktopCommand } from './desktop-worktree.ts'
+import { setHostSlotPolicy } from './host-slot-policy.ts'
+import { parseMaintenanceAuthority } from './maintenance-scope.ts'
+import { parseReviewProofCallback } from './review-proof-duplex.ts'
+import { parseRunnerJobs } from './runner-jobs.ts'
+
+async function main(): Promise<void> {
+  await checkAgentWorker(process.env)
+  const origin = process.env.WOLFSTAR_GITHUB_AGENT_CONTROLLER_URL
+  if (origin === undefined || !origin.startsWith('https://')) throw new Error('An HTTPS controller URL is required.')
+  const password = (
+    await readFile(
+      process.env.WOLFSTAR_GITHUB_AGENT_PASSWORD_FILE ??
+        join(homedir(), '.config/wolfstar-github-agent/dashboard-password'),
+      'utf8',
+    )
+  ).trim()
+  const capacity = process.env.WOLFSTAR_HOST_CAPACITY_COMMAND ?? '/usr/local/bin/wolfstar-host-capacity'
+  const root = process.env.WOLFSTAR_DESKTOP_AGENT_ROOT ?? join(homedir(), '.local/share/wolfstar-github-agent/desktop')
+  await mkdir(root, { recursive: true, mode: 0o700 })
+  const shutdown = new AbortController()
+  process.once('SIGTERM', () => shutdown.abort())
+  process.once('SIGINT', () => shutdown.abort())
+
+  async function api<T>(path: string, body: unknown): Promise<T | null> {
+    const response = await fetch(`${origin}${path}`, {
+      method: 'POST',
+      headers: {
+        authorization: `Basic ${Buffer.from(`agent:${password}`).toString('base64')}`,
+        origin: origin!,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (!response.ok) throw new Error(`Controller request failed with status ${response.status}.`)
+    return (await readDesktopResponse(response)) as T | null
+  }
+
+  async function report(): Promise<boolean> {
+    const state = JSON.parse(await desktopCommand(capacity, ['status'], root))
+    parseMaintenanceAuthority(state)
+    const entries = Object.values(state.reservations) as Array<{ kind: string }>
+    const statusPath =
+      process.env.WOLFSTAR_DESKTOP_RUNNER_STATUS_FILE ??
+      join(
+        process.env.XDG_RUNTIME_DIR ?? `/run/user/${process.getuid!()}`,
+        'wolfstar-desktop-github-runner/status.json',
+      )
+    const jobs = await readFile(statusPath, 'utf8')
+      .then((text) => parseRunnerJobs(JSON.parse(text), Date.now()))
+      .catch((error: unknown) => {
+        // Runner telemetry can disappear during a restart. Report it as unavailable without stopping Agent work.
+        if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT'))
+          console.error('GitHub Actions status is unavailable.', error)
+        return { _tag: 'Unavailable' as const }
+      })
+    const requested = await api<{ memoryGiB: number; agentSlots: number; maintenanceReserve: number }>(
+      '/api/desktop/report',
+      {
+        protocol: DESKTOP_PROTOCOL,
+        memoryGiB: state.memoryGiB,
+        reservedGiB: state.reservedGiB,
+        agents: entries.filter((entry) => entry.kind === 'agent').length,
+        actions: entries.filter((entry) => entry.kind === 'actions').length,
+        jobs,
+      },
+    )
+    if (requested === null) throw new Error('Controller returned no desktop memory status.')
+    if (requested.memoryGiB !== state.memoryGiB)
+      throw new Error('The Controller returned a different host memory budget.')
+    if (
+      !Number.isSafeInteger(requested.agentSlots) ||
+      requested.agentSlots < 0 ||
+      requested.agentSlots > DESKTOP_AGENT_SLOT_CEILING ||
+      requested.maintenanceReserve !== Math.min(1, requested.agentSlots)
+    ) {
+      throw new Error('The Controller returned no shared Agent slot policy.')
+    }
+    if (
+      state.policy.agentSlots !== requested.agentSlots ||
+      state.policy.maintenanceReserve !== requested.maintenanceReserve
+    )
+      await setHostSlotPolicy(capacity, requested.agentSlots)
+    return state.memoryGiB - state.reservedGiB >= DESKTOP_MEMORY_PER_AGENT_GIB
+  }
+
+  async function run(turn: DesktopTurn): Promise<void> {
+    if (!/^[a-f0-9-]{36}$/.test(turn.id)) throw new Error('Desktop turn identity is invalid.')
+    const directory = join(root, createHash('sha256').update(turn.id).digest('hex'))
+    await mkdir(directory, { recursive: true, mode: 0o700 })
+    const input = join(directory, 'turn.json')
+    await writeFile(input, JSON.stringify(turn), { mode: 0o600 })
+    await rm(join(directory, 'result.json'), { force: true })
+    const extension = fileURLToPath(import.meta.url).endsWith('.ts') ? 'ts' : 'mjs'
+    const executable = join(dirname(fileURLToPath(import.meta.url)), `desktop-execute.${extension}`)
+    const child = spawn(
+      capacity,
+      [
+        'run',
+        turn.id,
+        String(DESKTOP_MEMORY_PER_AGENT_GIB),
+        process.execPath,
+        '--experimental-strip-types',
+        executable,
+        input,
+      ],
+      { stdio: ['pipe', 'pipe', 'pipe'] },
+    )
+    let stderr = ''
+    child.stderr.on('data', (chunk) => {
+      stderr = (stderr + String(chunk)).slice(-8000)
+    })
+    const stop = () => {
+      child.kill('SIGTERM')
+    }
+    child.stdin.on('error', (error) => {
+      console.error('The desktop proof callback disconnected.', error)
+      stop()
+    })
+    shutdown.signal.addEventListener('abort', stop, { once: true })
+    const heartbeat = new AbortController()
+    const lease = createDesktopTurnLease({ signal: shutdown.signal, stop, now: () => performance.now() })
+    const watching = (async () => {
+      while (!heartbeat.signal.aborted && !lease.signal.aborted) {
+        await lease.heartbeat(() => api<{ active: boolean }>('/api/desktop/heartbeat', { id: turn.id }))
+        if (lease.signal.aborted) return
+        await delay(3000, undefined, { signal: AbortSignal.any([heartbeat.signal, lease.signal]) }).catch(
+          (error: unknown) => {
+            if (!heartbeat.signal.aborted && !lease.signal.aborted) throw error
+          },
+        )
+      }
+    })()
+    const completion = new Promise<number>((resolve, reject) => {
+      child.once('error', reject)
+      child.once('close', (code) => resolve(code ?? 1))
+    })
+    let setup: DesktopFailure | null = null
+    let sequence = 0
+    try {
+      for await (const line of createInterface({ input: child.stdout })) {
+        const event: unknown = JSON.parse(line)
+        const proof = parseReviewProofCallback(event)
+        if (proof !== null) {
+          const answer = await api<unknown>('/api/desktop/proof', {
+            id: turn.id,
+            action: proof.action,
+            input: proof.input,
+          })
+            .then((result) => ({ id: proof.id, result }))
+            .catch((error: unknown) => ({
+              id: proof.id,
+              error: error instanceof Error ? error.message.slice(0, 500) : 'The controller proof callback failed.',
+            }))
+          child.stdin.write(`${JSON.stringify(answer)}\n`)
+          continue
+        }
+        // Capacity refusal is handled after exit, before any provider starts.
+        if (typeof event === 'object' && event !== null && '_tag' in event && event._tag === 'AtCapacity') continue
+        // No provider started, so the controller may run this turn on Hogwild.
+        if (
+          typeof event === 'object' &&
+          event !== null &&
+          '_tag' in event &&
+          event._tag === 'SetupFailed' &&
+          'reason' in event &&
+          typeof event.reason === 'string'
+        ) {
+          setup = { _tag: 'SetupFailed', reason: event.reason }
+          continue
+        }
+        const answer = await lease.request(() =>
+          api<{ accepted: boolean }>('/api/desktop/events', { id: turn.id, events: [event], sequence }),
+        )
+        if (!answer?.accepted) stop()
+        sequence += 1
+      }
+      const code = await completion
+      if (code === 75) {
+        await lease.request(() => api('/api/desktop/defer', { id: turn.id }))
+        return
+      }
+      const result = await readFile(join(directory, 'result.json'), 'utf8')
+        .then((text) => JSON.parse(text) as unknown)
+        .catch((error: NodeJS.ErrnoException) => {
+          if (code !== 0 && error.code === 'ENOENT') return null
+          throw error
+        })
+      const failure: DesktopFailure | null =
+        code === 0
+          ? null
+          : (setup ?? { _tag: 'AgentFailed', reason: `Desktop Agent stopped with status ${code}. ${stderr}` })
+      await lease.request(() => api('/api/desktop/complete', { id: turn.id, result, failure }))
+    } finally {
+      heartbeat.abort()
+      lease.close()
+      await rm(input, { force: true })
+      stop()
+      await completion
+      await watching
+      shutdown.signal.removeEventListener('abort', stop)
+    }
+  }
+
+  // The controller decides how many Agents the desktop runs, and it only ever
+  // queues that many turns. This loop claims each one and runs them together,
+  // so an Agent slot count above one is real work rather than a queue.
+  const running = new Set<Promise<void>>()
+  const historyReport = createDesktopSessionClient({
+    transport: createSessionHttpTransport(api),
+    host: 'desktop',
+    root,
+    capacity,
+    signal: shutdown.signal,
+  })
+  while (!shutdown.signal.aborted) {
+    try {
+      try {
+        await historyReport.report()
+      } catch (error) {
+        console.error('Session history report failed.', error)
+      }
+      if (running.size < DESKTOP_AGENT_SLOT_CEILING && (await report())) {
+        const turn = await api<DesktopTurn | null>('/api/desktop/claim', {})
+        if (turn !== null) {
+          // The shared authority refuses a turn memory cannot hold, and
+          // the controller queues it again, so claiming never overcommits.
+          const work = run(turn)
+            .catch((error: unknown) => {
+              console.error(error)
+            })
+            .finally(() => {
+              running.delete(work)
+            })
+          running.add(work)
+        }
+      }
+    } catch (error) {
+      console.error(error)
+    }
+    await delay(3000, undefined, { signal: shutdown.signal }).catch((error: unknown) => {
+      if (!shutdown.signal.aborted) throw error
+    })
+  }
+  await Promise.all(running)
+}
+
+void main().catch((error: unknown) => {
+  console.error(error)
+  process.exitCode = 1
+})

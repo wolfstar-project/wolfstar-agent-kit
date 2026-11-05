@@ -1,3 +1,6 @@
+import type { RunnerJobs } from '../../../src/runner-jobs.ts'
+import { parseRunnerJobs } from '../../../src/runner-jobs.ts'
+
 export interface HogwildServiceMetrics {
   cpuTimeSeconds: number
   memoryBytes: number
@@ -15,6 +18,7 @@ export type HogwildRunnerStatus =
   | { _tag: 'Unavailable' }
   | {
       _tag: 'Available'
+      jobs?: RunnerJobs
       budgets: {
         cpu: number
         memoryBytes: number
@@ -49,6 +53,11 @@ export interface HogwildStatus {
     | { _tag: 'Available'; values: Array<{ celsius: number; name: 'CPU' | 'Storage' }> }
     | { _tag: 'Unavailable' }
   updatedAt: number
+}
+
+export function hogwildStatusFresh(updatedAt: number, now: Date): boolean {
+  const age = now.getTime() - updatedAt
+  return Number.isFinite(updatedAt) && updatedAt > 0 && age >= -30_000 && age < 30_000
 }
 
 export type ParseHogwildStatusResult = { _tag: 'Ok'; value: HogwildStatus } | { _tag: 'Err'; reason: string }
@@ -281,6 +290,7 @@ function parseRunners(value: unknown): HogwildRunnerStatus | undefined {
       memoryHeadroomBytes,
     },
     pools: pools as Extract<HogwildRunnerStatus, { _tag: 'Available' }>['pools'],
+    jobs: parseRunnerJobs(value, updatedAt),
     updatedAt,
   }
 }

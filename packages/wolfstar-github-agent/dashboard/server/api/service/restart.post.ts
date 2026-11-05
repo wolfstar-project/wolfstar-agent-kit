@@ -9,6 +9,7 @@ export default defineEventHandler(async (event) => {
     _tag: 'Requested' as const,
     id: crypto.randomUUID(),
     source: 'dashboard' as const,
+    operation: { _tag: 'Restart' as const },
     requestedAt: new Date().toISOString(),
   }
   updateMock((current) => ({ ...current, restartRequest: request, agentStart: { _tag: 'RestartRequested' } }))

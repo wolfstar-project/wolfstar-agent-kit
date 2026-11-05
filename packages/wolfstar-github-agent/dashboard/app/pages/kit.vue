@@ -13,6 +13,24 @@ usePageTitle('Kit')
 
 const colorMode = useColorMode()
 
+const kitStats = [
+  { title: 'Pull requests changed', value: 162, trend: 12, trendSuffix: '%' },
+  {
+    title: 'Repair commits',
+    value: 233,
+    trend: -4,
+    trendSuffix: '%',
+    sparkline: [3, 5, 2, 8, 6, 9, 4].map((value, index) => ({ date: `d${index}`, value })),
+  },
+  { title: 'Conflicts resolved', value: 56 },
+]
+const kitBars = [
+  { label: 'Review', value: 1219, previous: 980 },
+  { label: 'Conflict resolution', value: 774, previous: 810 },
+  { label: 'Repair', value: 394, previous: 394 },
+  { label: 'Triage', value: 300, previous: 120 },
+]
+
 function toggleColorMode(): void {
   colorMode.preference = colorMode.value === 'dark' ? 'light' : 'dark'
 }
@@ -267,8 +285,6 @@ const historyRows = [
     at: '1h ago',
   },
 ] as const
-
-const ejected = ref(0)
 </script>
 
 <template>
@@ -387,6 +403,59 @@ const ejected = ref(0)
     </section>
 
     <section class="mt-10 border-t border-default pt-6">
+      <h2 class="field-label mb-4">Primitives</h2>
+      <div class="flex flex-col gap-8">
+        <UiStats :data="kitStats" variant="card" />
+        <div class="grid gap-8 md:grid-cols-2">
+          <div>
+            <UiSectionHeader title="Ranked bars">
+              <template #after-title>
+                <span class="font-mono text-sm font-normal text-muted">{{ kitBars.length }}</span>
+              </template>
+            </UiSectionHeader>
+            <UiBarChart :data="kitBars" label-key="label" value-key="value" />
+          </div>
+          <div>
+            <UiSectionHeader
+              title="Table shell"
+              description="UiTableShell, UiTableTh, UiTableTd, UiTableMetricCell, UiTableTrendCell"
+            />
+            <UiTableShell label="Kit table" size="sm" row-hover>
+              <template #head>
+                <UiTableTh>Work</UiTableTh>
+                <UiTableTh numeric> Runs </UiTableTh>
+                <UiTableTh numeric> Change </UiTableTh>
+              </template>
+              <tr v-for="row in kitBars" :key="row.label">
+                <UiTableTd row-header size="sm">
+                  {{ row.label }}
+                </UiTableTd>
+                <UiTableTd numeric size="sm">
+                  <UiTableMetricCell :value="row.value" />
+                </UiTableTd>
+                <UiTableTd numeric size="sm">
+                  <UiTableTrendCell :current="row.value" :previous="row.previous" />
+                </UiTableTd>
+              </tr>
+            </UiTableShell>
+          </div>
+        </div>
+        <div class="flex flex-wrap items-center gap-3">
+          <UiStatusBadge status="success" label="Healthy" />
+          <UiStatusBadge status="warning" label="Starting" />
+          <UiStatusBadge status="error" label="Action required" />
+          <UiStatusBadge status="neutral" label="Paused" />
+          <UiTrend :value="12" format="percent" colored />
+          <UiTrend :value="-4" format="percent" />
+          <UiTrend :value="0" format="percent" />
+          <UiSparkline :data="[3, 5, 2, 8, 6, 9, 4]" variant="line" size="sm" />
+          <UiSparkline :data="[3, 5, 2, 8, 6, 9, 4]" variant="bars" size="sm" />
+        </div>
+        <UiEmptyState compact icon="empty" title="Nothing here" description="One line naming the cause." />
+      </div>
+    </section>
+
+    <section class="mt-10 border-t border-default pt-6">
       <h2 class="field-label mb-4">Cards</h2>
       <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <div class="flex flex-col gap-2 rounded-lg bg-muted p-2">
@@ -468,16 +537,6 @@ const ejected = ref(0)
               <span class="text-sm text-muted">Repair</span>
               <span class="font-mono text-sm text-dimmed">04:12</span>
             </div>
-            <div class="mt-2 flex justify-end">
-              <ConfirmButton
-                label="Eject"
-                confirm-label="Confirm eject"
-                aria-label="Eject this agent"
-                confirm-aria-label="Confirm eject of this agent"
-                icon="i-octicon-terminal-16"
-                @confirm="ejected += 1"
-              />
-            </div>
           </UCard>
         </div>
 
@@ -499,7 +558,6 @@ const ejected = ref(0)
           </UCard>
         </div>
       </div>
-      <p v-if="ejected > 0" class="mt-3 font-mono text-sm text-dimmed">Eject confirmed {{ ejected }} times.</p>
     </section>
 
     <section class="mt-10 border-t border-default pt-6">

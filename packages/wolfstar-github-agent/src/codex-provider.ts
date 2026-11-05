@@ -1,11 +1,28 @@
-import type { CodexOptions, ThreadEvent, ThreadOptions } from '@openai/codex-sdk'
+import type { CodexOptions, Input, ThreadEvent, ThreadOptions } from '@openai/codex-sdk'
 import type { AgentEvent, AgentProvider, AgentTokenUsage, AgentTurnRequest } from './agent-provider.ts'
+import type { AgentSandbox } from './agent-sandbox.ts'
+import type { ReviewProofAuthorityFactory } from './review-proof-authority.ts'
+import type { ReviewRuntime } from './review-runtime.ts'
+import { writeFile } from 'node:fs/promises'
+import { dirname } from 'node:path'
+import process from 'node:process'
 import { Codex } from '@openai/codex-sdk'
 import { agentProviderFailureReason, agentTextEvent } from './agent-provider.ts'
+import { prepareAgentSandbox } from './agent-sandbox.ts'
+import { agentSkillCatalogPrompt } from './agent-skill-catalog.ts'
+import { materializeAgentMedia } from './github-media.ts'
+import { createReviewRuntime, REVIEW_CODEX_FEATURES } from './review-runtime.ts'
+import {
+  createVitalsEvidenceDirectory,
+  inspectVitalsComparison,
+  vitalsComparisonScript,
+  vitalsEvidenceInstructions,
+} from './vitals-comparison-runtime.ts'
+import { workspaceEnvironment } from './workspace-environment.ts'
 
 interface CodexThread {
   runStreamed: (
-    prompt: string,
+    prompt: Input,
     options: { outputSchema: unknown; signal: AbortSignal },
   ) => Promise<{ events: AsyncIterable<ThreadEvent> }>
 }
@@ -16,7 +33,10 @@ export interface CodexThreadClient {
 }
 
 export interface CodexProviderOptions {
+  memoryPerAgentGiB?: number
+  reviewProofAuthority?: ReviewProofAuthorityFactory
   createCodex?: (options: CodexOptions) => CodexThreadClient
+  readOnly?: boolean
 }
 
 function isMissingSession(error: unknown): boolean {
@@ -75,12 +95,18 @@ export function codexAgentUsage(event: ThreadEvent): Extract<AgentTokenUsage, { 
   }
 }
 
-async function* providerEvents(events: AsyncIterable<ThreadEvent>): AsyncGenerator<AgentEvent> {
+async function* providerEvents(
+  events: AsyncIterable<ThreadEvent>,
+  memoryExceeded?: () => Promise<boolean>,
+): AsyncGenerator<AgentEvent> {
   for await (const event of events) {
     const usage = codexAgentUsage(event)
     if (usage !== undefined) yield { _tag: 'Usage', usage }
     const mapped = codexAgentEvent(event)
-    if (mapped !== undefined) yield mapped
+    if (mapped !== undefined)
+      yield mapped._tag === 'Failed' && (await memoryExceeded?.())
+        ? { _tag: 'Failed', reason: 'The Agent Task exceeded its memory budget.', cause: 'resource-limit' }
+        : mapped
   }
 }
 
@@ -89,49 +115,191 @@ async function* providerEvents(events: AsyncIterable<ThreadEvent>): AsyncGenerat
  *
  * The Codex SDK reports usage once, on `turn.completed`, after the whole turn
  * has been paid for. It reports nothing per model step, so nothing can stop a
- * runaway Codex turn while it runs. `ContextBudgetExhausted` therefore never
- * comes from this provider. If the SDK adds per-step usage, meter it here the
- * way `opencode-provider.ts` meters `step_finish`.
+ * runaway Codex turn while it runs. `ContextBudgetWarned` and
+ * `ContextBudgetExhausted` therefore never come from this provider. The SDK
+ * also takes no message into a running turn, so a wrap-up warning has no way
+ * in. If the SDK adds per-step usage, meter it here the way
+ * `opencode-provider.ts` meters `step_finish`.
  */
+function definedEntries(environment: NodeJS.ProcessEnv): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(environment).filter((entry): entry is [string, string] => entry[1] !== undefined),
+  )
+}
+
 export function createCodexProvider(options: CodexProviderOptions = {}): AgentProvider {
   const factory = options.createCodex ?? ((codexOptions) => new Codex(codexOptions))
   return {
     name: 'codex',
     runTurn: (request: AgentTurnRequest) =>
       (async function* () {
-        const client = factory({})
-        const baseOptions = {
-          model: request.model,
-          workingDirectory: request.workspace,
-          webSearchMode: 'live',
-          approvalPolicy: 'never',
-        } satisfies ThreadOptions
-        const threadOptions: ThreadOptions =
-          request.reasoningEffort === undefined
-            ? baseOptions
-            : {
-                ...baseOptions,
-                modelReasoningEffort: request.reasoningEffort as NonNullable<ThreadOptions['modelReasoningEffort']>,
-              }
-        const run = (thread: CodexThread) =>
-          thread.runStreamed(request.prompt, {
-            outputSchema: request.outputSchema,
-            signal: request.signal,
-          })
-
-        if (request.sessionId !== null) {
-          try {
-            const resumed = await run(client.resumeThread(request.sessionId, threadOptions))
-            yield* providerEvents(resumed.events)
-            return
-          } catch (error) {
-            // A dropped rollout is expected after a restart: start a fresh thread.
-            if (!isMissingSession(error)) throw error
+        const media = await materializeAgentMedia(request.media)
+        let sandbox: AgentSandbox | undefined
+        let review: ReviewRuntime | undefined
+        let vitalsEvidenceDirectory: string | undefined
+        try {
+          if (request.vitalsComparison !== undefined) {
+            if (
+              request.routineContext?.routineName !== 'vitals-review' ||
+              request.taskId !== request.vitalsComparison.taskId ||
+              request.toolPolicy !== undefined
+            )
+              throw new Error('The performance evidence request has no trusted vitals Task.')
+            vitalsEvidenceDirectory = await createVitalsEvidenceDirectory(
+              process.env.HOME ?? '/home/wolfstar',
+              request.vitalsComparison,
+            )
           }
-        }
+          if (request.toolPolicy?._tag === 'Review') {
+            if (options.reviewProofAuthority === undefined) {
+              yield { _tag: 'Failed', reason: 'The Review requires its controller proof authority.' }
+              return
+            }
+            const prepared = await createReviewRuntime({
+              request,
+              provider: 'codex',
+              environment: process.env,
+              authority: options.reviewProofAuthority,
+            })
+              .then((value) => ({ _tag: 'Ok' as const, value }))
+              .catch((error: unknown) => ({ _tag: 'Err' as const, error }))
+            if (prepared._tag === 'Err') {
+              yield {
+                _tag: 'Failed',
+                reason: `The Review tools failed to start: ${prepared.error instanceof Error ? prepared.error.message : String(prepared.error)}`,
+              }
+              return
+            }
+            review = prepared.value
+          }
+          if (options.createCodex === undefined) {
+            const prepared = await prepareAgentSandbox({
+              workspace: request.workspace,
+              environment: process.env,
+              provider: 'codex',
+              ...(options.memoryPerAgentGiB === undefined ? {} : { memoryPerAgentGiB: options.memoryPerAgentGiB }),
+              readOnlyPaths: [
+                ...media.paths,
+                ...(request.instructionPaths ?? []),
+                ...(review?.readOnlyPaths ?? []),
+                ...(request.vitalsComparison === undefined ? [] : [vitalsComparisonScript()]),
+              ],
+              ...(vitalsEvidenceDirectory === undefined ? {} : { vitalsEvidenceDirectory }),
+              ...(review === undefined ? {} : { reviewHome: review.home, readOnly: true }),
+              ...(request.taskId === undefined ? {} : { taskId: request.taskId }),
+              ...(request.routineContext === undefined || review !== undefined
+                ? {}
+                : { routineContext: request.routineContext }),
+              ...(options.readOnly === undefined ? {} : { readOnly: options.readOnly }),
+            })
+              .then((value) => ({ _tag: 'Ok' as const, value }))
+              .catch((error: unknown) => ({ _tag: 'Err' as const, error }))
+            if (prepared._tag === 'Err') {
+              yield {
+                _tag: 'Failed',
+                reason: `The Codex Agent worker isolation failed: ${prepared.error instanceof Error ? prepared.error.message : String(prepared.error)}`,
+                cause: 'sandbox-setup',
+              }
+              return
+            }
+            sandbox = prepared.value
+            // Only nonsecret command data belongs in this private launch file.
+            // The opaque guest environment stays on its existing environment channel.
+            const plan = JSON.stringify({ binary: sandbox.binary, args: [...sandbox.args, sandbox.providerBinary] })
+            if (Buffer.byteLength(plan) > 1024 * 1024)
+              throw new Error('The Codex Agent sandbox launch plan exceeds its size limit.')
+            await writeFile(`${sandbox.adapterPath}.json`, plan, { mode: 0o600, flag: 'wx' })
+          }
+          // Production uses the trusted adapter and its sanitized environment.
+          // Injected clients exercise only the provider's event translation.
+          const client = factory({
+            ...(sandbox === undefined
+              ? { env: definedEntries(workspaceEnvironment(process.env, request.workspace, request.taskId)) }
+              : {
+                  codexPathOverride: sandbox.adapterPath,
+                  env: {
+                    PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
+                    WOLFSTAR_AGENT_SANDBOX_ENV: JSON.stringify(sandbox.environment),
+                  },
+                }),
+            ...(review === undefined
+              ? {}
+              : { config: { features: REVIEW_CODEX_FEATURES, agents: { enabled: false, max_depth: 0 } } }),
+          })
+          const baseOptions = {
+            model: request.model,
+            workingDirectory: request.workspace,
+            webSearchMode: review === undefined ? 'live' : 'disabled',
+            approvalPolicy: 'never',
+            // The controller already isolates the whole process. Mutation tools cannot nest Bubblewrap inside it.
+            sandboxMode: review === undefined ? 'danger-full-access' : 'read-only',
+          } satisfies ThreadOptions
+          const threadOptions: ThreadOptions =
+            request.reasoningEffort === undefined
+              ? baseOptions
+              : {
+                  ...baseOptions,
+                  modelReasoningEffort: request.reasoningEffort as NonNullable<ThreadOptions['modelReasoningEffort']>,
+                }
+          const prompt = agentSkillCatalogPrompt(
+            `${request.prompt}${request.vitalsComparison === undefined ? '' : `\n\n${vitalsEvidenceInstructions(request.vitalsComparison)}`}`,
+            review === undefined ? sandbox?.skillCatalogPath : undefined,
+          )
+          const input: Input =
+            media.paths.length === 0
+              ? prompt
+              : [{ type: 'text', text: prompt }, ...media.paths.map((path) => ({ type: 'local_image' as const, path }))]
+          const run = (thread: CodexThread) =>
+            thread.runStreamed(input, {
+              outputSchema: request.outputSchema,
+              signal: request.signal,
+            })
 
-        const started = await run(client.startThread(threadOptions))
-        yield* providerEvents(started.events)
+          if (request.sessionId !== null && review === undefined) {
+            try {
+              const resumed = await run(client.resumeThread(request.sessionId, threadOptions))
+              yield* providerEvents(resumed.events, sandbox?.memoryExceeded)
+              return
+            } catch (error) {
+              // A dropped rollout is expected after a restart: start a fresh thread.
+              if (!isMissingSession(error)) throw error
+            }
+          }
+
+          const started = await run(client.startThread(threadOptions))
+          yield* providerEvents(started.events, sandbox?.memoryExceeded)
+        } catch (error) {
+          if (!(await sandbox?.memoryExceeded())) throw error
+          yield { _tag: 'Failed', reason: 'The Agent Task exceeded its memory budget.', cause: 'resource-limit' }
+        } finally {
+          let released: Awaited<ReturnType<ReviewRuntime['release']>> | undefined
+          let comparisonEvent: Extract<AgentEvent, { _tag: 'VitalsComparison' }> | undefined
+          try {
+            if (request.vitalsComparison !== undefined) {
+              const result =
+                sandbox === undefined
+                  ? {
+                      _tag: 'Unavailable' as const,
+                      requestId: request.vitalsComparison.id,
+                      reason: 'The performance evidence reader requires an isolated Agent.',
+                    }
+                  : await inspectVitalsComparison(sandbox, request.vitalsComparison, request.signal)
+              comparisonEvent = { _tag: 'VitalsComparison', result, retainedDirectory: vitalsEvidenceDirectory ?? null }
+            }
+          } finally {
+            try {
+              await sandbox?.release()
+            } finally {
+              try {
+                released = await review?.release()
+              } finally {
+                await media.release()
+              }
+            }
+          }
+          if (comparisonEvent !== undefined) yield comparisonEvent
+          for (const text of released?.warnings ?? []) yield { _tag: 'Reasoning', text: `Controller warning: ${text}` }
+        }
       })(),
   }
 }

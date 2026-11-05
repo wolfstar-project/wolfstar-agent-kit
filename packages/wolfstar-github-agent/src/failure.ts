@@ -1,3 +1,6 @@
+import type { ClassificationSource } from './classification.ts'
+import { choice } from 'advocaat'
+
 /**
  * One taxonomy for every failure the controller can observe.
  *
@@ -31,11 +34,17 @@ export type TransientKind =
   | 'controller'
   | 'subject_changed'
   | 'agent_result'
+  /** One fresh turn may avoid memory pressure. Repeated exhaustion stops. */
+  | 'resource_limit'
 
 export type PermanentKind =
   | 'policy'
   /** The agent session read its whole Context budget without an answer. */
   | 'context_budget'
+  /** The agent repeated a rejected result after the controller named the broken rule. */
+  | 'agent_result'
+  /** The provider rejected the model configuration the role pinned. */
+  | 'provider_config'
   | 'unknown'
 
 export interface FailureSignal {
@@ -72,6 +81,7 @@ export const REVIEW_REPAIR_REFUSALS = {
  * that follows it.
  */
 export const CONTEXT_BUDGET_EXHAUSTED = 'The agent read its whole Context budget without an answer.'
+export const MEMORY_BUDGET_EXHAUSTED = 'The Agent Task exceeded its memory budget.'
 
 export interface ContextBudgetExhaustedInput {
   cachedTokensRead: number
@@ -94,6 +104,19 @@ export function contextBudgetExhaustedReason(input: ContextBudgetExhaustedInput)
 
 export function isContextBudgetExhausted(message: string): boolean {
   return message.startsWith(CONTEXT_BUDGET_EXHAUSTED)
+}
+
+/**
+ * The first sentence of every reason a repeated rejected result reports.
+ *
+ * The correction prompt names the rule the answer broke. An agent that returns
+ * the same answer anyway has decided, so a fresh turn only buys the same
+ * answer again. One Review spent 18 attempts and five hours that way.
+ */
+export const AGENT_RESULT_REPEATED = 'The agent repeated a rejected result after one named correction.'
+
+export function repeatedAgentResultReason(reason: string): string {
+  return `${AGENT_RESULT_REPEATED} ${reason}`
 }
 
 /**
@@ -178,6 +201,7 @@ const networkPatterns: RegExp[] = [
   /\bEHOSTUNREACH\b/,
   /\bENETUNREACH\b/,
   /\bsocket hang up\b/i,
+  /\bdesktop(?: client)? disconnected\b/i,
   /\bfetch failed\b/i,
   /\bnetwork\b.+\berror\b/i,
   /\brequest\b.+\btimed out\b/i,
@@ -200,6 +224,17 @@ const agentProviderPatterns: RegExp[] = [
 
 /** Provider boundaries add this owner before a reason enters the Journal. */
 const ownedAgentProviderPatterns: RegExp[] = [/\b(?:claude|codex|opencode) session failed:/i]
+
+/**
+ * The provider rejected the model configuration the Task pinned, not the world
+ * the Task works on.
+ *
+ * A variant the provider does not offer fails identically on every attempt, and
+ * the owned-agent kind below recovers without an attempt cap, so this must be
+ * matched before it. One role pinned a missing variant and requeued its Failed
+ * Task for hours: twelve agent turns of sixteen seconds each.
+ */
+const providerConfigPatterns: RegExp[] = [/\bvariant unavailable\b/i]
 
 /**
  * The controller lost a race with itself. The next pass starts from a clean state.
@@ -251,13 +286,21 @@ function matches(patterns: RegExp[], message: string): boolean {
  */
 export function classifyFailure(signal: FailureSignal): FailureClass {
   const message = signal.message
+  if (message.startsWith(MEMORY_BUDGET_EXHAUSTED)) return { _tag: 'Transient', kind: 'resource_limit' }
 
   // Matched first and by prefix. No later pattern can then make a session that
   // already spent its whole budget spend another one.
   if (isContextBudgetExhausted(message)) return { _tag: 'Permanent', kind: 'context_budget' }
+  // Matched by prefix before the Transient agent result patterns, which the
+  // quoted parser reason would otherwise match.
+  if (message.startsWith(AGENT_RESULT_REPEATED)) return { _tag: 'Permanent', kind: 'agent_result' }
 
   if (permanentMessages.has(message.trim()) || matches(permanentPatterns, message))
     return { _tag: 'Permanent', kind: 'policy' }
+
+  // Matched before the owned-agent wrapper, whose kind recovers without an
+  // attempt cap. A rejected model variant survives every one of those retries.
+  if (matches(providerConfigPatterns, message)) return { _tag: 'Permanent', kind: 'provider_config' }
 
   // Provider errors carry their owner in the persisted reason. Match that
   // before generic service and rate-limit text that any provider may return.
@@ -290,6 +333,17 @@ export function isTransientFailure(signal: FailureSignal): boolean {
 }
 
 /**
+ * Whether a refused Publication says its subject moved on.
+ *
+ * The controller retires that Publication on purpose and queues fresh work for
+ * the new head commit. Nothing broke and nobody has to act, so an Incident
+ * names a healthy path as a fault. One sat open for twelve days doing that.
+ */
+export function isSubjectMovedReason(message: string): boolean {
+  return classifyFailure({ message }).kind === 'subject_changed'
+}
+
+/**
  * Whether another attempt at the same work can change the result.
  *
  * A Task the controller refused by policy reads the same policy on every
@@ -303,11 +357,33 @@ export function isTransientFailure(signal: FailureSignal): boolean {
  */
 export function mayRetryFailure(signal: FailureSignal): boolean {
   const failure = classifyFailure(signal)
+  // Memory recovery goes through delayed recovery, never immediate attempts.
+  if (failure.kind === 'resource_limit') return false
   return failure._tag !== 'Permanent' || failure.kind === 'unknown'
 }
 
-/** Recovery limit for failures a person can affect. Provider outages keep capped backoff. */
+/** Recovery limit for failures a person can affect. */
 export const MAXIMUM_RECOVERY_ATTEMPTS = 5
+
+/**
+ * Recovery limit for Agent provider failures, about three and a half hours of
+ * capped backoff.
+ *
+ * A provider outage opens the provider circuit, and a circuit pause spends no
+ * Task budget, so this limit only meets a failure that keeps coming back for
+ * one Task. An unlimited budget let one Review restart every thirty minutes for
+ * a day while its pull request showed only QUEUED and REVIEWING 35%, and the
+ * real reason sat in the journal (nuxtseo.com#1796, 2026-10-20).
+ */
+export const MAXIMUM_PROVIDER_RECOVERY_ATTEMPTS = 12
+
+/** Shared by recovery, observation, and status reporting. */
+export function canRecoverFailure(signal: FailureSignal, recoveryAttempts: number): boolean {
+  const failure = classifyFailure(signal)
+  if (failure._tag !== 'Transient') return false
+  if (failure.kind === 'agent_provider') return recoveryAttempts < MAXIMUM_PROVIDER_RECOVERY_ATTEMPTS
+  return recoveryAttempts < (failure.kind === 'resource_limit' ? 1 : MAXIMUM_RECOVERY_ATTEMPTS)
+}
 
 const baseRecoveryDelayMilliseconds = 60_000
 const maximumRecoveryDelayMilliseconds = 30 * 60_000
@@ -325,6 +401,193 @@ export function recoveryDelayMilliseconds(recoveryAttempts: number): number {
   return Math.min(baseRecoveryDelayMilliseconds * 2 ** (recoveryAttempts - 1), maximumRecoveryDelayMilliseconds)
 }
 
-export function nextRecoveryAt(failedAt: string, recoveryAttempts: number): string {
-  return new Date(Date.parse(failedAt) + recoveryDelayMilliseconds(recoveryAttempts)).toISOString()
+export function nextRecoveryAt(failedAt: string, recoveryAttempts: number, signal?: FailureSignal): string {
+  const delay =
+    signal !== undefined && classifyFailure(signal).kind === 'resource_limit'
+      ? Math.max(baseRecoveryDelayMilliseconds, recoveryDelayMilliseconds(recoveryAttempts))
+      : recoveryDelayMilliseconds(recoveryAttempts)
+  return new Date(Date.parse(failedAt) + delay).toISOString()
+}
+
+/**
+ * What one failing check says about who can fix it.
+ *
+ * `Repairable` means the repository is the cause, so an Agent may change it.
+ * `Infrastructure` means the runner host or a remote service failed. No change
+ * to the repository fixes that, and every past Agent turn on one produced a
+ * mask: a retry wrapper, a concurrency limit, or a build flag. A person repairs
+ * the host, then re-runs the check.
+ * `Indeterminate` means the evidence cannot authorize repository changes.
+ */
+export type CheckFailureClass =
+  | { _tag: 'Repairable' }
+  | { _tag: 'Infrastructure'; reason: string }
+  | { _tag: 'Indeterminate'; reason: string }
+
+export interface CheckFailureSignal {
+  name: string
+  conclusion: string | null
+  /** The actual failing step, or null when GitHub reports none. */
+  failedStep: string | null
+  /** What the job steps say, when the controller could read them. */
+  runnerLost?: boolean
+  /** The last lines of the failed job log, oldest first. Empty when unavailable. */
+  logTail: string[]
+}
+
+/**
+ * A runner killed the job process, or the host killed the runner. GitHub
+ * prints the kill as the last lines of the failed step, so only the tail's
+ * final lines count. A test that asserts kill-signal output prints it earlier.
+ */
+const runnerKillPatterns: RegExp[] = [
+  /\bexit code 129\b/i,
+  /\bexit code 137\b/i,
+  /\brunner has received a shutdown signal\b/i,
+  /\blost communication with the server\b/i,
+  /\bThe hosted runner\b.+\blost communication\b/i,
+  /\bThe self-hosted runner\b.+\blost communication\b/i,
+]
+
+/** Remote services a workflow downloads from, which the repository does not control. */
+const remoteHostPattern =
+  /\b(?:unpkg\.com|nodejs\.org|registry\.npmjs\.org|registry\.yarnpkg\.com|objects\.githubusercontent\.com|release-assets\.githubusercontent\.com|github\.com\/[\w.-]+\/[\w.-]+\/releases\/download)\b/i
+
+/**
+ * A download failed at the transport level. Bare words such as `timeout`,
+ * `fetch failed`, or a `503` also appear in repository tests that mention a
+ * package host, so only an OS or client error token counts.
+ */
+const remoteFetchFailurePatterns: RegExp[] = [
+  /\bETIMEDOUT\b/,
+  /\bECONNRESET\b/,
+  /\bECONNREFUSED\b/,
+  /\bENOTFOUND\b/,
+  /\bEAI_AGAIN\b/,
+  /\bUND_ERR_(?:CONNECT_TIMEOUT|HEADERS_TIMEOUT|SOCKET)\b/,
+  /\bsocket hang up\b/i,
+  /\bERR_PNPM_FETCH_\w+\b/,
+]
+
+/** How many neighbouring lines one download failure may span: the URL, a stack trace, then the cause. */
+const remoteFetchWindow = 6
+
+/** How many final lines of the tail a runner kill may occupy. */
+const runnerKillTail = 3
+
+function remoteFetchFailure(logTail: string[]): string | null {
+  for (let index = 0; index < logTail.length; index += 1) {
+    const window = logTail.slice(index, index + remoteFetchWindow).join('\n')
+    const host = window.match(remoteHostPattern)
+    if (host !== null && matches(remoteFetchFailurePatterns, window)) return host[0]
+  }
+  return null
+}
+
+/**
+ * Classifies one failing check from what the controller can read before an Agent starts.
+ *
+ * Only a runner kill or a remote download failure is Infrastructure. A heap
+ * limit inside a step stays Repairable, because the workflow's `NODE_OPTIONS`
+ * is the repository's to change. Missing logs or a missing failed step remain
+ * Indeterminate. Cancellation alone does not identify the cause.
+ */
+export function classifyCheckFailure(signal: CheckFailureSignal): CheckFailureClass {
+  if (signal.runnerLost === true && signal.conclusion !== 'cancelled')
+    return {
+      _tag: 'Infrastructure',
+      reason: `The runner lost the job for check "${signal.name}" before any step failed.`,
+    }
+  // A `timed_out` conclusion alone says nothing about who hung. A repository
+  // test can hang as easily as a host can stall, so the log decides.
+  const tail = signal.logTail.slice(-runnerKillTail)
+  // GitHub reports the kill on a `##[error]` annotation or as the final line.
+  // A test name that quotes an exit code sits inside vitest output, not there.
+  const killed = tail.find(
+    (line, index) => (line.startsWith('##[error]') || index === tail.length - 1) && matches(runnerKillPatterns, line),
+  )
+  if (killed !== undefined)
+    return { _tag: 'Infrastructure', reason: `The runner killed the job for check "${signal.name}": ${killed.trim()}` }
+  const host = remoteFetchFailure(signal.logTail)
+  if (host !== null)
+    return { _tag: 'Infrastructure', reason: `A download from ${host} failed during check "${signal.name}".` }
+  if (signal.logTail.every((line) => line.trim().length === 0))
+    return { _tag: 'Indeterminate', reason: `Check "${signal.name}" has no readable failure log.` }
+  if (signal.logTail.every((line) => line.trim().length === 0 || /\bThe operation was canceled\b/i.test(line)))
+    return { _tag: 'Indeterminate', reason: `Check "${signal.name}" reports cancellation without a failure cause.` }
+  if (signal.failedStep === null || signal.failedStep.trim().length === 0)
+    return {
+      _tag: 'Indeterminate',
+      reason: `Check "${signal.name}" has no confirmed failed step (${signal.conclusion ?? 'unknown'}).`,
+    }
+  return { _tag: 'Repairable' }
+}
+
+/**
+ * The classification question for one failing check the patterns could not
+ * name. Exported so tests can assert the contract without the service.
+ */
+/**
+ * Option order affects the answer distribution, so the criteria order is part
+ * of the measured contract: reorder only alongside a fresh eval of the
+ * residual classifier.
+ */
+export function checkFailureQuestions(checkName: string) {
+  return {
+    cause: choice(
+      `The state holds the final lines of one failed GitHub Actions check, "${checkName}". Decide who must fix it.`,
+      {
+        Repairable: 'The repository owns the failure: its code, its tests, its configuration, or its dependencies.',
+        Infrastructure:
+          'The host or the network owns the failure: the runner itself, disk, memory of the machine, or a remote download that never reached the repository.',
+      },
+    ),
+  }
+}
+
+/** Infrastructure from the classification needs this much confidence. Below it, the check stays Repairable. */
+export const CHECK_INFRASTRUCTURE_CONFIDENCE_FLOOR = 0.85
+
+/**
+ * Classifies one failing check, with the classification service answering what
+ * the patterns cannot.
+ *
+ * The patterns decide first and the service never overrides them: a runner
+ * kill or a named remote host is settled fact. Only a check the patterns left
+ * Repairable is asked about, and only a confident answer moves it, because a
+ * wrong Infrastructure answer stops the repair and asks a person to fix a
+ * host. Every other answer, and every failure, keeps the repair.
+ */
+export async function classifyCheckFailureWithResidual(input: {
+  signal: CheckFailureSignal
+  classification: ClassificationSource | null
+  abort?: AbortSignal
+}): Promise<CheckFailureClass> {
+  const classified = classifyCheckFailure(input.signal)
+  if (classified._tag !== 'Repairable' || input.classification === null) return classified
+  const result = await input.classification.classify({
+    state: { check: input.signal.name, conclusion: input.signal.conclusion, logTail: input.signal.logTail.slice(-30) },
+    questions: checkFailureQuestions(input.signal.name),
+    ...(input.abort === undefined ? {} : { signal: input.abort }),
+  })
+  if (result._tag === 'Err') return classified
+  // The boundary trust ends here: an answer that is not a typed choice with
+  // a numeric confidence reads as no answer, never as a verdict.
+  const answer = result.value.answers.cause
+  if (
+    answer === undefined ||
+    answer.type !== 'choice' ||
+    typeof answer.choice !== 'string' ||
+    !Number.isFinite(answer.confidence) ||
+    answer.confidence < 0 ||
+    answer.confidence > 1
+  ) {
+    return classified
+  }
+  const confidence = Math.round(answer.confidence * 100) / 100
+  if (answer.choice !== 'Infrastructure' || confidence < CHECK_INFRASTRUCTURE_CONFIDENCE_FLOOR) return classified
+  return {
+    _tag: 'Infrastructure',
+    reason: `The classification read check "${input.signal.name}" as infrastructure with confidence ${confidence}.`,
+  }
 }

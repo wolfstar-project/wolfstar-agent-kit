@@ -1,4 +1,6 @@
-import type { GitHubAgentSource } from './github-agent-source.ts'
+import type { NativeReviewMirror } from './native-review.ts'
+import type { ReviewCheckRunMirror } from './review-check-run.ts'
+import type { ReviewStatusPublicationOptions } from './review-status-controller.ts'
 import type { JournalStore } from './store.ts'
 import { publishClaimedReviewStatus } from './review-status-controller.ts'
 
@@ -9,7 +11,9 @@ export interface ReviewStatusScheduler {
 }
 
 export interface ReviewStatusSchedulerOptions {
-  github: Pick<GitHubAgentSource, 'getPullRequestReviewSnapshot' | 'stampAgentLabel' | 'upsertReviewStatus'>
+  nativeReviews?: NativeReviewMirror
+  checkRuns?: ReviewCheckRunMirror
+  github: ReviewStatusPublicationOptions['github']
   intervalMilliseconds: number
   leaseMilliseconds: number
   now: () => Date
@@ -25,7 +29,12 @@ export interface ReviewStatusSchedulerOptions {
   onPublished: (repository: string, pullRequestNumber: number) => void
   store: Pick<
     JournalStore,
-    'claimNextTerminalReviewStatus' | 'completeReviewStatus' | 'deferReviewStatus' | 'recordReviewStatusReceipt'
+    | 'authorizeReviewStatus'
+    | 'claimNextTerminalReviewStatus'
+    | 'completeReviewStatus'
+    | 'deferReviewStatus'
+    | 'recordReviewStatusReceipt'
+    | 'supersedeReviewStatus'
   >
   workerId: string
 }

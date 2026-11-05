@@ -9,6 +9,59 @@ async function events(iterable: AsyncIterable<AgentEvent>): Promise<AgentEvent[]
 }
 
 describe('agent provider circuit boundary', () => {
+  it('recognizes exhausted subscription windows', () => {
+    expect(stableProviderFailureClass('Weekly/Monthly Limit Exhausted')).toBe('usage_limit')
+  })
+  it('classifies a rejected model variant as provider configuration', () => {
+    expect(stableProviderFailureClass('Variant unavailable for zai-coding-plan/glm-5.3-flash: medium')).toBe(
+      'provider_config',
+    )
+  })
+  it.each(['host-cancelled', 'sandbox-setup', 'resource-limit'] as const)(
+    'excludes %s events from model health with a live controller signal',
+    async (cause) => {
+      const failures: unknown[] = []
+      const successes: unknown[] = []
+      const released: unknown[] = []
+      const provider = createCircuitProtectedProvider({
+        credential: 'test',
+        now: () => new Date(),
+        provider: {
+          name: 'opencode',
+          async *runTurn() {
+            yield { _tag: 'Failed', reason: 'The host stopped the turn.', cause }
+          },
+        },
+        store: {
+          renewProviderStart: () => true,
+          releaseProviderStart: (input) => {
+            released.push(input)
+            return true
+          },
+          reserveProviderStart: () => ({
+            _tag: 'Allowed',
+            canary: { circuitId: 'canary', workerId: 'worker', fence: 7 },
+          }),
+          recordProviderFailure: (input) => failures.push(input),
+          recordProviderSuccess: (input) => successes.push(input),
+        },
+      })
+      expect(
+        await events(
+          provider.runTurn({
+            model: 'test',
+            outputSchema: {},
+            prompt: '',
+            sessionId: null,
+            signal: new AbortController().signal,
+            workspace: '/tmp/test',
+          }),
+        ),
+      ).toEqual([{ _tag: 'Failed', reason: 'The host stopped the turn.', cause }])
+      expect({ failures, successes }).toEqual({ failures: [], successes: [] })
+      expect(released).toEqual([{ circuitId: 'canary', workerId: 'worker', fence: 7, at: expect.any(String) }])
+    },
+  )
   it('removes random request identifiers from the failure class', () => {
     expect(stableProviderFailureClass('Network error request-id-abcd1234')).toBe('network')
     expect(stableProviderFailureClass('Network error request-id-different5678')).toBe('network')
@@ -27,6 +80,8 @@ describe('agent provider circuit boundary', () => {
       now: () => new Date('2026-08-13T01:00:00.000Z'),
       provider,
       store: {
+        renewProviderStart: () => true,
+        releaseProviderStart: () => false,
         reserveProviderStart: () => ({ _tag: 'Allowed', canary: null }),
         recordProviderFailure: (input) => recorded.push(input),
         recordProviderSuccess: () => 0,
@@ -70,6 +125,8 @@ describe('agent provider circuit boundary', () => {
         },
       },
       store: {
+        renewProviderStart: () => true,
+        releaseProviderStart: () => false,
         reserveProviderStart: () => ({ _tag: 'Allowed', canary: null }),
         recordProviderFailure: (input) => failures.push(input),
         recordProviderSuccess: () => 0,
@@ -107,6 +164,8 @@ describe('agent provider circuit boundary', () => {
         },
       },
       store: {
+        renewProviderStart: () => true,
+        releaseProviderStart: () => false,
         reserveProviderStart: () => ({ _tag: 'Allowed', canary: null }),
         recordProviderFailure: () => (failures += 1),
         recordProviderSuccess: () => (successes += 1),

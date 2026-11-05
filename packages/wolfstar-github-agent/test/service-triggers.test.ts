@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
 import { homedir } from 'node:os'
+import { describe, expect, it } from 'vitest'
 import { parseConfigText } from '../src/config.ts'
 import { dashboardSnapshotForTriggers, recordRoutineOnlyRepositoryHealth } from '../src/service.ts'
 import { dashboardSnapshot } from './fixtures.ts'
@@ -61,6 +61,7 @@ describe('which triggers one machine answers', () => {
         candidates: [],
         activity: [],
         reportState: null,
+        report: null,
         createdAt: '2026-08-28T21:00:00.000Z',
         updatedAt: '2026-08-28T21:01:00.000Z',
       },

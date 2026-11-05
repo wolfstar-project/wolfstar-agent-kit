@@ -5,22 +5,22 @@ import type {
   AgentTask,
   DashboardSnapshot,
   ItemSummary,
+  PinnedAgentSelection,
   QueueEntry,
   ReviewAgent,
+  RoutineRun,
   SelectionMode,
 } from '../../../src/types.ts'
-import type { EjectedSessionNotice } from '../utils/eject.ts'
-import {
-  createSharedComposable,
-  formatTimeAgo,
-  useBrowserLocation,
-  useDocumentVisibility,
-  useEventSource,
-  useNow,
-} from '@vueuse/core'
+import { createSharedComposable, formatTimeAgo, useDocumentVisibility, useEventSource, useNow } from '@vueuse/core'
 import { CODEX_AGENT_PROFILE } from '../../../src/agent-profile.ts'
-import { agentStartState, decisionEntries, incidentEntries, isSnapshotStale, taskNumber } from '../utils/dashboard.ts'
-import { ejectRecoveryFromError, ejectSessionCommand } from '../utils/eject.ts'
+import {
+  agentStartState,
+  humanDecisionEntries,
+  incidentEntries,
+  isSnapshotStale,
+  serviceClockOffset,
+  taskNumber,
+} from '../utils/dashboard.ts'
 
 function emptySnapshot(): DashboardSnapshot {
   return {
@@ -29,6 +29,7 @@ function emptySnapshot(): DashboardSnapshot {
     mutationsEnabled: false,
     agentControl: { _tag: 'Running' },
     restartRequest: null,
+    serviceUpdate: { _tag: 'Checking', deployedCommit: '' },
     selectionMode: 'auto',
     openPullRequests: 0,
     maxOpenPullRequests: 8,
@@ -39,15 +40,18 @@ function emptySnapshot(): DashboardSnapshot {
     agentModels: { claude: [], codex: [], opencode: [] },
     reasoningEfforts: [],
     providerCapacities: [],
+    githubRateLimits: [],
     providerCircuits: [],
     agents: [],
     incidents: [],
+    repairRecoveryCandidates: [],
     queue: [],
     repositories: [],
     items: [],
     tasks: [],
     routines: [],
     routineRuns: [],
+    batches: [],
   }
 }
 
@@ -58,7 +62,11 @@ function emptySnapshot(): DashboardSnapshot {
  * and Watching keeps a single event stream instead of opening one per page.
  */
 function createDashboard() {
+  const { readOnly, controllerPath } = useTerminalHost()
+  let started = false
+  let liveRevision = 0
   const snapshot = shallowRef<DashboardSnapshot>(emptySnapshot())
+  const lastLiveAt = ref('')
   const loading = ref(true)
   const loadError = ref<string>()
   const controlPending = ref(false)
@@ -68,9 +76,6 @@ function createDashboard() {
   const approvalErrors = ref<Record<string, string>>({})
   const cancelPending = ref<string>()
   const cancelErrors = ref<Record<string, string>>({})
-  const ejectPending = ref<string>()
-  const ejectErrors = ref<Record<string, string>>({})
-  const ejectedSession = ref<EjectedSessionNotice>()
   const rerunPending = ref<string>()
   const rerunErrors = ref<Record<string, string>>({})
   const feedbackPending = ref<string>()
@@ -80,18 +85,24 @@ function createDashboard() {
   const dismissErrors = ref<Record<string, string>>({})
 
   const visibility = useDocumentVisibility()
-  const browserLocation = useBrowserLocation()
-  const now = useNow({ interval: 1_000 })
+  const browserNow = useNow({ interval: 1_000 })
+  const clockOffset = ref(0)
+  const now = computed(() => new Date(browserNow.value.getTime() + clockOffset.value))
 
   const {
     data: liveSnapshot,
+    event: liveEvent,
     open: openLiveUpdates,
     close: closeLiveUpdates,
-  } = useEventSource<['state'], DashboardSnapshot>('/api/events', ['state'], {
-    immediate: false,
-    autoReconnect: { delay: 1_500 },
-    serializer: { read: (value) => JSON.parse(value ?? '{}') as DashboardSnapshot },
-  })
+  } = useEventSource<['state', 'heartbeat'], DashboardSnapshot | string>(
+    computed(() => controllerPath('/api/events')),
+    ['state', 'heartbeat'],
+    {
+      immediate: false,
+      autoReconnect: { delay: 1_500 },
+      serializer: { read: (value) => JSON.parse(value ?? '{}') as DashboardSnapshot | string },
+    },
+  )
 
   const activeAgents = computed(() =>
     snapshot.value.agents.filter((agent): agent is ActiveAgent => agent._tag === 'ActiveAgent'),
@@ -100,7 +111,7 @@ function createDashboard() {
     snapshot.value.agents.filter((agent): agent is ReviewAgent => agent._tag === 'ReviewAgent'),
   )
   const agentStart = computed(() => agentStartState(snapshot.value))
-  const decisions = computed(() => decisionEntries(snapshot.value.queue))
+  const decisions = computed(() => humanDecisionEntries(snapshot.value))
   /** Errors first, then newest. The chip, the Incident row, and the pane all read this one order. */
   const incidents = computed(() => incidentEntries(snapshot.value.incidents))
   const unhealthyRepositories = computed(
@@ -114,11 +125,22 @@ function createDashboard() {
   }))
 
   /** Old data on a monitoring surface is worse than none, because it still looks authoritative. */
-  const isStale = computed(() => !loading.value && isSnapshotStale(snapshot.value.generatedAt, now.value))
+  const freshnessAt = computed(() => lastLiveAt.value || snapshot.value.generatedAt)
+  const isStale = computed(() => !loading.value && isSnapshotStale(freshnessAt.value, now.value))
+  const controlsUnavailable = computed(
+    () => readOnly.value || loading.value || snapshot.value.generatedAt.length === 0 || isStale.value,
+  )
+
+  function refuseUnavailableControl(): boolean {
+    if (!controlsUnavailable.value) return false
+    controlError.value = readOnly.value
+      ? 'Read-only Service connection.'
+      : 'Service data is unavailable. Reload before changing settings or work.'
+    return true
+  }
 
   function relativeTime(value: string | null): string {
-    void now.value
-    return value === null || value.length === 0 ? 'Never' : formatTimeAgo(new Date(value))
+    return value === null || value.length === 0 ? 'Never' : formatTimeAgo(new Date(value), {}, now.value)
   }
 
   function duration(startedAt: string, completedAt?: string): string {
@@ -131,11 +153,20 @@ function createDashboard() {
 
   async function loadState(): Promise<void> {
     loadError.value = undefined
-    return $fetch<DashboardSnapshot>('/api/state')
-      .then((value) => {
-        snapshot.value = value
+    const revisionAtStart = liveRevision
+    return $fetch
+      .raw<DashboardSnapshot>(controllerPath('/api/state'))
+      .then((response) => {
+        if (response._data === undefined) throw new Error('The Service returned no state.')
+        clockOffset.value = serviceClockOffset(response.headers.get('date'), new Date())
+        // A live state or heartbeat sampled after this request started is a
+        // newer authority than a delayed HTTP response.
+        if (liveRevision !== revisionAtStart) return
+        snapshot.value = response._data
+        lastLiveAt.value = response._data.generatedAt
       })
       .catch((error: unknown) => {
+        if (liveRevision !== revisionAtStart) return
         loadError.value =
           error instanceof Error
             ? `State could not load: ${error.message}. Check the local service.`
@@ -156,6 +187,7 @@ function createDashboard() {
 
   /** Every control writes through the controller, then reloads rather than guessing the result. */
   async function control(request: () => Promise<unknown>): Promise<void> {
+    if (refuseUnavailableControl()) return
     controlPending.value = true
     controlError.value = undefined
     return request()
@@ -177,11 +209,26 @@ function createDashboard() {
   const requestRestart = (): Promise<void> =>
     control(() => $fetch('/api/service/restart', { method: 'POST', body: { source: 'dashboard' } }))
 
+  const requestUpdate = (): Promise<void> =>
+    control(() => $fetch('/api/service/update', { method: 'POST', body: { source: 'dashboard' } }))
+
   /** A switch starts the next agent turn. Work already running keeps its model. */
   const selectAgent = (selection: AgentSelection): Promise<void> =>
     control(() => $fetch('/api/agents/select', { method: 'POST', body: selection }))
 
+  async function runRoutine(routineId: string, agentSelection: PinnedAgentSelection): Promise<RoutineRun | undefined> {
+    if (refuseUnavailableControl()) return undefined
+    const run = await $fetch<RoutineRun>('/api/routines/run', { method: 'POST', body: { routineId, agentSelection } })
+    await loadState()
+    return run
+  }
+
+  /** Agent slots apply to the next turn. Running Agents finish. */
+  const setAgentSlots = (host: 'hogwild' | 'desktop', slots: number): Promise<void> =>
+    control(() => $fetch('/api/agents/slots', { method: 'POST', body: { host, slots } }))
+
   async function setRepositoryPaused(repository: string, paused: boolean): Promise<void> {
+    if (refuseUnavailableControl()) return
     repositoryPending.value = repository
     controlError.value = undefined
     return $fetch(`/api/repositories/${paused ? 'pause' : 'resume'}`, { method: 'POST', body: { repository } })
@@ -195,6 +242,7 @@ function createDashboard() {
   }
 
   async function setRepositoryWritesEnabled(repository: string, writesEnabled: boolean): Promise<void> {
+    if (refuseUnavailableControl()) return
     repositoryPending.value = repository
     controlError.value = undefined
     return $fetch(`/api/repositories/writes/${writesEnabled ? 'enable' : 'disable'}`, {
@@ -215,6 +263,7 @@ function createDashboard() {
   }
 
   async function rerunReview(repository: string, pullRequestNumber: number, revisionId: string): Promise<void> {
+    if (refuseUnavailableControl()) return
     const key = itemKey(repository, pullRequestNumber, revisionId)
     rerunPending.value = key
     rerunErrors.value = without(rerunErrors.value, key)
@@ -229,6 +278,7 @@ function createDashboard() {
   }
 
   async function recordAgentFeedback(reviewRunId: string, feedback: AgentFeedbackInput): Promise<void> {
+    if (refuseUnavailableControl()) return
     feedbackPending.value = reviewRunId
     feedbackErrors.value = without(feedbackErrors.value, reviewRunId)
     return $fetch('/api/reviews/feedback', { method: 'POST', body: { reviewRunId, feedback } })
@@ -242,6 +292,7 @@ function createDashboard() {
   }
 
   async function cancelAgentTask(taskId: string): Promise<void> {
+    if (refuseUnavailableControl()) return
     cancelPending.value = taskId
     cancelErrors.value = without(cancelErrors.value, taskId)
     return $fetch('/api/tasks/cancel', { method: 'POST', body: { taskId } })
@@ -254,50 +305,14 @@ function createDashboard() {
       })
   }
 
-  async function ejectAgent(taskId: string): Promise<void> {
-    ejectPending.value = taskId
-    ejectErrors.value = without(ejectErrors.value, taskId)
-    return $fetch<{
-      _tag: 'Ejected'
-      provider: 'claude' | 'codex' | 'opencode'
-      sessionId: string
-      repository: string
-      itemNumber: number
-    }>('/api/agents/eject', { method: 'POST', body: { taskId } })
-      .then((ejected) => {
-        const host = browserLocation.value.hostname ?? 'hogwild'
-        ejectedSession.value = {
-          _tag: 'Ejected',
-          command: ejectSessionCommand(ejected.provider, ejected.sessionId, host),
-          itemNumber: ejected.itemNumber,
-          repository: ejected.repository,
-        }
-        return loadState()
-      })
-      .catch((error: unknown) => {
-        const recovery = ejectRecoveryFromError(error, browserLocation.value.hostname ?? 'hogwild')
-        if (recovery !== undefined) {
-          ejectedSession.value = recovery
-          return loadState()
-        }
-        ejectErrors.value = { ...ejectErrors.value, [taskId]: failed(error) }
-      })
-      .finally(() => {
-        ejectPending.value = undefined
-      })
-  }
-
-  function clearEjectedSession(): void {
-    ejectedSession.value = undefined
-  }
-
   async function approveQueueEntry(entry: QueueEntry): Promise<void> {
+    if (refuseUnavailableControl()) return
     if (entry.state._tag !== 'AwaitingApproval') return
     const key = itemKey(entry.repository, entry.number, entry.revisionId)
     approvalPending.value = `${key}:${entry.state.kind}`
     approvalErrors.value = without(approvalErrors.value, key)
     const request =
-      entry.state.kind === 'issue_work'
+      entry.state.kind !== 'review'
         ? $fetch('/api/issues/approve', {
             method: 'POST',
             body: { repository: entry.repository, issueNumber: entry.number, revisionId: entry.revisionId },
@@ -346,6 +361,7 @@ function createDashboard() {
    * A Dismissal names the Item, so one call covers every future head commit.
    */
   async function changeDismissal(repository: string, itemNumber: number, action: 'dismiss' | 'restore'): Promise<void> {
+    if (refuseUnavailableControl()) return
     const key = `${repository}#${itemNumber}`
     dismissPending.value = key
     dismissErrors.value = without(dismissErrors.value, key)
@@ -409,15 +425,32 @@ function createDashboard() {
   }
 
   function start(): void {
+    if (started) return
+    started = true
     void loadState()
     if (visibility.value === 'visible') openLiveUpdates()
   }
 
-  watch(liveSnapshot, (value) => {
-    if (value !== null) snapshot.value = value
+  watch([liveSnapshot, liveEvent], ([value, event]) => {
+    if (event === 'heartbeat') {
+      if (typeof value === 'string') {
+        liveRevision++
+        loadError.value = undefined
+        lastLiveAt.value = value
+      }
+      return
+    }
+    if (event === 'state' && value !== null && typeof value === 'object') {
+      liveRevision++
+      snapshot.value = value
+      lastLiveAt.value = value.generatedAt
+      loadError.value = undefined
+      loading.value = false
+    }
   })
 
   watch(visibility, (value) => {
+    if (!started) return
     if (value === 'visible') {
       void loadState()
       openLiveUpdates()
@@ -428,6 +461,7 @@ function createDashboard() {
 
   return {
     snapshot,
+    lastLiveAt,
     loading,
     loadError,
     controlPending,
@@ -436,10 +470,6 @@ function createDashboard() {
     approvalErrors,
     cancelPending,
     cancelErrors,
-    ejectPending,
-    ejectErrors,
-    ejectedSession,
-    clearEjectedSession,
     rerunPending,
     rerunErrors,
     feedbackPending,
@@ -459,20 +489,23 @@ function createDashboard() {
     unhealthyRepositories,
     queueContext,
     isStale,
+    controlsUnavailable,
     relativeTime,
     duration,
     loadState,
     start,
     setAgentControl,
     requestRestart,
+    requestUpdate,
     setSelectionMode,
     selectAgent,
+    runRoutine,
+    setAgentSlots,
     setRepositoryPaused,
     setRepositoryWritesEnabled,
     rerunReview,
     recordAgentFeedback,
     cancelAgentTask,
-    ejectAgent,
     approveQueueEntry,
     approvalKeyFor,
     approvalErrorFor,

@@ -20,7 +20,11 @@ Example: branch `fix/auth` in `~/pkg/app` resolves to `~/pkg/app.fix-auth`. Neve
 
 `wolfstar-github-agent` follows the same contract. It creates each agent worktree from the configured repository checkout with `wt`.
 
-The global `pre-switch` hook protects the primary checkout before every Worktrunk switch. It requires `main`, a clean worktree, and an `origin` remote. It fetches and prunes every `origin` ref, then fast-forwards local `main` to `origin/main`. A fetch failure, local commit, divergent branch, or dirty file stops the switch.
+The global `pre-switch` hook refreshes the primary checkout before every Worktrunk switch. It fetches and prunes every `origin` ref, so `--base origin/main` starts from current GitHub state. If the primary checkout is clean on `main`, the hook fast-forwards `main` to `origin/main`.
+
+If the primary checkout is dirty, is off `main`, or has local commits, the hook skips only the fast-forward. It prints one warning and the switch continues. The hook never edits, stashes, resets, or cleans the primary checkout. A missing `origin` remote or a failed fetch stops the switch before Worktrunk creates anything.
+
+Do not pass `--no-hooks` to get past the primary checkout. That flag also skips the fetch.
 
 ## Prepared worktrees
 
@@ -35,6 +39,12 @@ A successful creation means that `node_modules` is ready for repository checks.
 Do not repeat the install only to initialise that worktree.
 Run another install when the task changes the dependency graph.
 
+The global hook seeds files listed in `scripts/repository-env-files` once.
+The manifest may include `.env`, `.dev.vars`, nested files, and safe relative symlinks.
+Every path must stay inside a trusted repository and Git must ignore it.
+Regular files receive mode `600`.
+Existing worktree files never change.
+
 The global hook also seeds ignored `.data` and `.wrangler/state` directories.
 It copies only from the primary worktree when the destination has no state.
 Each worktree receives a private writable copy.
@@ -44,6 +54,10 @@ The copy uses filesystem reflinks when available and a normal copy otherwise.
 
 A failed hook stops the worktree handoff.
 Do not start an Agent in a partly prepared worktree.
+
+`pnpm worktrunk:update` installs the committed Worktrunk configuration locally.
+`pnpm service:hogwild:sync-env` sends the listed desktop files to Hogwild.
+The Hogwild service update runs both operations before it restarts the service.
 
 pnpm shares immutable package data through its content-addressable store.
 Each worktree keeps its own `node_modules` topology.

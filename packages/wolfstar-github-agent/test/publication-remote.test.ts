@@ -1,3 +1,4 @@
+import type { GitHubPullRequestPublisher } from '../src/github.ts'
 import type { ClaimedPublicationCommand } from '../src/types.ts'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -5,7 +6,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { ok } from '../src/result.ts'
+import { err, ok } from '../src/result.ts'
 import { createGitPublicationRemote } from '../src/worktree.ts'
 import { pullRequestItem, repositoryMapping } from './fixtures.ts'
 
@@ -27,11 +28,35 @@ function git(checkout: string, ...args: string[]): string {
   }).trim()
 }
 
-/** The change identity the controller signs: raw lines, full blob names. */
+/** The change identity the controller signs: exact NUL records and full blob names. */
 function contentDigest(checkout: string, from: string, to: string): string {
-  return createHash('sha256')
-    .update(git(checkout, 'diff', '--raw', '--no-abbrev', '--no-renames', from, to))
-    .digest('hex')
+  const output = execFileSync(
+    'git',
+    [
+      '-c',
+      'credential.helper=',
+      '-c',
+      'core.hooksPath=/dev/null',
+      '-C',
+      checkout,
+      'diff',
+      '--raw',
+      '-z',
+      '--no-abbrev',
+      '--no-renames',
+      from,
+      to,
+    ],
+    {
+      env: {
+        PATH: process.env.PATH,
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_CONFIG_SYSTEM: '/dev/null',
+        GIT_TERMINAL_PROMPT: '0',
+      },
+    },
+  )
+  return createHash('sha256').update(output).digest('hex')
 }
 
 function fixture(changedPath = 'base.txt'): {
@@ -100,7 +125,208 @@ function fixture(changedPath = 'base.txt'): {
   }
 }
 
+describe('controller pull request Review handoff', () => {
+  function command(
+    taskKind: 'issue_work' | 'baseline_repair' | 'review_fix',
+  ): Extract<ClaimedPublicationCommand, { _tag: 'OpenPullRequest' }> {
+    const common = {
+      id: 'publication-1',
+      taskId: 'task-1',
+      repository: 'wolfstar-project/example',
+      repositoryMapping: repositoryMapping(),
+      commitSha: 'b'.repeat(40),
+      baseSha: 'a'.repeat(40),
+      baseRef: 'main',
+      expectedHeadSha: 'a'.repeat(40),
+      headRef: 'fix/issue-12',
+      artifactRef: 'refs/wolfstar-github-agent/publications/task-1',
+      patchDigest: 'c'.repeat(64),
+      changedFiles: 1,
+      outcomeUnknown: false,
+      workerId: 'publisher-1',
+      fence: 1,
+      leaseExpiresAt: '2126-01-01T00:00:00Z',
+      pullRequestTitle: 'fix: correct a defect',
+      pullRequestBody: 'Corrects a defect.',
+    }
+    return taskKind === 'issue_work'
+      ? { ...common, _tag: 'OpenPullRequest', taskKind, issueNumber: 12, diagram: null }
+      : { ...common, _tag: 'OpenPullRequest', taskKind, pullRequestNumber: 24 }
+  }
+
+  function publisher(requests: Parameters<GitHubPullRequestPublisher['ensurePullRequest']>[0][]) {
+    return createGitPublicationRemote({
+      root: '/unused',
+      tokens: {
+        getToken: async () => {
+          throw new Error('Finalization cannot push a branch.')
+        },
+        invalidate: () => undefined,
+      },
+      github: {
+        getPullRequest: async () => {
+          throw new Error('Finalization uses the publication adapter.')
+        },
+        hasOpenPullRequestForBranch: async () => {
+          throw new Error('The branch is already published.')
+        },
+        isBranchProtected: async () => {
+          throw new Error('Authority is checked before finalization.')
+        },
+      },
+      pullRequests: {
+        ensurePullRequest: async (input) => {
+          requests.push(input)
+          return ok({
+            number: 31,
+            url: 'https://github.com/wolfstar-project/example/pull/31',
+            diagram: { _tag: 'None' },
+          })
+        },
+      },
+    })
+  }
+
+  it.each([
+    ['issue_work', ['wolfstar-agent-review']],
+    ['baseline_repair', ['wolfstar-agent-review', 'wolfstar-agent-baseline-repair']],
+    ['review_fix', ['wolfstar-agent-review']],
+  ] as const)('requests Review for a controller-published %s pull request', async (taskKind, labels) => {
+    const requests: Parameters<GitHubPullRequestPublisher['ensurePullRequest']>[0][] = []
+    const publication = command(taskKind)
+
+    const result = await publisher(requests).finalize(publication, new AbortController().signal)
+
+    expect(result).toEqual(
+      ok({
+        evidence: 'Opened pull request #31: https://github.com/wolfstar-project/example/pull/31.',
+        pullRequestNumber: 31,
+      }),
+    )
+    expect(
+      requests.map((input) => ({ head: input.expectedHeadSha, labels: input.labels?.map((label) => label.name) })),
+    ).toEqual([{ head: publication.commitSha, labels }])
+  })
+
+  it('respects disabled repository Review while retaining the Baseline repair label', async () => {
+    const requests: Parameters<GitHubPullRequestPublisher['ensurePullRequest']>[0][] = []
+    const publication = command('baseline_repair')
+
+    await publisher(requests).finalize(
+      { ...publication, repositoryMapping: { ...publication.repositoryMapping, pullRequestReview: false } },
+      new AbortController().signal,
+    )
+
+    expect(requests.flatMap((input) => input.labels?.map((label) => label.name) ?? [])).toEqual([
+      'wolfstar-agent-baseline-repair',
+    ])
+  })
+
+  it.each(['review_fix', 'resolve_conflict'] as const)(
+    'does not grant a new Review when %s updates an existing pull request',
+    async (taskKind) => {
+      const requests: Parameters<GitHubPullRequestPublisher['ensurePullRequest']>[0][] = []
+      const publication = {
+        ...command('review_fix'),
+        _tag: 'UpdatePullRequest' as const,
+        taskKind,
+        pullRequestNumber: 24,
+      }
+
+      expect(await publisher(requests).finalize(publication, new AbortController().signal)).toEqual(
+        ok({ evidence: `Published ${publication.commitSha}.` }),
+      )
+      expect(requests).toEqual([])
+    },
+  )
+})
+
 describe('git publication remote', () => {
+  it.each([
+    ['fork workflow merge', 'contributor/example', '.github/workflows/ci.yml', 'maintainer'],
+    ['fork source merge', 'contributor/example', 'base.txt', 'app'],
+    ['owned workflow merge', 'wolfstar-project/example', '.github/workflows/ci.yml', 'app'],
+  ])('publishes a %s with the permitted account', async (_scenario, headRepository, changedPath, account) => {
+    const { bare, command, root } = fixture(changedPath)
+    const conflict = { ...command, headRepository }
+    const requested: string[] = []
+    const provider = (name: string) => ({
+      getToken: () => {
+        requested.push(name)
+        return name === account
+          ? Promise.resolve(ok({ token: 'unused', expiresAt: '2026-08-13T02:00:00.000Z' }))
+          : Promise.resolve(err({ repository: command.repository, message: 'This account cannot publish the change.' }))
+      },
+      invalidate: () => undefined,
+    })
+    const remote = createGitPublicationRemote({
+      github: {
+        getPullRequest: () =>
+          Promise.resolve(
+            ok(
+              pullRequestItem({
+                number: 1,
+                headSha: command.expectedHeadSha,
+                headRepository,
+                headRef: command.headRef,
+                maintainerCanModify: true,
+              }),
+            ),
+          ),
+        hasOpenPullRequestForBranch: () => Promise.resolve(ok(false)),
+        isBranchProtected: () => Promise.resolve(ok(false)),
+      },
+      remoteUrl: () => bare,
+      root,
+      tokens: provider('app'),
+      forkWorkflowTokens: provider('maintainer'),
+    })
+    const signal = new AbortController().signal
+
+    expect(await remote.validateAuthority(conflict, signal)).toEqual(ok(undefined))
+    expect(await remote.push(conflict, signal)).toEqual(ok(undefined))
+    expect(git(bare, 'rev-parse', 'refs/heads/fix/conflict')).toBe(command.commitSha)
+    expect(requested).toEqual([account, account])
+  })
+
+  it('refuses a fork workflow merge after the contributor disables maintainer edits', async () => {
+    const { bare, command, root } = fixture('.github/workflows/ci.yml')
+    const conflict = { ...command, headRepository: 'contributor/example' }
+    const remote = createGitPublicationRemote({
+      github: {
+        getPullRequest: () =>
+          Promise.resolve(
+            ok(
+              pullRequestItem({
+                number: 1,
+                headSha: command.expectedHeadSha,
+                headRepository: conflict.headRepository,
+                headRef: command.headRef,
+                maintainerCanModify: false,
+              }),
+            ),
+          ),
+        hasOpenPullRequestForBranch: () => Promise.resolve(ok(false)),
+        isBranchProtected: () => Promise.resolve(ok(false)),
+      },
+      remoteUrl: () => bare,
+      root,
+      tokens: {
+        getToken: () => Promise.reject(new Error('No write credential is permitted.')),
+        invalidate: () => undefined,
+      },
+      forkWorkflowTokens: {
+        getToken: () => Promise.reject(new Error('No maintainer credential is permitted.')),
+        invalidate: () => undefined,
+      },
+    })
+
+    expect(await remote.validateAuthority(conflict, new AbortController().signal)).toEqual(
+      err('The pull request no longer authorizes publication.'),
+    )
+    expect(git(bare, 'rev-parse', 'refs/heads/fix/conflict')).toBe(command.expectedHeadSha)
+  })
+
   it.each([
     ['a source patch', 'base.txt', 'contents_write'],
     ['a workflow patch', '.github/workflows/ci.yml', 'workflows_write'],
@@ -128,7 +354,7 @@ describe('git publication remote', () => {
     expect(requested).toEqual([expectedAccess])
   })
 
-  it('pins the stack base branch, not the default branch', async () => {
+  it('allows issue publication after the default branch advances', async () => {
     const { bare, command, expectedHeadSha, root } = fixture()
     const stacked: Extract<ClaimedPublicationCommand, { _tag: 'OpenPullRequest' }> = {
       ...command,
@@ -141,6 +367,7 @@ describe('git publication remote', () => {
       baseSha: expectedHeadSha,
       pullRequestTitle: 'fix: broken thing',
       pullRequestBody: 'Closes #30.',
+      diagram: null,
     }
     const remote = createGitPublicationRemote({
       github: {
@@ -157,11 +384,10 @@ describe('git publication remote', () => {
     })
 
     expect(await remote.validateAuthority(stacked, new AbortController().signal)).toEqual(ok(undefined))
-    // The same commit is not the default branch tip, so the default branch cannot stand in for it.
-    expect(await remote.validateAuthority({ ...stacked, baseRef: 'main' }, new AbortController().signal)).toEqual({
-      _tag: 'Err',
-      error: 'The base branch changed before publication.',
-    })
+    // A reviewed sibling may merge while this issue is being implemented.
+    expect(await remote.validateAuthority({ ...stacked, baseRef: 'main' }, new AbortController().signal)).toEqual(
+      ok(undefined),
+    )
   })
 
   it('refuses to rewrite a branch that already has an open pull request', async () => {

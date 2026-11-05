@@ -76,6 +76,60 @@ def selection_dashboard(selection, provider):
 
 
 class RunnerActivityTest(unittest.TestCase):
+    def test_reads_shared_jobs_without_a_github_request(self):
+        host = {'name': 'Desktop', 'dockerHost': 'unix:///var/run/docker.sock'}
+        job = {'id': 9, '_tag': 'Queued', 'repository': 'wolfstar-project/example', 'workflow': 'Code', 'name': 'test', 'url': 'https://github.com/job/9'}
+        def run(command, **_kwargs):
+            self.assertEqual(command[0], 'cat')
+            return subprocess.CompletedProcess(command, 0, json.dumps({'workflowJobs': [{'_tag': 'Available', 'repository': 'wolfstar-project/example', 'observedAt': 1000000, 'jobs': [job]}]}))
+        self.assertEqual(runner_indicator.request_workflow_jobs([host], run=run, now=1000), [job])
+
+    def test_prefers_the_latest_complete_repository_observation(self):
+        hosts = [{'name': name, 'dockerHost': 'unix:///var/run/docker.sock'} for name in ('Hogwild', 'Desktop')]
+        job = {'id': 9, '_tag': 'Running', 'repository': 'wolfstar-project/example', 'workflow': 'Code', 'name': 'test', 'url': 'https://github.com/job/9'}
+        snapshots = iter([
+            {'workflowJobs': [{'_tag': 'Available', 'repository': 'wolfstar-project/example', 'observedAt': 999000, 'jobs': [job]}]},
+            {'workflowJobs': [{'_tag': 'Available', 'repository': 'wolfstar-project/example', 'observedAt': 1000000, 'jobs': []}]},
+        ])
+        def run(command, **_kwargs):
+            return subprocess.CompletedProcess(command, 0, json.dumps(next(snapshots)))
+        self.assertEqual(runner_indicator.request_workflow_jobs(hosts, run=run, now=1000), [])
+
+    def test_preserves_jobs_when_the_other_host_is_unavailable(self):
+        hosts = [{'name': name, 'dockerHost': 'unix:///var/run/docker.sock'} for name in ('Hogwild', 'Desktop')]
+        job = {'id': 9, '_tag': 'Running', 'repository': 'wolfstar-project/example', 'workflow': 'Code', 'name': 'test', 'url': 'https://github.com/job/9'}
+        calls = []
+        errors = []
+        def run(command, **_kwargs):
+            calls.append(command)
+            if len(calls) == 1:
+                raise subprocess.CalledProcessError(1, command)
+            return subprocess.CompletedProcess(command, 0, json.dumps({'workflowJobs': [{'_tag': 'Available', 'repository': 'wolfstar-project/example', 'observedAt': 1000000, 'jobs': [job]}]}))
+        self.assertEqual(runner_indicator.request_workflow_jobs(hosts, errors.append, run, 1000), [job])
+        self.assertEqual(len(errors), 1)
+
+    def test_reports_stale_and_invalid_observations_without_fetching_github(self):
+        host = {'name': 'Desktop', 'dockerHost': 'unix:///var/run/docker.sock'}
+        for observation in (
+            {'_tag': 'Available', 'repository': 'wolfstar-project/example', 'observedAt': 1, 'jobs': []},
+            {'_tag': 'Available', 'repository': 'wolfstar-project/example', 'observedAt': True, 'jobs': []},
+            {'_tag': 'Available', 'repository': 'wolfstar-project/example', 'observedAt': 1000000, 'jobs': [{'id': 9, '_tag': 'Running', 'repository': 'wolfstar-project/example', 'name': 'test', 'workflow': 'Code', 'url': 'file:///etc/passwd'}]},
+            {'_tag': 'Unavailable', 'repository': 'wolfstar-project/example', 'reason': 'Runner demand is unavailable.'},
+        ):
+            errors = []
+            def run(command, **_kwargs):
+                self.assertEqual(command[0], 'cat')
+                return subprocess.CompletedProcess(command, 0, json.dumps({'workflowJobs': [observation]}))
+            self.assertEqual(runner_indicator.request_workflow_jobs([host], errors.append, run, 1000), [])
+            self.assertEqual(len(errors), 1)
+
+    def test_reads_remote_shared_jobs_with_the_configured_host_identity(self):
+        host = runner_indicator.parse_runner_hosts('Hogwild=ssh://hogwild-admin|system:hogwild-github-runner.service')[0]
+        def run(command, **_kwargs):
+            self.assertEqual(command, ['ssh', 'hogwild-admin', 'sudo', '-n', 'cat', '--', '/run/github-runner/wolfstar-desktop-github-runner/status.json'])
+            return subprocess.CompletedProcess(command, 0, json.dumps({'workflowJobs': []}))
+        self.assertEqual(runner_indicator.request_workflow_jobs([host], run=run), [])
+
     def test_parses_named_runner_hosts_for_future_balancing(self):
         self.assertEqual(runner_indicator.parse_runner_hosts(
             'Hogwild=ssh://hogwild|system:hogwild-github-runner.service,'
@@ -245,138 +299,6 @@ class RunnerActivityTest(unittest.TestCase):
             'message': 'Docker is unavailable',
         })
 
-    def test_lists_only_active_self_hosted_jobs(self):
-        runs = [
-            {'id': 12, 'name': 'Code', 'status': 'in_progress', 'html_url': 'https://github.com/run/12'},
-            {'id': 13, 'name': 'Docs', 'status': 'completed', 'html_url': 'https://github.com/run/13'},
-        ]
-
-        result = runner_indicator.collect_workflow_jobs(
-            'wolfstar-project/example',
-            runs,
-            lambda _run_id: [
-                {
-                    'name': 'test',
-                    'status': 'queued',
-                    'labels': ['self-hosted', 'wolfstar-desktop-ci'],
-                    'html_url': 'https://github.com/job/1',
-                },
-                {
-                    'name': 'cloud',
-                    'status': 'in_progress',
-                    'labels': ['ubuntu-latest'],
-                    'html_url': 'https://github.com/job/2',
-                },
-            ],
-        )
-
-        self.assertEqual(result, [{
-            '_tag': 'Queued',
-            'repository': 'wolfstar-project/example',
-            'workflow': 'Code',
-            'name': 'test',
-            'url': 'https://github.com/job/1',
-        }])
-
-    def test_keeps_jobs_when_one_repository_fails(self):
-        errors = []
-
-        def fake_github_api(path):
-            if path.startswith('repos/broken/repo'):
-                raise RuntimeError('renamed repository')
-            if '/jobs' in path:
-                return {'jobs': [{
-                    'name': 'test',
-                    'status': 'queued',
-                    'labels': ['self-hosted'],
-                    'html_url': 'https://github.com/job/9',
-                }]}
-            if 'status=queued' in path:
-                return {'workflow_runs': [
-                    {'id': 7, 'name': 'Code', 'status': 'in_progress', 'html_url': 'https://github.com/run/7'},
-                ]}
-            return {'workflow_runs': []}
-
-        with patch.object(runner_indicator, 'github_api', side_effect=fake_github_api):
-            jobs = runner_indicator.request_workflow_jobs(['good/repo', 'broken/repo'], errors.append)
-
-        self.assertEqual(jobs, [{
-            '_tag': 'Queued',
-            'repository': 'good/repo',
-            'workflow': 'Code',
-            'name': 'test',
-            'url': 'https://github.com/job/9',
-        }])
-        self.assertEqual(errors, ['broken/repo · Jobs unavailable · renamed repository'])
-
-    def test_follows_pagination_for_queued_jobs_beyond_the_first_page(self):
-        def fake_github_api(path):
-            if path == 'repos/wolfstar-project/example/actions/runs?status=queued&page=1&per_page=50':
-                return {'workflow_runs': [
-                    {'id': index, 'name': 'Recent', 'status': 'in_progress', 'html_url': f'https://github.com/run/{index}'}
-                    for index in range(50)
-                ]}
-            if path == 'repos/wolfstar-project/example/actions/runs?status=queued&page=2&per_page=50':
-                return {'workflow_runs': [
-                    {'id': 99, 'name': 'Old', 'status': 'queued', 'html_url': 'https://github.com/run/99'},
-                ]}
-            if '/runs/99/jobs' in path:
-                return {'jobs': [{
-                    'name': 'test',
-                    'status': 'queued',
-                    'labels': ['self-hosted'],
-                    'html_url': 'https://github.com/job/99',
-                }]}
-            return {'jobs': []}
-
-        with patch.object(runner_indicator, 'github_api', side_effect=fake_github_api):
-            jobs = runner_indicator.request_workflow_jobs(['wolfstar-project/example'])
-
-        self.assertEqual(jobs, [{
-            '_tag': 'Queued',
-            'repository': 'wolfstar-project/example',
-            'workflow': 'Old',
-            'name': 'test',
-            'url': 'https://github.com/job/99',
-        }])
-
-    def test_follows_pagination_for_jobs_within_one_run(self):
-        requests = []
-
-        def job(index):
-            return {
-                'name': f'test {index}',
-                'status': 'in_progress',
-                'labels': ['self-hosted'],
-                'html_url': f'https://github.com/job/{index}',
-            }
-
-        def fake_github_api(path):
-            requests.append(path)
-            if path == 'repos/wolfstar-project/example/actions/runs?status=queued&page=1&per_page=50':
-                return {'workflow_runs': [
-                    {'id': 7, 'name': 'Code', 'status': 'in_progress', 'html_url': 'https://github.com/run/7'},
-                ]}
-            if path == 'repos/wolfstar-project/example/actions/runs?status=in_progress&page=1&per_page=50':
-                return {'workflow_runs': []}
-            if path == 'repos/wolfstar-project/example/actions/runs/7/jobs?page=1&per_page=100':
-                return {'jobs': [job(index) for index in range(100)]}
-            if path == 'repos/wolfstar-project/example/actions/runs/7/jobs?page=2&per_page=100':
-                return {'jobs': [job(index) for index in range(100, 135)]}
-            raise AssertionError(f'unexpected GitHub API request {path}')
-
-        with patch.object(runner_indicator, 'github_api', side_effect=fake_github_api):
-            jobs = runner_indicator.request_workflow_jobs(['wolfstar-project/example'])
-
-        self.assertEqual(len(jobs), 135)
-        self.assertEqual(
-            [path for path in requests if '/jobs' in path],
-            [
-                'repos/wolfstar-project/example/actions/runs/7/jobs?page=1&per_page=100',
-                'repos/wolfstar-project/example/actions/runs/7/jobs?page=2&per_page=100',
-            ],
-        )
-
     def test_stops_a_remote_runner_service_without_waiting_for_jobs(self):
         commands = []
         host = runner_indicator.parse_runner_hosts(
@@ -540,7 +462,6 @@ class IndicatorDisplayTest(unittest.TestCase):
             lambda: None,
             lambda *_args: None,
             lambda *_args: None,
-            lambda *_args: None,
         )
 
         active = next(
@@ -582,7 +503,6 @@ class IndicatorDisplayTest(unittest.TestCase):
             lambda: None,
             lambda *_args: None,
             lambda *_args: None,
-            lambda *_args: None,
         )
 
         routine = next(
@@ -591,7 +511,7 @@ class IndicatorDisplayTest(unittest.TestCase):
         )
         self.assertEqual(
             menu_labels(routine.get_submenu()),
-            ['Checking the repository', 'Reading Sentry issues.', 'Open repository'],
+            ['Checking the repository', 'Watch logs', 'Reading Sentry issues.', 'Open repository'],
         )
         self.assertIn('🟢 1 agent running · Queue empty', menu_labels(stub.menus[0]))
 
@@ -727,6 +647,59 @@ class IndicatorDisplayTest(unittest.TestCase):
         host = next(item for item in menu.get_children() if item.get_label().startswith('⚪ Hogwild'))
         self.assertIn('Stop accepting new jobs…', menu_labels(host.get_submenu()))
 
+    def test_offers_every_agent_slot_count_the_controller_allows(self):
+        dashboard = {
+            'hostCapacity': {'localActive': 1, 'localMaximum': 2, 'desktopActive': 0, 'desktopMaximum': 1, 'desktopAvailable': True},
+            'agentSlots': {'hogwildCeiling': 4, 'hogwildMemoryMaximum': 2, 'desktopCeiling': 2, 'memoryPerAgentGiB': 8},
+        }
+
+        hogwild = indicator.agent_slot_choices(dashboard, 'hogwild')
+        desktop = indicator.agent_slot_choices(dashboard, 'desktop')
+
+        self.assertEqual([entry['label'] for entry in hogwild if entry['_tag'] == 'Choice'], ['0', '1', '2', '3', '4'])
+        self.assertEqual([entry['label'] for entry in hogwild if entry.get('selected')], ['2'])
+        self.assertEqual([entry['label'] for entry in desktop if entry['_tag'] == 'Choice'], ['0', '1', '2'])
+        self.assertEqual([entry['label'] for entry in desktop if entry.get('selected')], ['1'])
+
+    def test_offers_no_agent_slot_count_before_the_controller_reports_one(self):
+        self.assertEqual(indicator.agent_slot_choices({}, 'hogwild'), [])
+        self.assertEqual(indicator.agent_slot_choices(None, 'desktop'), [])
+
+    def test_sets_one_agent_slot_count_from_the_host_submenu(self):
+        sources = {'wolfstarGithubAgent': {'_tag': 'Available', 'dashboard': {
+            'status': 'ready',
+            'agentControl': {'_tag': 'Running'},
+            'agents': [],
+            'queue': [],
+            'incidents': [],
+            'hostTasks': [{'taskId': 'task-1', 'host': 'hogwild'}],
+            'hostCapacity': {'localActive': 1, 'localMaximum': 2, 'desktopActive': 0, 'desktopMaximum': 1, 'desktopAvailable': True},
+            'agentSlots': {'hogwildCeiling': 4, 'hogwildMemoryMaximum': 2, 'desktopCeiling': 2, 'memoryPerAgentGiB': 8},
+        }}}
+        stub = StubIndicator()
+        requested = []
+
+        indicator.build_menu(
+            stub,
+            sources,
+            None,
+            lambda: None,
+            lambda *_args: None,
+            lambda *_args: None,
+            None,
+            lambda host, slots: requested.append((host, slots)),
+        )
+
+        menu = stub.menus[0]
+        host = next(item for item in menu.get_children() if item.get_label().startswith('Hogwild'))
+        self.assertEqual(host.get_label(), 'Hogwild · 1 of 2 running')
+        labels = menu_labels(host.get_submenu())
+        self.assertIn('Agent slots', labels)
+        self.assertIn('● 2', labels)
+        self.assertIn('○ 4', labels)
+        next(child for child in host.get_submenu().get_children() if child.get_label() == '○ 4').emit('activate')
+        self.assertEqual(requested, [('hogwild', 4)])
+
     def test_agent_menu_does_not_include_github_actions(self):
         sources = indicator.read_system_sources(lambda: {'status': 'ready'})
         stub = StubIndicator()
@@ -738,106 +711,20 @@ class IndicatorDisplayTest(unittest.TestCase):
             lambda: None,
             lambda *_args: None,
             lambda *_args: None,
-            lambda *_args: None,
         )
 
         self.assertNotIn('GitHub Actions', menu_labels(stub.menus[0]))
 
-    def test_opens_a_read_only_watch_terminal_for_the_exact_session(self):
-        agent = {
-            'id': 'task-123',
-            'provider': 'opencode',
-            'repository': 'wolfstar-project/example',
-            'itemNumber': 24,
-            'session': {'_tag': 'Connected', 'id': 'ses_fc1f02fd3ffeCm7SwBkWsH6YGb'},
-        }
-
-        with patch.object(indicator.subprocess, 'Popen') as spawn:
+    def test_opens_task_logs_before_the_native_session_connects(self):
+        agent = {'id': 'a' * 64, 'session': {'_tag': 'Disconnected'}}
+        with patch.object(indicator.webbrowser, 'open') as open_page:
             indicator.open_agent_watch(agent)
+        open_page.assert_called_once_with('https://hogwild.tailcad325.ts.net/sessions?task=' + 'a' * 64)
 
-        spawn.assert_called_once_with([
-            '/usr/bin/ghostty',
-            '--title=Watch logs · wolfstar-project/example #24',
-            '-e',
-            'ssh',
-            '-t',
-            'hogwild',
-            '/usr/bin/python3 /home/wolfstar/.local/share/wolfstar-github-agent/service/packages/wolfstar-github-agent/bin/wolfstar-github-agent-watch opencode ses_fc1f02fd3ffeCm7SwBkWsH6YGb',
-        ], start_new_session=True)
-
-    def test_does_not_open_a_watch_terminal_for_an_invalid_session(self):
-        agent = {
-            'id': 'task-123',
-            'provider': 'opencode',
-            'repository': 'wolfstar-project/example',
-            'itemNumber': 24,
-            'session': {'_tag': 'Connected', 'id': 'ses_abc12345;touch_/tmp/pwned'},
-        }
-
-        with patch.object(indicator.subprocess, 'Popen') as spawn:
-            with self.assertRaisesRegex(ValueError, 'Invalid opencode session ID'):
-                indicator.open_agent_watch(agent)
-
-        spawn.assert_not_called()
-
-    def test_opens_the_ejected_session_on_hogwild(self):
-        ejected = {
-            '_tag': 'Ejected',
-            'provider': 'opencode',
-            'sessionId': 'ses_fc1f02fd3ffeCm7SwBkWsH6YGb',
-            'repository': 'wolfstar-project/example',
-            'itemNumber': 24,
-        }
-
-        with patch.object(indicator.subprocess, 'Popen') as spawn:
-            indicator.open_ejected_session(ejected)
-
-        spawn.assert_called_once_with([
-            '/usr/bin/ghostty',
-            '--title=opencode · wolfstar-project/example #24',
-            '-e',
-            'ssh',
-            '-t',
-            'hogwild',
-            '/home/wolfstar/.local/bin/opencode --session ses_fc1f02fd3ffeCm7SwBkWsH6YGb',
-        ], start_new_session=True)
-
-    def test_opens_a_valid_codex_session_on_hogwild(self):
-        ejected = {
-            '_tag': 'Ejected',
-            'provider': 'codex',
-            'sessionId': '0f0e0d0c-0b0a-4968-8956-2631d0c871f9',
-            'repository': 'wolfstar-project/example',
-            'itemNumber': 24,
-        }
-
-        with patch.object(indicator.subprocess, 'Popen') as spawn:
-            indicator.open_ejected_session(ejected)
-
-        spawn.assert_called_once_with([
-            '/usr/bin/ghostty',
-            '--title=Codex · wolfstar-project/example #24',
-            '-e',
-            'ssh',
-            '-t',
-            'hogwild',
-            "/home/wolfstar/.local/bin/codex resume 0f0e0d0c-0b0a-4968-8956-2631d0c871f9 -c 'tui.resume_cwd=\"session\"'",
-        ], start_new_session=True)
-
-    def test_does_not_open_an_ejected_terminal_for_an_invalid_session(self):
-        ejected = {
-            '_tag': 'Ejected',
-            'provider': 'opencode',
-            'sessionId': 'ses_abc12345;touch_/tmp/pwned',
-            'repository': 'wolfstar-project/example',
-            'itemNumber': 24,
-        }
-
-        with patch.object(indicator.subprocess, 'Popen') as spawn:
-            with self.assertRaisesRegex(ValueError, 'Invalid opencode session ID'):
-                indicator.open_ejected_session(ejected)
-
-        spawn.assert_not_called()
+    def test_encodes_routine_log_links(self):
+        with patch.object(indicator.webbrowser, 'open') as open_page:
+            indicator.open_agent_watch({'id': 'owner/site:ci-review:2026-10-08'})
+        open_page.assert_called_once_with('https://hogwild.tailcad325.ts.net/sessions?task=owner%2Fsite%3Aci-review%3A2026-10-08')
 
 
 class AgentControlRequestTest(unittest.TestCase):
@@ -911,80 +798,6 @@ class AgentControlRequestTest(unittest.TestCase):
         self.assertEqual(request.get_header('Origin'), 'https://hogwild.tailcad325.ts.net')
         self.assertEqual(timeout, 3)
 
-    def test_sends_authenticated_eject_request_for_the_exact_agent(self):
-        requests = []
-
-        class Response:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *_args):
-                return False
-
-            def read(self):
-                return b'{"_tag":"Ejected","provider":"opencode","sessionId":"ses_abc12345","repository":"wolfstar-project/example","itemNumber":24}'
-
-        def open_request(request, timeout):
-            requests.append((request, timeout))
-            return Response()
-
-        with tempfile.TemporaryDirectory() as directory:
-            password_file = Path(directory) / 'dashboard-password'
-            password_file.write_text('secret\n')
-            with patch.object(indicator, 'PASSWORD_FILE', password_file), patch.object(
-                indicator.urllib.request,
-                'urlopen',
-                side_effect=open_request,
-            ):
-                result = indicator.request_agent_eject('task-123')
-
-        request, timeout = requests[0]
-        self.assertEqual(result, {
-            '_tag': 'Ejected',
-            'provider': 'opencode',
-            'sessionId': 'ses_abc12345',
-            'repository': 'wolfstar-project/example',
-            'itemNumber': 24,
-        })
-        self.assertEqual(request.full_url, 'https://hogwild.tailcad325.ts.net/api/agents/eject')
-        self.assertEqual(request.get_method(), 'POST')
-        self.assertEqual(request.data, b'{"taskId":"task-123"}')
-        self.assertEqual(request.get_header('Content-type'), 'application/json')
-        self.assertEqual(request.get_header('Origin'), 'https://hogwild.tailcad325.ts.net')
-        self.assertEqual(request.get_header('Authorization'), 'Basic YWdlbnQ6c2VjcmV0')
-        self.assertEqual(timeout, 30)
-
-    def test_reports_the_saved_session_without_resuming_when_eject_settlement_is_delayed(self):
-        body = json.dumps({
-            'statusCode': 503,
-            'data': {
-                '_tag': 'EjectDelayed',
-                'provider': 'opencode',
-                'sessionId': 'ses_abc12345',
-                'nextAction': 'Stop Wolfstar GitHub Agent. Then resume this saved session.',
-            },
-        }).encode()
-        response = urllib.error.HTTPError(
-            'https://hogwild.tailcad325.ts.net/api/agents/eject',
-            503,
-            'Service Unavailable',
-            {},
-            io.BytesIO(body),
-        )
-
-        with tempfile.TemporaryDirectory() as directory:
-            password_file = Path(directory) / 'dashboard-password'
-            password_file.write_text('secret\n')
-            with patch.object(indicator, 'PASSWORD_FILE', password_file), patch.object(
-                indicator.urllib.request,
-                'urlopen',
-                side_effect=response,
-            ):
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    'Saved session ses_abc12345. Stop Wolfstar GitHub Agent. Then resume this saved session.',
-                ):
-                    indicator.request_agent_eject('task-123')
 
 
 class AgentSelectionTest(unittest.TestCase):
@@ -1294,6 +1107,48 @@ class WatchLogTest(unittest.TestCase):
 
         self.assertEqual(output.getvalue().count('message 005'), 0)
         self.assertEqual(output.getvalue().count('message 099'), 1)
+
+
+class TrayHostTest(unittest.TestCase):
+    def test_assigns_live_tasks_to_hosts_and_keeps_waiting_tasks_visible(self):
+        def agent(task_id):
+            return {'_tag': 'ActiveAgent', 'id': task_id, 'role': 'issue_triage',
+                    'repository': 'wolfstar-project/example', 'itemNumber': 12,
+                    'subjectUrl': 'https://github.com/wolfstar-project/example/issues/12',
+                    'progress': {'label': task_id}, 'session': {'_tag': 'Disconnected'}}
+        dashboard = {'status': 'ready', 'agents': [agent('remote'), agent('local'), agent('waiting')],
+                     'hostTasks': [{'host': 'hogwild', 'taskId': 'remote'}, {'host': 'desktop', 'taskId': 'local'}],
+                     'desktop': {'connected': True, 'report': {'reservedGiB': 12, 'memoryGiB': 16}}}
+        stub = StubIndicator()
+        indicator.build_menu(stub, {'wolfstarGithubAgent': {'_tag': 'Available', 'dashboard': dashboard}},
+                             None, lambda: None, lambda *_: None, lambda *_: None)
+        menu = stub.menus[0]
+        for host, task_id in [('Hogwild', 'remote'), ('Desktop', 'local')]:
+            section = next(item for item in menu.get_children() if item.get_label().startswith(host + ' ·'))
+            task = next(item for item in section.get_submenu().get_children() if item.get_submenu())
+            self.assertEqual(menu_labels(task.get_submenu())[0], task_id)
+        self.assertTrue(any(item.get_submenu() and 'waiting' in menu_labels(item.get_submenu())
+                            for item in menu.get_children()))
+        self.assertIn('Desktop memory · 12 / 16 GiB', menu_labels(menu))
+
+    def test_running_jobs_use_host_status_when_github_lags(self):
+        runner = {'Activity': {'_tag': 'Running', 'job': 'unit'}, 'Names': 'runner-1',
+                  'RunnerLabels': {'rocks.wolfstar.desktop-runner.repository': 'wolfstar-project/example'}}
+        stub = StubIndicator()
+        runner_indicator.build_menu(stub, {'_tag': 'Available', 'hosts': [
+            {'_tag': 'Available', 'name': 'Desktop', 'runners': [runner]}]},
+            {'_tag': 'Available', 'jobs': []}, None, lambda: None, lambda *_: None)
+        labels = menu_labels(stub.menus[0])
+        self.assertNotIn('Running jobs · 0', labels)
+        host = next(item for item in stub.menus[0].get_children() if 'Desktop' in item.get_label())
+        self.assertTrue(any('Running · unit' in label for label in menu_labels(host.get_submenu())))
+
+    def test_surfaces_docker_permission_error(self):
+        def denied(host):
+            raise subprocess.CalledProcessError(1, ['docker', 'ps'], stderr='permission denied on Docker socket')
+        with patch.object(runner_indicator, 'request_runners', denied):
+            result = runner_indicator.request_runner_host({'name': 'Hogwild', 'dockerHost': 'ssh://hogwild'})
+        self.assertIn('permission denied on Docker socket', result['message'])
 
 
 if __name__ == '__main__':

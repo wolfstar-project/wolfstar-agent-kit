@@ -1,6 +1,6 @@
 import type { InstalledRepository } from '../src/repository-discovery.ts'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -23,6 +23,7 @@ describe('installedWithoutCheckout', () => {
       github: 'wolfstar-project/example',
       defaultBranch: 'main',
       archived: false,
+      fork: false,
       topics: [],
       authentication: 'app' as const,
       owner: { login: 'wolfstar-project', type: 'User' as const },
@@ -31,6 +32,7 @@ describe('installedWithoutCheckout', () => {
       github: 'wolfstar-project/unlighthouse.dev',
       defaultBranch: 'main',
       archived: false,
+      fork: false,
       topics: [],
       authentication: 'app' as const,
       owner: { login: 'wolfstar-project', type: 'User' as const },
@@ -39,6 +41,7 @@ describe('installedWithoutCheckout', () => {
       github: 'wolfstar-project/retired',
       defaultBranch: 'main',
       archived: true,
+      fork: false,
       topics: [],
       authentication: 'app' as const,
       owner: { login: 'wolfstar-project', type: 'User' as const },
@@ -47,6 +50,7 @@ describe('installedWithoutCheckout', () => {
       github: 'someone-else/tool',
       defaultBranch: 'main',
       archived: false,
+      fork: false,
       topics: [],
       authentication: 'app' as const,
       owner: { login: 'someone-else', type: 'User' as const },
@@ -78,6 +82,56 @@ describe('installedWithoutCheckout', () => {
 })
 
 describe('repository discovery', () => {
+  it('inherits release policy only for stable public packages with a tag workflow', () => {
+    const root = mkdtempSync(join(tmpdir(), 'wolfstar-release-defaults-'))
+    temporaryDirectories.push(root)
+    const checkout = join(root, 'example')
+    mkdirSync(join(checkout, '.github', 'workflows'), { recursive: true })
+    writeFileSync(join(checkout, 'package.json'), JSON.stringify({ name: 'example', version: '1.2.3' }))
+    writeFileSync(join(checkout, '.github', 'workflows', 'release.yml'), 'on:\n  push:\n    tags: ["v*"]\n')
+    const installed = [
+      {
+        github: 'wolfstar-project/example',
+        defaultBranch: 'main',
+        archived: false,
+        fork: false,
+        topics: [],
+        authentication: 'app' as const,
+        owner: { login: 'wolfstar-project', type: 'User' as const },
+      },
+    ]
+    const defaults = {
+      owner: 'wolfstar-project',
+      checkoutRoot: root,
+      policy: {
+        manifest: 'package.json',
+        versionFiles: ['package.json'],
+        tagPrefix: 'v',
+        workflow: 'release.yml',
+        checks: 'all' as const,
+        credential: { _tag: 'Repository' as const },
+      },
+    }
+    const map = (overrides: Parameters<typeof buildRepositoryMappings>[2] = []) =>
+      buildRepositoryMappings(
+        installed,
+        [{ github: 'wolfstar-project/example', checkout }],
+        overrides,
+        ['wolfstar-project'],
+        defaults,
+      )
+
+    expect(map()[0]?.release).toEqual(defaults.policy)
+    expect(
+      map([{ ...repositoryMapping(), github: 'wolfstar-project/example', release: undefined }])[0]?.release,
+    ).toBeUndefined()
+    writeFileSync(join(checkout, 'package.json'), JSON.stringify({ name: 'example', version: '1.2.3', private: true }))
+    expect(map()[0]?.release).toBeUndefined()
+    writeFileSync(join(checkout, 'package.json'), JSON.stringify({ name: 'example', version: '1.2.3' }))
+    writeFileSync(join(checkout, '.github', 'workflows', 'release.yml'), 'on:\n  push:\n    branches: [main]\n')
+    expect(map()[0]?.release).toBeUndefined()
+  })
+
   it('ignores temporary worktrees beside the canonical checkout', async () => {
     const root = mkdtempSync(join(tmpdir(), 'wolfstar-discovery-'))
     temporaryDirectories.push(root)
@@ -109,6 +163,7 @@ describe('repository discovery', () => {
           github: 'wolfstar-project/example',
           defaultBranch: 'main',
           archived: false,
+          fork: false,
           topics: [],
           authentication: 'app' as const,
           owner: { login: 'wolfstar-project', type: 'User' },
@@ -117,6 +172,7 @@ describe('repository discovery', () => {
           github: 'skilld-dev/shared',
           defaultBranch: 'main',
           archived: false,
+          fork: false,
           topics: ['wolfstar-agent-issues', 'wolfstar-agent-conflicts'],
           authentication: 'app' as const,
           owner: { login: 'skilld-dev', type: 'Organization' },
@@ -125,6 +181,7 @@ describe('repository discovery', () => {
           github: 'wolfstar-project/remote-only',
           defaultBranch: 'main',
           archived: false,
+          fork: false,
           topics: [],
           authentication: 'app' as const,
           owner: { login: 'wolfstar-project', type: 'User' },
@@ -151,6 +208,27 @@ describe('repository discovery', () => {
     expect(mappings[0]?.writablePullRequestAuthors).toEqual(['wolfstar-project', 'wolfstar-github-agent[bot]'])
   })
 
+  it('does not map a fork', () => {
+    const mappings = buildRepositoryMappings(
+      [
+        {
+          github: 'wolfstar-project/skills',
+          defaultBranch: 'main',
+          archived: false,
+          fork: true,
+          topics: [],
+          authentication: 'app' as const,
+          owner: { login: 'wolfstar-project', type: 'User' },
+        },
+      ],
+      [{ github: 'wolfstar-project/skills', checkout: '/home/wolfstar/pkg/skills' }],
+      [],
+      ['wolfstar-project'],
+    )
+
+    expect(mappings).toEqual([])
+  })
+
   it('admits one repository without admitting its owner', () => {
     const allowed = ['wolfstar-project', 'nuxt/scripts']
 
@@ -169,6 +247,7 @@ describe('repository discovery', () => {
       github: `nuxt/${name}`,
       defaultBranch: 'main',
       archived: false,
+      fork: false,
       topics: [],
       authentication: 'user',
       owner: { login: 'nuxt', type: 'Organization' },
@@ -197,6 +276,7 @@ describe('repository discovery', () => {
           github: 'nuxt/scripts',
           defaultBranch: 'main',
           archived: false,
+          fork: false,
           topics: [],
           authentication: 'user' as const,
           owner: { login: 'nuxt', type: 'Organization' },
@@ -229,6 +309,7 @@ describe('repository discovery', () => {
           github: 'wolfstar-project/example',
           defaultBranch: 'main',
           archived: false,
+          fork: false,
           topics: [],
           authentication: 'app' as const,
           owner: { login: 'wolfstar-project', type: 'User' },
@@ -255,6 +336,7 @@ describe('repository discovery', () => {
           github: 'wolfstar-project/example',
           defaultBranch: 'main',
           archived: true,
+          fork: false,
           topics: [],
           authentication: 'app' as const,
           owner: { login: 'wolfstar-project', type: 'User' },
@@ -268,30 +350,34 @@ describe('repository discovery', () => {
     expect(mappings[0]?.enabled).toBe(false)
   })
 
-  it('lets the controller repair a CI branch without explicit policy', () => {
-    const mappings = buildRepositoryMappings(
-      [
-        {
-          github: 'wolfstar-project/example',
-          defaultBranch: 'main',
-          archived: false,
-          topics: [],
-          authentication: 'app' as const,
-          owner: { login: 'wolfstar-project', type: 'User' },
-        },
-      ],
-      [{ github: 'wolfstar-project/example', checkout: '/home/wolfstar/pkg/example' }],
-      [],
-      ['wolfstar-project'],
-    )
+  it.each(['ci/self-hosted-runners', 'terminal/session-123'])(
+    'lets the controller repair %s without explicit policy',
+    (headRef) => {
+      const mappings = buildRepositoryMappings(
+        [
+          {
+            github: 'wolfstar-project/example',
+            defaultBranch: 'main',
+            archived: false,
+            fork: false,
+            topics: [],
+            authentication: 'app' as const,
+            owner: { login: 'wolfstar-project', type: 'User' },
+          },
+        ],
+        [{ github: 'wolfstar-project/example', checkout: '/home/wolfstar/pkg/example' }],
+        [],
+        ['wolfstar-project'],
+      )
 
-    expect(
-      canRepairPullRequestHead(
-        mappings[0]!,
-        pullRequestItem({
-          headRef: 'ci/self-hosted-runners',
-        }),
-      ),
-    ).toBe(true)
-  })
+      expect(
+        canRepairPullRequestHead(
+          mappings[0]!,
+          pullRequestItem({
+            headRef,
+          }),
+        ),
+      ).toBe(true)
+    },
+  )
 })

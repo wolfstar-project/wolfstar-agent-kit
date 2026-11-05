@@ -1,16 +1,30 @@
-import type { GitHubAgentSource, PublishedReviewStatus } from './github-agent-source.ts'
+import type { AgentPhase, AgentPhaseTag } from './agent-progress.ts'
+import type {
+  ExistingReviewLabelFailure,
+  ExistingReviewLabelSource,
+  GitHubAgentSource,
+  PublishedReviewStatus,
+  ReviewPublicationSource,
+  ReviewStatusIdentitySource,
+} from './github-agent-source.ts'
+import type { NativeReviewMirror } from './native-review.ts'
 import type { Result } from './result.ts'
+import type { ReviewCheckRunMirror } from './review-check-run.ts'
 import type { JournalStore } from './store.ts'
 import type {
-  AgentProgress,
   ClaimedAdversarialReviewTask,
   ClaimedReviewFixTask,
   ClaimedReviewStatusCommand,
   ReviewDesiredOutcome,
+  ReviewGates,
   ReviewStatusTaskPhase,
 } from './types.ts'
 import { formatPhaseDuration } from './agent-progress.ts'
+import { nativeReviewBody } from './native-review.ts'
+import { repairRoundLabel } from './repair-rounds.ts'
 import { err, ok } from './result.ts'
+import { REVIEW_CANCEL_CONTROL } from './review-cancel.ts'
+import { mirrorReviewCheckRun, reviewCheckRunUpdate } from './review-check-run.ts'
 import { AUTOMATED_REVIEW_MARKER, automatedDisclosure } from './review-comment.ts'
 import { updatedAtLabel } from './text.ts'
 
@@ -26,33 +40,148 @@ export interface ReviewStatusController {
     body: string,
     desiredOutcome: ReviewDesiredOutcome,
     reviewRunId?: string,
+    gates?: ReviewGates,
   ) => Result<{ commandId: string }, string>
-  publishRepair: (
-    task: ClaimedReviewFixTask,
-    progress: AgentProgress,
-    signal: AbortSignal,
-  ) => Promise<Result<void, string>>
+  publishRepair: (task: ClaimedReviewFixTask, phase: AgentPhase, signal: AbortSignal) => Promise<Result<void, string>>
 }
 
 export interface ReviewStatusControllerOptions {
-  github: Pick<GitHubAgentSource, 'getPullRequestReviewSnapshot' | 'stampAgentLabel' | 'upsertReviewStatus'>
+  /** Mirrors each Review publication onto the Review check run. Absent leaves the check run unwritten. */
+  nativeReviews?: NativeReviewMirror
+  checkRuns?: ReviewCheckRunMirror
+  commentControls?: (repository: string) => boolean
+  loggedFindings?: Pick<JournalStore, 'decorateLoggedFindings'>
+  loggedFindingControls?: (repository: string) => boolean
+  github: Pick<GitHubAgentSource, 'getPullRequestReviewSnapshot'> &
+    ReviewStatusIdentitySource &
+    ReviewPublicationSource &
+    ExistingReviewLabelSource
   leaseMilliseconds: number
   now: () => Date
   store: Pick<
     JournalStore,
+    | 'authorizeReviewStatus'
     | 'claimReviewStatus'
     | 'completeReviewStatus'
     | 'deferReviewStatus'
     | 'recordReviewStatusReceipt'
     | 'stageReviewStatus'
+    | 'supersedeReviewStatus'
   >
   workerId: string
 }
 
 export interface ReviewStatusPublicationOptions {
-  github: Pick<GitHubAgentSource, 'getPullRequestReviewSnapshot' | 'stampAgentLabel' | 'upsertReviewStatus'>
+  nativeReviews?: NativeReviewMirror
+  checkRuns?: ReviewCheckRunMirror
+  github: Pick<GitHubAgentSource, 'getPullRequestReviewSnapshot'> &
+    ReviewStatusIdentitySource &
+    ReviewPublicationSource &
+    ExistingReviewLabelSource
   now: () => Date
-  store: Pick<JournalStore, 'completeReviewStatus' | 'deferReviewStatus' | 'recordReviewStatusReceipt'>
+  store: Pick<
+    JournalStore,
+    | 'authorizeReviewStatus'
+    | 'completeReviewStatus'
+    | 'deferReviewStatus'
+    | 'recordReviewStatusReceipt'
+    | 'supersedeReviewStatus'
+  >
+}
+
+function authorizeWrite(
+  options: ReviewStatusPublicationOptions,
+  command: ClaimedReviewStatusCommand,
+): Result<void, string> {
+  return options.store.authorizeReviewStatus({
+    commandId: command.id,
+    workerId: command.workerId,
+    fence: command.fence,
+    at: options.now().toISOString(),
+  })
+    ? ok(undefined)
+    : err('The Review publication lost its current authority before the GitHub write.')
+}
+
+/** Files one failure with the store that answers for it: defer or retire. */
+function settleUnpublished(
+  options: ReviewStatusPublicationOptions,
+  command: ClaimedReviewStatusCommand,
+  failure: ExistingReviewLabelFailure,
+): void {
+  const input = {
+    commandId: command.id,
+    workerId: command.workerId,
+    fence: command.fence,
+    at: options.now().toISOString(),
+    reason: failure.message,
+  }
+  if (failure._tag === 'Transient') options.store.deferReviewStatus(input)
+  else options.store.supersedeReviewStatus(input)
+}
+
+/** Restores one outcome label for a trusted review comment this service must not edit. */
+async function publishExistingReviewLabel(
+  options: ReviewStatusPublicationOptions,
+  command: ClaimedReviewStatusCommand,
+  baseRef: string,
+  signal: AbortSignal,
+): Promise<Result<PublishedReviewStatus, string>> {
+  // The read re-validates the state, head, and base branch, so the heavier review
+  // snapshot would spend GitHub calls re-reading the same truth.
+  const existing =
+    command.commentId === null
+      ? err({ _tag: 'Permanent' as const, message: 'The existing review has no comment identifier.' })
+      : await options.github.readExistingReviewLabel(
+          command.repositoryMapping,
+          command.pullRequestNumber,
+          command.commentId,
+          command.expectedHeadSha,
+          baseRef,
+          signal,
+        )
+  if (existing._tag === 'Err') {
+    settleUnpublished(options, command, existing.error)
+    return err(existing.error.message)
+  }
+  const authorization = authorizeWrite(options, command)
+  if (authorization._tag === 'Err') return authorization
+  const stamped = await options.github.stampAgentLabel(
+    command.repositoryMapping,
+    command.pullRequestNumber,
+    existing.value.label,
+    signal,
+    () => authorizeWrite(options, command),
+  )
+  if (stamped._tag === 'Err') {
+    options.store.deferReviewStatus({
+      commandId: command.id,
+      workerId: command.workerId,
+      fence: command.fence,
+      at: options.now().toISOString(),
+      reason: stamped.error,
+    })
+    return stamped
+  }
+  const labelConfirmed = options.store.recordReviewStatusReceipt({
+    commandId: command.id,
+    workerId: command.workerId,
+    fence: command.fence,
+    at: options.now().toISOString(),
+    sink: 'outcome_label',
+  })
+  if (!labelConfirmed) return err('GitHub accepted the Review label, but its receipt lost the Publication lease.')
+  const completed = options.store.completeReviewStatus({
+    commandId: command.id,
+    workerId: command.workerId,
+    fence: command.fence,
+    at: options.now().toISOString(),
+    commentId: existing.value.commentId,
+    url: existing.value.url,
+  })
+  return completed
+    ? ok(existing.value)
+    : err('GitHub accepted the review comment, but the local review changed. Refresh before retrying.')
 }
 
 /** Publishes one already fenced command. Terminal commands may outlive their Agent Task. */
@@ -62,11 +191,34 @@ export async function publishClaimedReviewStatus(
   replacePriorReview: boolean,
   signal: AbortSignal,
 ): Promise<Result<PublishedReviewStatus, string>> {
-  const current = await options.github.getPullRequestReviewSnapshot(
-    command.repositoryMapping,
-    command.pullRequestNumber,
-    signal,
-  )
+  if (command.expectedBaseRef === null) {
+    const reason = 'The review has no recorded base branch. Run a new Review.'
+    options.store.supersedeReviewStatus({
+      commandId: command.id,
+      workerId: command.workerId,
+      fence: command.fence,
+      at: options.now().toISOString(),
+      reason,
+    })
+    return err(reason)
+  }
+  if (command.taskKind === 'existing_review')
+    return publishExistingReviewLabel(options, command, command.expectedBaseRef, signal)
+
+  const current =
+    command.phase === 'terminal'
+      ? await options.github
+          .getPullRequestReviewSnapshot(command.repositoryMapping, command.pullRequestNumber, signal)
+          .then((result) =>
+            result._tag === 'Err'
+              ? result
+              : ok({
+                  state: result.value.pullRequest.state,
+                  headSha: result.value.pullRequest.headSha,
+                  baseRef: result.value.pullRequest.baseRef,
+                }),
+          )
+      : await options.github.getPullRequestStatusIdentity(command.repositoryMapping, command.pullRequestNumber, signal)
   if (current._tag === 'Err') {
     options.store.deferReviewStatus({
       commandId: command.id,
@@ -77,9 +229,13 @@ export async function publishClaimedReviewStatus(
     })
     return current
   }
-  if (current.value.pullRequest.state !== 'open' || current.value.pullRequest.headSha !== command.expectedHeadSha) {
+  if (
+    current.value.state !== 'open' ||
+    current.value.headSha !== command.expectedHeadSha ||
+    current.value.baseRef !== command.expectedBaseRef
+  ) {
     const reason = 'The pull request changed before the review comment was posted.'
-    options.store.deferReviewStatus({
+    options.store.supersedeReviewStatus({
       commandId: command.id,
       workerId: command.workerId,
       fence: command.fence,
@@ -89,6 +245,8 @@ export async function publishClaimedReviewStatus(
     return err(reason)
   }
 
+  const authorization = authorizeWrite(options, command)
+  if (authorization._tag === 'Err') return authorization
   const published = await options.github.upsertReviewStatus(
     command.repositoryMapping,
     command.pullRequestNumber,
@@ -96,6 +254,7 @@ export async function publishClaimedReviewStatus(
     command.body,
     replacePriorReview,
     signal,
+    () => authorizeWrite(options, command),
   )
   if (published._tag === 'Err') {
     options.store.deferReviewStatus({
@@ -129,11 +288,14 @@ export async function publishClaimedReviewStatus(
           ? 'PENDING'
           : null
   if (label !== null) {
+    const labelAuthorization = authorizeWrite(options, command)
+    if (labelAuthorization._tag === 'Err') return labelAuthorization
     const stamped = await options.github.stampAgentLabel(
       command.repositoryMapping,
       command.pullRequestNumber,
       label,
       signal,
+      () => authorizeWrite(options, command),
     )
     if (stamped._tag === 'Err') {
       options.store.deferReviewStatus({
@@ -154,6 +316,52 @@ export async function publishClaimedReviewStatus(
     })
     if (!labelConfirmed) return err('GitHub accepted the Review label, but its receipt lost the Publication lease.')
   }
+
+  // The check run mirrors the comment, so it writes last and gates nothing.
+  // Its failure reaches a person through the mirror's report instead.
+  const checkRun = options.checkRuns === undefined ? null : reviewCheckRunUpdate(command, options.now().toISOString())
+  if (options.checkRuns !== undefined && checkRun !== null) {
+    const checkRunAuthority = authorizeWrite(options, command)
+    if (checkRunAuthority._tag === 'Err') return checkRunAuthority
+    const mirrored = await mirrorReviewCheckRun(
+      options.checkRuns,
+      command.repositoryMapping,
+      command.expectedHeadSha,
+      checkRun,
+      signal,
+      () => authorizeWrite(options, command),
+    )
+    if (mirrored._tag === 'Written') {
+      const checkRunConfirmed = options.store.recordReviewStatusReceipt({
+        commandId: command.id,
+        workerId: command.workerId,
+        fence: command.fence,
+        at: options.now().toISOString(),
+        sink: 'check_run',
+      })
+      if (!checkRunConfirmed)
+        return err('GitHub accepted the Review check run, but its receipt lost the Publication lease.')
+    }
+  }
+  // Completing the Publication atomically queues its finding thread sync.
+  if (
+    options.nativeReviews !== undefined &&
+    command.phase === 'terminal' &&
+    command.taskKind === 'adversarial_review' &&
+    command.reviewRunId !== null
+  ) {
+    const authority = authorizeWrite(options, command)
+    if (authority._tag === 'Err') return authority
+    const result = await options.nativeReviews.publisher.upsertNativeReview(
+      command.repositoryMapping,
+      command.pullRequestNumber,
+      command.expectedHeadSha,
+      nativeReviewBody(command.expectedHeadSha, command.desiredOutcome, published.value.url),
+      signal,
+      () => authorizeWrite(options, command),
+    )
+    options.nativeReviews.report(command.repository, result)
+  }
   const completed = options.store.completeReviewStatus({
     commandId: command.id,
     workerId: command.workerId,
@@ -167,27 +375,35 @@ export async function publishClaimedReviewStatus(
     : err('GitHub accepted the review comment, but the local review changed. Refresh before retrying.')
 }
 
-function repairProgressComment(headSha: string, progress: AgentProgress, at: string): string {
-  // Declarative, and about the Repair rather than the reader. These lines read
-  // as instructions to whoever opened the pull request when they are imperative,
-  // and every other automated comment states what the work does next.
-  const next =
-    progress.percent >= 90
-      ? 'Repair pushes its commit, then a new Review reads the new head.'
-      : progress.percent >= 70
-        ? 'Repair verifies its fix.'
-        : progress.percent >= 55
-          ? 'Repair finishes its fix.'
-          : progress.percent >= 35
-            ? 'Repair fixes the Review findings.'
-            : 'Repair creates its Git worktree.'
+/**
+ * What the Repair does after each phase.
+ *
+ * Declarative, and about the Repair rather than the reader. These lines read
+ * as instructions to whoever opened the pull request when they are imperative,
+ * and every other automated comment states what the work does next. Keyed on
+ * the phase, never on its percentage.
+ */
+const repairNextAction: Record<AgentPhaseTag, string> = {
+  Loaded: 'Repair creates its Git worktree.',
+  WorktreeReady: 'Repair fixes the Review findings.',
+  ReadingDiff: 'Repair fixes the Review findings.',
+  CheckingDocs: 'Repair finishes its fix.',
+  Editing: 'Repair finishes its fix.',
+  Verifying: 'Repair verifies its fix.',
+  Reported: 'Repair finishes its fix.',
+  Reporting: 'Repair verifies its fix.',
+  Checked: 'Repair pushes its commit, then a new Review reads the new head.',
+  Committed: 'Repair pushes its commit, then a new Review reads the new head.',
+}
+
+function repairProgressComment(task: ClaimedReviewFixTask, phase: AgentPhase, at: string): string {
   return `${AUTOMATED_REVIEW_MARKER}
-<!-- reviewed-sha: ${headSha} -->
-### 🤖 REPAIR · ${progress.percent}% · ${progress.label}${formatPhaseDuration(progress.since, at)}
+<!-- reviewed-sha: ${task.pullRequest.headSha} -->
+### 🤖 REPAIR · ${repairRoundLabel(task.rounds)} · ${phase.percent}% · ${phase.label}${formatPhaseDuration(phase.since, at)}
 
 ${automatedDisclosure({ kind: 'repair update', updatedAt: updatedAtLabel(at) })}
 
-Next: ${next}`
+Next: ${repairNextAction[phase._tag]}`
 }
 
 export function createReviewStatusController(options: ReviewStatusControllerOptions): ReviewStatusController {
@@ -198,6 +414,8 @@ export function createReviewStatusController(options: ReviewStatusControllerOpti
     replacePriorReview: boolean,
     signal: AbortSignal,
   ): Promise<Result<PublishedReviewStatus, string>> {
+    if (options.commentControls?.(task.repository) && taskPhase.phase !== 'terminal')
+      body += `\n\n${REVIEW_CANCEL_CONTROL}\n\nLeave unchecked to finish Review after merge.`
     const at = options.now().toISOString()
     const staged = options.store.stageReviewStatus({
       ...taskPhase,
@@ -225,7 +443,13 @@ export function createReviewStatusController(options: ReviewStatusControllerOpti
         signal,
       )
     },
-    stageTerminal(task, body, desiredOutcome, reviewRunId) {
+    stageTerminal(task, body, desiredOutcome, reviewRunId, gates) {
+      if (
+        options.loggedFindingControls?.(task.repository) &&
+        reviewRunId !== undefined &&
+        options.loggedFindings !== undefined
+      )
+        body = options.loggedFindings.decorateLoggedFindings(body, reviewRunId)
       const staged = options.store.stageReviewStatus({
         taskKind: 'adversarial_review',
         phase: 'terminal',
@@ -238,6 +462,7 @@ export function createReviewStatusController(options: ReviewStatusControllerOpti
         body,
         desiredOutcome,
         ...(reviewRunId === undefined ? {} : { reviewRunId }),
+        ...(gates === undefined ? {} : { gates }),
       })
       return staged._tag === 'Rejected' ? err(staged.reason) : ok({ commandId: staged.commandId })
     },
@@ -245,7 +470,7 @@ export function createReviewStatusController(options: ReviewStatusControllerOpti
       const published = await publishStatus(
         task,
         { taskKind: 'review_fix', phase: 'repair' },
-        repairProgressComment(task.pullRequest.headSha, progress, options.now().toISOString()),
+        repairProgressComment(task, progress, options.now().toISOString()),
         true,
         signal,
       )

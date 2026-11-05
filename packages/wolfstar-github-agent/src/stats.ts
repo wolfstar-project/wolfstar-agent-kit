@@ -39,12 +39,14 @@ export type RecordPullRequestTriageRunResult =
 
 export type StatsTaskKind = 'review_fix' | 'conflict_resolution' | 'baseline_repair' | 'issue_triage' | 'issue_work'
 
-export type StatsFact =
+export type StatsFact = { repository: string } & (
   | {
       _tag: 'PullRequestTriage'
       at: string
       startedAt: string
       outcome: PullRequestTriageStatsOutcome
+      /** The path rule answers most decisions alone. Only a model one says anything about the Classification. */
+      decidedBy: 'rule' | 'model'
     }
   | {
       _tag: 'Review'
@@ -63,7 +65,6 @@ export type StatsFact =
   | {
       _tag: 'Publication'
       at: string
-      repository: string
       itemNumber: number
       work: 'review_fix' | 'conflict_resolution' | 'baseline_repair' | 'issue_work'
       changedFiles: number
@@ -75,6 +76,7 @@ export type StatsFact =
       outcome: 'Completed' | 'ActionRequired' | 'Failed' | 'Skipped' | 'Superseded'
       candidates: number
     }
+)
 
 export interface StatsComparison {
   value: number
@@ -95,6 +97,8 @@ export interface PullRequestTriageWorkStats {
   reviewRequired: number
   reviewSkipped: number
   reviewRequiredAfterFailure: number
+  /** Decisions the Classification answered. The path rule answered the rest without a call. */
+  classified: number
   medianDurationMs: number | null
 }
 
@@ -137,6 +141,16 @@ export type StatsWork = PullRequestTriageWorkStats | ReviewWorkStats | TaskWorkS
 
 export type StatsCoverage = { _tag: 'Complete' } | { _tag: 'Partial'; startedAt: string }
 
+export interface RepositoryStats {
+  repository: string
+  runs: number
+  changedPullRequests: number
+  conflictResolutions: number
+  fixCommits: number
+  openedPullRequests: number
+  reviewFindings: number
+}
+
 export interface StatsSnapshot {
   generatedAt: string
   range: StatsRange
@@ -151,6 +165,7 @@ export interface StatsSnapshot {
   }
   days: StatsDay[]
   work: StatsWork[]
+  repositories: RepositoryStats[]
 }
 
 export function parseStatsRange(input: {
@@ -331,6 +346,13 @@ export function buildStats(input: {
       reviewFindings: comparison(currentSummary.reviewFindings, previousSummary.reviewFindings),
     },
     days: [...daysByDate.values()],
+    repositories: [...Map.groupBy(currentFacts, (fact) => fact.repository)]
+      .map(([repository, facts]) => ({
+        repository,
+        runs: facts.filter((fact) => fact._tag !== 'Publication').length,
+        ...summary(facts),
+      }))
+      .sort((left, right) => right.runs - left.runs || left.repository.localeCompare(right.repository)),
     work: [
       {
         _tag: 'PullRequestTriage',
@@ -338,6 +360,7 @@ export function buildStats(input: {
         reviewRequired: triageFacts.filter((fact) => fact.outcome === 'ReviewRequired').length,
         reviewSkipped: triageFacts.filter((fact) => fact.outcome === 'ReviewSkipped').length,
         reviewRequiredAfterFailure: triageFacts.filter((fact) => fact.outcome === 'ReviewRequiredAfterFailure').length,
+        classified: triageFacts.filter((fact) => fact.decidedBy === 'model').length,
         medianDurationMs: median(durations(triageFacts)),
       },
       {

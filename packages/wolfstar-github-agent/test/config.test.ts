@@ -48,6 +48,215 @@ repositories:
 `
 
 describe('configuration boundary', () => {
+  it('requires private Agent sessions and public Passkey-only login before enabling public terminals', () => {
+    const configured = configText.replace(
+      'server:',
+      'server:\n  public_terminal_sessions: true\n  public_browser_password_login: false\n  agent_sessions: true\n  browser_origins: [https://agent.example.com]',
+    )
+    const valid = parseConfigText(configured)
+    expect(valid._tag === 'Ok' && valid.value.server.publicTerminalSessions).toBe(true)
+    for (const text of [
+      configured.replace('agent_sessions: true', 'agent_sessions: false'),
+      configured.replace('public_browser_password_login: false', 'public_browser_password_login: true'),
+      configured.replace('  browser_origins: [https://agent.example.com]', ''),
+      configured.replace(`path: ${homedir()}/.local/share/wolfstar-github-agent/state.sqlite`, 'path: ":memory:"'),
+    ]) {
+      const result = parseConfigText(text)
+      expect(result._tag === 'Err' && result.error.map((issue) => issue.path)).toContain(
+        '$.server.public_terminal_sessions',
+      )
+    }
+  })
+  it('requires an explicit public origin when its browser password login is disabled', () => {
+    const withoutOrigin = parseConfigText(
+      configText.replace('server:', 'server:\n  public_browser_password_login: false'),
+    )
+    expect(withoutOrigin._tag === 'Err' && withoutOrigin.error.map((issue) => issue.path)).toContain(
+      '$.server.public_browser_password_login',
+    )
+    const configured = parseConfigText(
+      configText.replace(
+        'server:',
+        'server:\n  public_browser_password_login: false\n  browser_origins: [https://agent.example.com]',
+      ),
+    )
+    expect(configured._tag === 'Ok' && configured.value.server.publicBrowserPasswordLogin).toBe(false)
+    for (const text of [
+      configText.replace(
+        'allowed_origin: https://wolfstar-github-agent.localhost',
+        'allowed_origin: http://127.0.0.1:3210',
+      ),
+      configText.replace(`path: ${homedir()}/.local/share/wolfstar-github-agent/state.sqlite`, 'path: ":memory:"'),
+    ]) {
+      const unsafe = parseConfigText(
+        text.replace(
+          'server:',
+          'server:\n  public_browser_password_login: false\n  browser_origins: [https://agent.example.com]',
+        ),
+      )
+      expect(unsafe._tag === 'Err' && unsafe.error.map((issue) => issue.path)).toContain(
+        '$.server.public_browser_password_login',
+      )
+    }
+  })
+  it('accepts one explicit public Passkey origin and rejects ambiguous or insecure authorities', () => {
+    const configured = (origins: string) =>
+      parseConfigText(configText.replace('server:', `server:\n  browser_origins: ${origins}`))
+    const valid = configured('[https://agent.example.com]')
+    expect(valid._tag === 'Ok' && valid.value.server.browserOrigins).toEqual(['https://agent.example.com'])
+    for (const origins of [
+      '[https://one.example, https://two.example]',
+      '[http://agent.example.com]',
+      '[https://agent.example.com/path]',
+      '[https://wolfstar-github-agent.localhost]',
+    ]) {
+      const result = configured(origins)
+      expect(result._tag === 'Err' && result.error.map((issue) => issue.path)).toContain('$.server.browser_origins')
+    }
+  })
+  it('reads a dedicated GitHub account for one repository', () => {
+    const text = configText.replace(
+      '    enabled: true',
+      `    enabled: true
+    github_account:
+      login: im-brundlefly
+      token_path: /home/wolfstar/.config/wolfstar-github-agent/brundlefly-token
+      name: Brundlefly
+      url: https://github.com/harlan-zw/brundlefly
+      instructions: Use short, clear sentences.`,
+    )
+    const result = parseConfigText(text)
+    expect(result._tag === 'Ok' && result.value.repositories[0]?.githubAccount).toEqual({
+      login: 'im-brundlefly',
+      tokenPath: '/home/wolfstar/.config/wolfstar-github-agent/brundlefly-token',
+      name: 'Brundlefly',
+      url: 'https://github.com/harlan-zw/brundlefly',
+      instructions: 'Use short, clear sentences.',
+    })
+  })
+
+  it('requires an explicit opt-in before Agent sessions can use host credentials', () => {
+    const disabled = parseConfigText(configText)
+    expect(disabled._tag === 'Ok' && disabled.value.server.agentSessions === true).toBe(false)
+    const enabled = parseConfigText(configText.replace('server:', 'server:\n  agent_sessions: true'))
+    expect(enabled._tag === 'Ok' && enabled.value.server.agentSessions).toBe(true)
+    const invalid = parseConfigText(configText.replace('server:', 'server:\n  agent_sessions: yes'))
+    expect(invalid._tag === 'Err' && invalid.error.map((issue) => issue.path)).toContain('$.server.agent_sessions')
+    const retired = parseConfigText(configText.replace('server:', 'server:\n  desktop_sessions: true'))
+    expect(retired._tag === 'Err' && retired.error.map((issue) => issue.path)).toContain('$.server.desktop_sessions')
+  })
+  it('keeps Codex Session permissions restricted unless full access is explicitly enabled with Sessions', () => {
+    const defaultMode = parseConfigText(configText)
+    expect(defaultMode._tag === 'Ok' && defaultMode.value.server.agentSessionsCodexMode).toBe('restricted')
+
+    const fullWithoutSessions = parseConfigText(
+      configText.replace('server:', 'server:\n  agent_sessions_codex_mode: full_access'),
+    )
+    expect(fullWithoutSessions._tag === 'Err' && fullWithoutSessions.error.map((issue) => issue.path)).toContain(
+      '$.server.agent_sessions_codex_mode',
+    )
+
+    const fullAccess = parseConfigText(
+      configText.replace('server:', 'server:\n  agent_sessions: true\n  agent_sessions_codex_mode: full_access'),
+    )
+    expect(fullAccess._tag === 'Ok' && fullAccess.value.server.agentSessionsCodexMode).toBe('full_access')
+
+    const invalid = parseConfigText(configText.replace('server:', 'server:\n  agent_sessions_codex_mode: unrestricted'))
+    expect(invalid._tag === 'Err' && invalid.error.map((issue) => issue.path)).toContain(
+      '$.server.agent_sessions_codex_mode',
+    )
+  })
+  it('scopes release defaults to an allowed owner and trusted checkout root', () => {
+    const block = `release_defaults:\n  owner: wolfstar-project\n  checkout_root: ${homedir()}/pkg\n  manifest: package.json\n  version_files: [package.json]\n  tag_prefix: v\n  workflow: release.yml\n  checks: all\n`
+    const parsed = parseConfigText(`${block}${configText}`)
+    expect(parsed._tag === 'Ok' && parsed.value.releaseDefaults).toEqual({
+      owner: 'wolfstar-project',
+      checkoutRoot: `${homedir()}/pkg`,
+      policy: {
+        manifest: 'package.json',
+        versionFiles: ['package.json'],
+        tagPrefix: 'v',
+        workflow: 'release.yml',
+        checks: 'all',
+        credential: { _tag: 'Repository' },
+      },
+    })
+    const outside = parseConfigText(`${block.replace(`${homedir()}/pkg`, '/tmp')}${configText}`)
+    expect(outside._tag === 'Err' && outside.error.map((issue) => issue.path)).toContain(
+      '$.release_defaults.checkout_root',
+    )
+  })
+
+  it('allows one repository to disable inherited release defaults', () => {
+    const parsed = parseConfigText(configText.replace('    enabled: true', '    enabled: true\n    release: false'))
+    expect(parsed._tag === 'Ok' && Object.hasOwn(parsed.value.repositories[0]!, 'release')).toBe(true)
+    expect(parsed._tag === 'Ok' && parsed.value.repositories[0]?.release).toBeUndefined()
+  })
+
+  it('reads Reasoning effort for one repository without changing the global overrides', () => {
+    const parsed = parseConfigText(
+      configText.replace(
+        '    enabled: true',
+        `    enabled: true
+    reasoning_effort:
+      opencode:
+        adversarial_review: medium`,
+      ),
+    )
+
+    expect(parsed._tag === 'Ok' && parsed.value.repositories[0]?.reasoningEffort).toEqual({
+      opencode: { adversarial_review: 'medium' },
+    })
+    expect(parsed._tag === 'Ok' && parsed.value.agent.reasoningEffort).toEqual({})
+  })
+
+  it.each([
+    ['medium', '$.repositories[0].reasoning_effort'],
+    ['{other: {adversarial_review: medium}}', '$.repositories[0].reasoning_effort.other'],
+    ['{opencode: medium}', '$.repositories[0].reasoning_effort.opencode'],
+    ['{opencode: {review: medium}}', '$.repositories[0].reasoning_effort.opencode.review'],
+    ['{opencode: {adversarial_review: extreme}}', '$.repositories[0].reasoning_effort.opencode.adversarial_review'],
+  ])('rejects invalid repository Reasoning effort %s at its own path', (value, path) => {
+    const parsed = parseConfigText(
+      configText.replace('    enabled: true', `    enabled: true\n    reasoning_effort: ${value}`),
+    )
+
+    expect(parsed._tag === 'Err' && parsed.error.map((issue) => issue.path)).toContain(path)
+  })
+
+  it('reads repository priority and its polling interval', () => {
+    const parsed = parseConfigText(
+      configText.replace('    enabled: true', '    enabled: true\n    priority: 100\n    poll_interval_seconds: 15'),
+    )
+    expect(parsed._tag === 'Ok' && parsed.value.repositories[0]?.priority).toBe(100)
+    expect(parsed._tag === 'Ok' && parsed.value.repositories[0]?.pollIntervalSeconds).toBe(15)
+  })
+
+  it.each(['priority: -1', 'priority: 1.5', 'priority: high', 'poll_interval_seconds: 1'])(
+    'refuses invalid repository scheduling: %s',
+    (setting) => {
+      const parsed = parseConfigText(configText.replace('    enabled: true', `    enabled: true\n    ${setting}`))
+      expect(parsed._tag).toBe('Err')
+    },
+  )
+
+  it('accepts explicit conflict resolution on a maintained repository', () => {
+    const parsed = parseConfigText(configText.replace('ownership: owned', 'ownership: maintained'))
+
+    expect(parsed._tag === 'Ok' && parsed.value.repositories[0]?.conflictResolution).toBe(true)
+  })
+
+  it.each([
+    ['ownership: owned', 'ownership: external'],
+    ['pr_review: true', 'pr_review: false'],
+  ])('refuses conflict resolution after replacing %s with %s', (before, after) => {
+    const parsed = parseConfigText(configText.replace(before, after))
+
+    expect(parsed._tag === 'Err' && parsed.error.map((issue) => issue.path)).toContain(
+      '$.repositories[0].conflict_resolution',
+    )
+  })
+
   it('accepts the Portless dashboard origin', () => {
     const parsed = parseConfigText(configText)
 
@@ -90,6 +299,69 @@ agent:
     expect(parsed._tag === 'Err' && parsed.error.map((issue) => issue.path)).toContain('$.agent.maximum_active_agents')
   })
 
+  it('reads one Reasoning effort override per Agent provider and role', () => {
+    const parsed = parseConfigText(`${configText}
+agent:
+  provider: opencode
+  reasoning_effort:
+    opencode:
+      review_fix: medium
+      issue_triage: low
+`)
+
+    expect(parsed._tag === 'Ok' && parsed.value.agent.reasoningEffort).toEqual({
+      opencode: { review_fix: 'medium', issue_triage: 'low' },
+    })
+  })
+
+  it('keeps every provider default when the file names no Reasoning effort override', () => {
+    const parsed = parseConfigText(configText)
+
+    expect(parsed._tag === 'Ok' && parsed.value.agent.reasoningEffort).toEqual({})
+  })
+
+  it('refuses a Reasoning effort override for a role no Agent has', () => {
+    const parsed = parseConfigText(`${configText}
+agent:
+  provider: opencode
+  reasoning_effort:
+    opencode:
+      repair: medium
+`)
+
+    expect(parsed._tag === 'Err' && parsed.error.map((issue) => issue.path)).toContain(
+      '$.agent.reasoning_effort.opencode.repair',
+    )
+  })
+
+  it('refuses a Reasoning effort no Agent provider offers', () => {
+    const parsed = parseConfigText(`${configText}
+agent:
+  provider: opencode
+  reasoning_effort:
+    opencode:
+      review_fix: ultra
+`)
+
+    expect(parsed._tag === 'Err' && parsed.error.map((issue) => issue.path)).toContain(
+      '$.agent.reasoning_effort.opencode.review_fix',
+    )
+  })
+
+  it('refuses a Reasoning effort override for an unknown Agent provider', () => {
+    const parsed = parseConfigText(`${configText}
+agent:
+  provider: opencode
+  reasoning_effort:
+    gemini:
+      review_fix: medium
+`)
+
+    expect(parsed._tag === 'Err' && parsed.error.map((issue) => issue.path)).toContain(
+      '$.agent.reasoning_effort.gemini',
+    )
+  })
+
   it('accepts an HTTPS Tailscale dashboard origin', () => {
     const parsed = parseConfigText(
       configText.replace('https://wolfstar-github-agent.localhost', 'https://hogwild.tailcad325.ts.net'),
@@ -113,6 +385,33 @@ agent:
     expect(unencrypted._tag === 'Err' && unencrypted.error).toContainEqual({
       path: '$.server.allowed_origin',
       message: 'Expected the local dashboard or an HTTPS Tailscale origin.',
+    })
+  })
+
+  it('accepts HTTPS and loopback HTTP origins as frame ancestors', () => {
+    const framed = parseConfigText(
+      configText.replace(
+        'allowed_origin: https://wolfstar-github-agent.localhost',
+        'allowed_origin: https://wolfstar-github-agent.localhost\n  frame_ancestors: [https://deck.example.com, http://localhost:3000]',
+      ),
+    )
+    const unencrypted = parseConfigText(
+      configText.replace(
+        'allowed_origin: https://wolfstar-github-agent.localhost',
+        'allowed_origin: https://wolfstar-github-agent.localhost\n  frame_ancestors: [http://deck.example.com]',
+      ),
+    )
+
+    const unframed = parseConfigText(configText)
+
+    expect(framed._tag === 'Ok' && framed.value.server.frameAncestors).toEqual([
+      'https://deck.example.com',
+      'http://localhost:3000',
+    ])
+    expect(unframed._tag === 'Ok' && unframed.value.server.frameAncestors).toEqual([])
+    expect(unencrypted._tag === 'Err' && unencrypted.error).toContainEqual({
+      path: '$.server.frame_ancestors',
+      message: 'Expected HTTPS or loopback HTTP origins without a path.',
     })
   })
 
@@ -161,6 +460,173 @@ agent:
       path: '$.repositories[0].max_open_pull_requests',
       message: 'Expected an integer from 1 to 100.',
     })
+  })
+
+  it('scopes auto merge to labelled pull requests unless a repository widens it', () => {
+    const labelled = parseConfigText(configText)
+    expect(labelled._tag === 'Ok' && labelled.value.repositories[0]?.autoMerge).toEqual({ _tag: 'Labelled' })
+
+    const every = parseConfigText(
+      configText.replace(
+        'issue_work: true',
+        'issue_work: true\n    auto_merge:\n      pull_requests: every\n      minimum_confidence: 80',
+      ),
+    )
+    expect(every._tag === 'Ok' && every.value.repositories[0]?.autoMerge).toEqual({
+      _tag: 'Every',
+      minimumConfidence: 80,
+    })
+  })
+
+  it('reads a contained pull request scope with its Merge risk policy', () => {
+    const contained = parseConfigText(
+      configText.replace(
+        'issue_work: true',
+        `issue_work: true
+    auto_merge:
+      pull_requests: contained
+      minimum_confidence: 95
+      merge_risk:
+        max_changed_files: 6
+        max_changed_lines: 120
+        sensitive_paths: ["**/migrations/**"]
+        contained_paths: ["src/**", "test/**"]
+        require_test_change: true
+        label_overrides_risk: false`,
+      ),
+    )
+    expect(contained._tag === 'Ok' && contained.value.repositories[0]?.autoMerge).toEqual({
+      _tag: 'Contained',
+      labelOverridesRisk: false,
+      minimumConfidence: 95,
+      policy: {
+        containedPaths: ['src/**', 'test/**'],
+        maximumChangedFiles: 6,
+        maximumChangedLines: 120,
+        requireTestChange: true,
+        sensitivePaths: ['**/migrations/**'],
+      },
+    })
+  })
+
+  it('gives a contained scope conservative limits when it names none', () => {
+    const bare = parseConfigText(
+      configText.replace(
+        'issue_work: true',
+        'issue_work: true\n    auto_merge:\n      pull_requests: contained\n      minimum_confidence: 95',
+      ),
+    )
+    expect(bare._tag === 'Ok' && bare.value.repositories[0]?.autoMerge).toEqual({
+      _tag: 'Contained',
+      labelOverridesRisk: true,
+      minimumConfidence: 95,
+      policy: {
+        containedPaths: [],
+        maximumChangedFiles: 12,
+        maximumChangedLines: 300,
+        requireTestChange: false,
+        sensitivePaths: [],
+      },
+    })
+  })
+
+  it.each([
+    ['owned', ''],
+    ['maintained', '\n      credential: user'],
+    ['owned', '\n      credential: user'],
+  ])('accepts a package release policy on an %s repository', (ownership, credential) => {
+    const parsed = parseConfigText(
+      configText
+        .replace('ownership: owned', `ownership: ${ownership}`)
+        .replace(
+          '    take_ownership:',
+          `    release:\n      manifest: package.json\n      version_files: [package.json]\n      tag_prefix: v\n      workflow: release.yml\n      checks: [test]${credential}\n    take_ownership:`,
+        ),
+    )
+    expect(parsed._tag).toBe('Ok')
+  })
+
+  it.each([
+    ['maintained', '', 'Package releases in a maintained repository need the explicit opt in credential: user.'],
+    ['external', '\n      credential: user', 'Package releases require an owned or maintained repository.'],
+  ])(
+    'refuses a package release policy on a %s repository without the user credential opt in',
+    (ownership, credential, message) => {
+      const parsed = parseConfigText(
+        configText
+          .replace('ownership: owned', `ownership: ${ownership}`)
+          .replace('conflict_resolution: true', 'conflict_resolution: false')
+          .replace(
+            '    take_ownership:',
+            `    release:\n      manifest: package.json\n      version_files: [package.json]\n      tag_prefix: v\n      workflow: release.yml\n      checks: [test]${credential}\n    take_ownership:`,
+          ),
+      )
+      expect(parsed._tag === 'Err' && parsed.error).toContainEqual({ path: '$.repositories[0].release', message })
+    },
+  )
+
+  it('refuses a contained scope on a repository the service does not own or review', () => {
+    const maintained = parseConfigText(
+      configText
+        .replace('ownership: owned', 'ownership: maintained')
+        .replace('conflict_resolution: true', 'conflict_resolution: false')
+        .replace(
+          'issue_work: true',
+          'issue_work: true\n    auto_merge:\n      pull_requests: contained\n      minimum_confidence: 95',
+        ),
+    )
+    expect(maintained._tag === 'Err' && maintained.error).toContainEqual({
+      path: '$.repositories[0].auto_merge.pull_requests',
+      message: 'Auto merge for a Contained pull request requires an owned repository.',
+    })
+  })
+
+  it('rejects an every pull request scope without its own minimum, on a maintained repository, or without review', () => {
+    const missing = parseConfigText(
+      configText.replace('issue_work: true', 'issue_work: true\n    auto_merge:\n      pull_requests: every'),
+    )
+    expect(missing._tag === 'Err' && missing.error).toContainEqual({
+      path: '$.repositories[0].auto_merge.minimum_confidence',
+      message: 'Expected an integer from 0 to 100.',
+    })
+
+    const maintained = parseConfigText(
+      configText
+        .replace('ownership: owned', 'ownership: maintained')
+        .replace('conflict_resolution: true', 'conflict_resolution: false')
+        .replace(
+          'issue_work: true',
+          'issue_work: true\n    auto_merge:\n      pull_requests: every\n      minimum_confidence: 80',
+        ),
+    )
+    expect(maintained._tag === 'Err' && maintained.error).toContainEqual({
+      path: '$.repositories[0].auto_merge.pull_requests',
+      message: 'Auto merge for every pull request requires an owned repository.',
+    })
+
+    const unreviewed = parseConfigText(
+      configText
+        .replace('pr_review: true', 'pr_review: false')
+        .replace('conflict_resolution: true', 'conflict_resolution: false')
+        .replace(
+          'issue_work: true',
+          'issue_work: true\n    auto_merge:\n      pull_requests: every\n      minimum_confidence: 80',
+        ),
+    )
+    expect(unreviewed._tag === 'Err' && unreviewed.error).toContainEqual({
+      path: '$.repositories[0].auto_merge.pull_requests',
+      message: 'Auto merge for every pull request requires pull request review.',
+    })
+
+    const labelledWithMinimum = parseConfigText(
+      configText.replace(
+        'issue_work: true',
+        'issue_work: true\n    auto_merge:\n      pull_requests: labelled\n      minimum_confidence: 80',
+      ),
+    )
+    expect(labelledWithMinimum._tag === 'Err' && labelledWithMinimum.error.map((issue) => issue.path)).toContain(
+      '$.repositories[0].auto_merge.minimum_confidence',
+    )
   })
 
   it('parses an enabled auto merge policy with its defaults', () => {
@@ -279,6 +745,37 @@ agent:
       _tag: 'Err',
       error: expect.arrayContaining([{ path: '$.issue_cutoff', message: 'Expected a valid YYYY-MM-DD date.' }]),
     })
+  })
+
+  it('reads a daily service update time on its own clock', () => {
+    const result = parseConfigText(
+      configText.replace(
+        'issue_cutoff: 2026-07-14',
+        'issue_cutoff: 2026-07-14\nservice_update:\n  at: "03:00"\n  time_zone: Australia/Melbourne',
+      ),
+    )
+
+    expect(result).toMatchObject({
+      _tag: 'Ok',
+      value: { serviceUpdate: { minuteOfDay: 180, timeZone: 'Australia/Melbourne' } },
+    })
+    const absent = parseConfigText(configText)
+    expect(absent._tag === 'Ok' && absent.value.serviceUpdate).toBeUndefined()
+  })
+
+  it.each([
+    ['3am', 'Australia/Melbourne', '$.service_update.at', 'Expected a 24 hour HH:MM time.'],
+    ['24:00', 'Australia/Melbourne', '$.service_update.at', 'Expected a 24 hour HH:MM time.'],
+    ['03:00', 'Melbourne', '$.service_update.time_zone', 'Expected an IANA time zone, such as Australia/Melbourne.'],
+  ])('rejects service update time %s in %s', (at, timeZone, path, message) => {
+    const result = parseConfigText(
+      configText.replace(
+        'issue_cutoff: 2026-07-14',
+        `issue_cutoff: 2026-07-14\nservice_update:\n  at: "${at}"\n  time_zone: ${timeZone}`,
+      ),
+    )
+
+    expect(result).toEqual({ _tag: 'Err', error: expect.arrayContaining([{ path, message }]) })
   })
 
   it('loads only a private GitHub App PEM file', async () => {

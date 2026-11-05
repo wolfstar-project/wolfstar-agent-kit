@@ -2,6 +2,8 @@ import type { H3Event } from 'h3'
 import type { DashboardSnapshot } from '../../../src/types.ts'
 import { randomBytes } from 'node:crypto'
 import { createError } from 'h3'
+import { AGENT_MODELS, OPENCODE_AGENT_PROFILE } from '../../../src/agent-profile.ts'
+import { DESKTOP_PROTOCOL } from '../../../src/desktop-protocol.ts'
 import { dashboardSnapshot, pullRequestItem } from '../../../test/fixtures.ts'
 
 /**
@@ -9,7 +11,7 @@ import { dashboardSnapshot, pullRequestItem } from '../../../test/fixtures.ts'
  * without the real controller. Never served from `.output/public`: the service
  * only ever serves that directory, and every handler here 404s outside dev.
  *
- * Scenario via `DASHBOARD_MOCK_SCENARIO`: `default`, `paused`, `stale`, `calm`.
+ * Scenario via `DASHBOARD_MOCK_SCENARIO`: `default`, `paused`, `stale`, `calm`, `rate-limited`.
  */
 export function assertDevMock(event: H3Event): void {
   if (!import.meta.dev) {
@@ -19,7 +21,7 @@ export function assertDevMock(event: H3Event): void {
 
 const hex = (seed: string): string => seed.repeat(64).slice(0, 64)
 
-/** Task IDs are 64 hex characters, so Cancel and Eject validate them like the controller does. */
+/** Task IDs are 64 hex characters, so Cancel validates them like the controller does. */
 export const mockTaskId = (): string => randomBytes(32).toString('hex')
 const minutesAgo = (minutes: number): string => new Date(Date.now() - minutes * 60_000).toISOString()
 const daysAhead = (days: number): string => new Date(Date.now() + days * 86_400_000).toISOString()
@@ -49,8 +51,44 @@ function fixture(): DashboardSnapshot {
     mergeState: 'clean',
   })
   return dashboardSnapshot({
+    agentModels: AGENT_MODELS,
+    hostCapacity: { localActive: 1, localMaximum: 2, desktopActive: 1, desktopMaximum: 1, desktopAvailable: true },
+    agentSlots: { hogwildCeiling: 4, hogwildMemoryMaximum: 2, desktopCeiling: 2, memoryPerAgentGiB: 8 },
+    hostTasks: [
+      { taskId: hex('1'), host: 'desktop' },
+      { taskId: 'run-1', host: 'hogwild' },
+    ],
+    desktop: {
+      connected: true,
+      current: true,
+      protocol: DESKTOP_PROTOCOL,
+      report: {
+        protocol: DESKTOP_PROTOCOL,
+        memoryGiB: 16,
+        reservedGiB: 12,
+        agents: 1,
+        actions: 1,
+        jobs: {
+          _tag: 'Available',
+          jobs: [
+            {
+              runner: 'desktop-1',
+              repository: nuxtSeo,
+              name: 'Build and test sitemap fixtures across supported Nuxt versions',
+              startedAt: Date.now() - 120_000,
+            },
+          ],
+        },
+      },
+    },
     status: 'degraded',
     mutationsEnabled: true,
+    serviceUpdate: {
+      _tag: 'Available',
+      deployedCommit: '4f57e66b7d1c2e3f4a5b6c7d8e9f001122334455',
+      latestCommit: 'e98866d07987ca2390299382c1a8352bd016e741',
+      checkedAt: minutesAgo(2),
+    },
     agentStart: { _tag: 'Available' },
     openPullRequests: 5,
     providerCapacities: [
@@ -151,6 +189,18 @@ function fixture(): DashboardSnapshot {
     ],
     incidents: [
       {
+        id: 'retained-repair',
+        scope: { _tag: 'Task', taskId: `logged-finding:${hex('d')}`, repository: nuxtSeo, itemNumber: 412 },
+        kind: 'unknown',
+        severity: 'error',
+        message: 'Repair recovery was interrupted. Apply the retained commit again.',
+        operation: 'publication',
+        recovery: { _tag: 'ActionRequired' },
+        occurrences: 1,
+        firstSeenAt: minutesAgo(35),
+        lastSeenAt: minutesAgo(2),
+      },
+      {
         id: 'incident-1',
         scope: { _tag: 'Repository', repository: unhead },
         kind: 'github_access',
@@ -161,6 +211,16 @@ function fixture(): DashboardSnapshot {
         occurrences: 3,
         firstSeenAt: minutesAgo(35),
         lastSeenAt: minutesAgo(2),
+      },
+    ],
+    repairRecoveryCandidates: [
+      {
+        _tag: 'Plan',
+        taskId: `logged-finding:${hex('d')}`,
+        commitSha: 'e'.repeat(40),
+        repository: nuxtSeo,
+        pullRequestNumber: 412,
+        reason: 'Repair recovery was interrupted. Apply the retained commit again.',
       },
     ],
     queue: [
@@ -208,7 +268,7 @@ function fixture(): DashboardSnapshot {
         subjectUrl: `https://github.com/${unhead}/issues/731`,
         createdAt: minutesAgo(120),
         updatedAt: minutesAgo(15),
-        state: { _tag: 'AwaitingApproval', kind: 'issue_work' },
+        state: { _tag: 'AwaitingApproval', kind: 'issue_triage' },
       },
       {
         kind: 'pull_request',
@@ -313,10 +373,10 @@ function fixture(): DashboardSnapshot {
         scheduledFor: minutesAgo(600),
         specSha: hex('7'),
         mode: 'report',
-        state: { _tag: 'Completed', evidence: 'Ranked 6 open pull requests.' },
+        state: { _tag: 'Running', workerId: 'routine-agent', leaseExpiresAt: daysAhead(0.01) },
         fence: 1,
         attempts: 1,
-        progress: { percent: 100, label: 'Done' },
+        progress: { percent: 55, label: 'Reviewing pull requests' },
         usage: { _tag: 'Unavailable' },
         createdAt: minutesAgo(600),
         updatedAt: minutesAgo(590),
@@ -333,11 +393,288 @@ function fixture(): DashboardSnapshot {
         reportState: 'Published',
       },
     ],
+    batches: [
+      {
+        id: hex('b1'),
+        repository: nuxtSeo,
+        state: { _tag: 'Running', workerId: 'lease-2', fence: 1, leaseExpiresAt: daysAhead(0.1) },
+        issues: [
+          {
+            taskId: hex('c1'),
+            issueNumber: 795,
+            title: 'Runner doc misses the burst-registration DNS failure',
+            body: '',
+            triageSummary: null,
+            relatedIssues: [796],
+            target: 'docs/ops/github-actions-runner.md',
+          },
+          {
+            taskId: hex('c2'),
+            issueNumber: 796,
+            title: 'DataForSEO refusals warn once per day',
+            body: '',
+            triageSummary: null,
+            relatedIssues: [795],
+            target: 'layers/pro/dataforseo/server/utils/pipeline.ts',
+          },
+          {
+            taskId: hex('c3'),
+            issueNumber: 797,
+            title: 'Public token callers cannot resolve a Site by URL',
+            body: '',
+            triageSummary: null,
+            relatedIssues: [],
+            target: 'layers/pro/sites/server/utils/require-site-access.ts',
+          },
+        ],
+        units: [
+          {
+            id: 'unit-0',
+            position: 0,
+            primaryTaskId: hex('c1'),
+            issueNumbers: [795, 796],
+            dependsOnUnitId: null,
+            rationale: 'Both change the DataForSEO pipeline and its runbook.',
+            state: { _tag: 'Published', pullRequestNumber: 801, headRef: 'fix/issue-795', headSha: hex('5') },
+          },
+          {
+            id: 'unit-1',
+            position: 1,
+            primaryTaskId: hex('c3'),
+            issueNumbers: [797],
+            dependsOnUnitId: 'unit-0',
+            rationale: 'Reuses the site lookup the first unit extracts.',
+            state: { _tag: 'Running' },
+          },
+        ],
+        createdAt: minutesAgo(25),
+        updatedAt: minutesAgo(1),
+      },
+      {
+        id: hex('b2'),
+        repository: unhead,
+        state: { _tag: 'Running', workerId: 'lease-3', fence: 1, leaseExpiresAt: daysAhead(0.1) },
+        issues: [
+          {
+            taskId: hex('c4'),
+            issueNumber: 30,
+            title: 'fetch-head throws for expected upstream failures',
+            body: '',
+            triageSummary: null,
+            relatedIssues: [31],
+            target: 'layers/tools/server/api/tools/fetch-head.get.ts',
+          },
+          {
+            taskId: hex('c5'),
+            issueNumber: 31,
+            title: 'fetch-head 5xx mapping',
+            body: '',
+            triageSummary: null,
+            relatedIssues: [30],
+            target: 'layers/tools/server/api/tools/fetch-head.get.ts',
+          },
+        ],
+        units: null,
+        createdAt: minutesAgo(2),
+        updatedAt: minutesAgo(2),
+      },
+    ],
   })
 }
 
 function scenario(base: DashboardSnapshot): DashboardSnapshot {
   switch (process.env.DASHBOARD_MOCK_SCENARIO) {
+    case 'desktop-incompatible':
+      return {
+        ...base,
+        incidents: [],
+        repairRecoveryCandidates: [],
+        desktop:
+          base.desktop === undefined
+            ? undefined
+            : {
+                ...base.desktop,
+                current: false,
+                report:
+                  base.desktop.report === null ? null : { ...base.desktop.report, protocol: DESKTOP_PROTOCOL - 1 },
+              },
+      }
+    case 'health':
+      return {
+        ...base,
+        desktop:
+          base.desktop === undefined
+            ? undefined
+            : {
+                ...base.desktop,
+                current: false,
+                report:
+                  base.desktop.report === null ? null : { ...base.desktop.report, protocol: DESKTOP_PROTOCOL - 1 },
+              },
+        incidents: [
+          ...base.incidents,
+          ...Array.from({ length: 51 }, (_value, index) => ({
+            ...base.incidents[0]!,
+            id: `burst-${index}`,
+            severity: 'warning' as const,
+            message: `Network request ${index + 1} could not complete.`,
+            recovery:
+              index === 0
+                ? { _tag: 'Retrying' as const, attempt: 1, nextAttemptAt: minutesAgo(5) }
+                : { _tag: 'OnNextOperation' as const },
+            firstSeenAt: minutesAgo(6),
+            lastSeenAt: minutesAgo(5),
+          })),
+        ],
+      }
+    case 'rate-limited':
+      return {
+        ...base,
+        githubRateLimits: [
+          {
+            quota: { _tag: 'Installation', owner: 'wolfstar-project' },
+            kind: 'Primary',
+            retryAt: new Date(Date.now() + 25 * 60_000).toISOString(),
+          },
+          {
+            quota: { _tag: 'User', login: 'wolfstar-project' },
+            kind: 'Secondary',
+            retryAt: new Date(Date.now() + 30_000).toISOString(),
+          },
+        ],
+      }
+    case 'routine-choice':
+      return {
+        ...base,
+        agentProfile: OPENCODE_AGENT_PROFILE,
+        agentSelection: {
+          _tag: 'Pinned',
+          provider: 'opencode',
+          model: 'zai-coding-plan/glm-5.3-flash',
+          reasoningEffort: 'high',
+        },
+        providerCapacities: [
+          {
+            provider: 'codex',
+            reservePercent: 20,
+            capacity: { _tag: 'Available', usedPercent: 5, resetsAt: daysAhead(6) },
+          },
+          {
+            provider: 'opencode',
+            reservePercent: 0,
+            capacity: { _tag: 'Available', usedPercent: 100, resetsAt: daysAhead(2) },
+          },
+        ],
+        agentModelCapacities: {
+          opencodeGo: { _tag: 'Unpublished' },
+          zaiCodingPlan: { _tag: 'Available', usedPercent: 100, resetsAt: daysAhead(2) },
+        },
+      }
+    case 'routine-ux': {
+      const routine = base.routines[0]!
+      const template = base.routineRuns[0]!
+      const other = {
+        ...routine,
+        id: 'unjs/unhead:daily-checkin',
+        repository: 'unjs/unhead',
+        name: 'daily-checkin' as const,
+        trackingIssueNumber: 200,
+      }
+      const report = `<!-- routine-run:internal-marker -->
+# [BLOCKED] Routine report
+
+Coverage is incomplete. [Existing issue](https://github.com/wolfstar-project/nuxt-seo/issues/380).
+
+| Check | Result |
+| --- | --- |
+| Deployment | Passed |
+| Provider | Usage limit reached |
+
+<details>
+<summary>Evidence</summary>
+
+The deployment answered. The provider did not complete the scan.
+
+\`\`\`text
+Weekly/Monthly Limit Exhausted
+\`\`\`
+
+</details>
+
+<img src=x onerror="window.reportUnsafe=true">
+`
+      return {
+        ...base,
+        agentProfile: OPENCODE_AGENT_PROFILE,
+        agentSelection: {
+          _tag: 'Pinned',
+          provider: 'opencode',
+          model: 'zai-coding-plan/glm-5.3-flash',
+          reasoningEffort: 'high',
+        },
+        agentStart: { _tag: 'ReserveReached' },
+        providerCircuits: [],
+        providerCapacities: [
+          {
+            provider: 'codex',
+            reservePercent: 20,
+            capacity: { _tag: 'Available', usedPercent: 8, resetsAt: daysAhead(6) },
+          },
+          {
+            provider: 'opencode',
+            reservePercent: 0,
+            capacity: { _tag: 'Available', usedPercent: 100, resetsAt: daysAhead(2) },
+          },
+        ],
+        agentModelCapacities: {
+          opencodeGo: { _tag: 'Unpublished' },
+          zaiCodingPlan: { _tag: 'Available', usedPercent: 100, resetsAt: daysAhead(2) },
+        },
+        routines: [routine, other],
+        routineRuns: [
+          { ...template, id: 'latest-queued', state: { _tag: 'Queued' }, report: null, scheduledFor: minutesAgo(5) },
+          {
+            ...template,
+            id: 'last-blocked',
+            state: { _tag: 'Completed', evidence: 'Coverage incomplete.' },
+            report: { body: report, verdict: { severity: 'AMBER', coverage: 'incomplete' } },
+            scheduledFor: minutesAgo(60),
+          },
+          {
+            ...template,
+            id: 'other-queued',
+            routineId: other.id,
+            repository: other.repository,
+            name: other.name,
+            state: { _tag: 'Queued' },
+            agentSelection: { provider: 'opencode', model: 'opencode-go/glm-5.3-flash', reasoningEffort: 'high' },
+            report: null,
+            scheduledFor: minutesAgo(10),
+          },
+          {
+            ...template,
+            id: 'other-failed',
+            routineId: other.id,
+            repository: other.repository,
+            name: other.name,
+            state: { _tag: 'Failed', reason: 'The deployment did not answer.' },
+            report: null,
+            scheduledFor: minutesAgo(120),
+          },
+          ...Array.from({ length: 24 }, (_, index) => ({
+            ...template,
+            id: `older-${index}`,
+            scheduledFor: minutesAgo(180 + index * 60),
+            updatedAt: minutesAgo(178 + index * 60),
+            state: { _tag: 'Completed' as const, evidence: 'Checks passed.' },
+            report: {
+              body: '# Clear\n\nAll checks passed.',
+              verdict: { severity: 'GREEN' as const, coverage: 'complete' as const },
+            },
+          })),
+        ],
+      }
+    }
     case 'paused':
       return {
         ...base,
@@ -349,9 +686,12 @@ function scenario(base: DashboardSnapshot): DashboardSnapshot {
         ...base,
         status: 'ready',
         incidents: [],
+        repairRecoveryCandidates: [],
         queue: base.queue.filter((entry) => entry.state._tag !== 'AwaitingApproval'),
         repositories: base.repositories.map((repository) => ({ ...repository, lastError: null })),
       }
+    case 'recovery':
+      return { ...base, status: 'degraded', incidents: [] }
     default:
       return base
   }
@@ -532,4 +872,35 @@ function historyReviewAgents(): MockReviewAgent[] {
   ]
 }
 
-state = { ...state, agents: [...state.agents, ...historyReviewAgents()] }
+/*
+ * Pull requests triage skipped. They queue no Task and run no Review, so
+ * History is the only place they appear and the mock needs its own.
+ */
+function historyTriageSkips(): DashboardSnapshot['triageSkips'] {
+  return [
+    {
+      key: 'triage-skip:wolfstar-project/nuxt-seo#601@rev-skip-1',
+      repository: 'wolfstar-project/nuxt-seo',
+      pullRequestNumber: 601,
+      title: 'docs: rework the README header and pitch',
+      url: 'https://github.com/wolfstar-project/nuxt-seo/pull/601',
+      decidedBy: 'model',
+      confidence: 0.95,
+      reason: 'model: classification chose skip with confidence 0.95.',
+      decidedAt: minutesAgo(90),
+    },
+    {
+      key: 'triage-skip:unjs/unhead#318@rev-skip-2',
+      repository: 'unjs/unhead',
+      pullRequestNumber: 318,
+      title: 'docs: fix a broken link in the migration guide',
+      url: 'https://github.com/unjs/unhead/pull/318',
+      decidedBy: 'rule',
+      confidence: null,
+      reason: 'rule: every changed path is inside the prose set.',
+      decidedAt: minutesAgo(260),
+    },
+  ]
+}
+
+state = { ...state, agents: [...state.agents, ...historyReviewAgents()], triageSkips: historyTriageSkips() }

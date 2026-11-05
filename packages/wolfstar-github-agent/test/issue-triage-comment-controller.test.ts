@@ -29,6 +29,9 @@ const readyResult = {
   needsCodebaseReview: true,
   summary: 'The goal is clear, but the API shape is undecided.',
   nextAction: 'Write a technical specification.',
+  relatedIssues: [],
+  duplicateIssue: null,
+  relatedPullRequests: [],
 } as const
 
 function controllerWithSnapshot(snapshot: IssueTriageSnapshot) {
@@ -153,6 +156,9 @@ describe('issue triage publication', () => {
         needsCodebaseReview: true,
         summary: 'The goal is clear, but the API shape is undecided.',
         nextAction: 'Write a technical specification.',
+        relatedIssues: [],
+        duplicateIssue: null,
+        relatedPullRequests: [],
       },
       new AbortController().signal,
     )

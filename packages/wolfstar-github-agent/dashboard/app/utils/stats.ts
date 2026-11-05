@@ -6,7 +6,8 @@ import type {
   StatsSnapshot,
   StatsWork,
 } from '../../../src/stats.ts'
-import type { AgentRole } from '../../../src/types.ts'
+import type { WorkKey } from './dashboard.ts'
+import { calcTrendPercent } from './formatting.ts'
 
 /**
  * Pure presentation for the Stats page. The page holds layout and the range
@@ -99,14 +100,6 @@ export function statsRequestRange(input: StatsDateInputs, timeZone: string): Sta
   return { _tag: 'Valid', range: { from: fromValue, to: toValue, timeZone } }
 }
 
-export function comparisonText(comparison: StatsComparison): string {
-  const difference = comparison.value - comparison.previous
-  if (difference === 0) return 'Same as the previous period'
-  return difference > 0
-    ? `${difference} more than the previous period`
-    : `${Math.abs(difference)} fewer than the previous period`
-}
-
 /**
  * A bar's width as a share of the series maximum. Every bar starts at zero and
  * zero draws nothing, so the visual size equals the numeric size.
@@ -117,35 +110,29 @@ export function barWidth(value: number, maximum: number): string {
   return `${Math.round(share * 1000) / 10}%`
 }
 
-/** Whether a value label fits above a bar column at the 14px mono glyph width. */
-export function labelFits(value: number, columnWidth: number, glyphWidth = 8.5): boolean {
-  return String(value).length * glyphWidth <= columnWidth
+/** One stat for the strip at the top of Stats: the value, its change, and its shape over the days. */
+export interface OutcomeStat {
+  title: string
+  value: number
+  /** Percent change against the previous period. Absent when the previous period was empty, because a percentage of nothing says nothing. */
+  trend?: number
+  sparkline?: Array<{ date: string; value: number }>
 }
 
-export interface OutcomeRow {
-  label: string
-  comparison: StatsComparison
-  /** The comparison sentence, for assistive technology. */
-  text: string
-}
-
-export function outcomeRows(summary: StatsSnapshot['summary']): OutcomeRow[] {
-  const rows: Array<[string, StatsComparison]> = [
-    ['Pull requests changed', summary.changedPullRequests],
-    ['Repair commits', summary.fixCommits],
-    ['Conflicts resolved', summary.conflictResolutions],
-    ['Pull requests opened', summary.openedPullRequests],
-    ['Review issues found', summary.reviewFindings],
+export function outcomeStats(summary: StatsSnapshot['summary'], days: readonly StatsDay[]): OutcomeStat[] {
+  const stat = (title: string, comparison: StatsComparison, field?: keyof Omit<StatsDay, 'date'>): OutcomeStat => {
+    const base: OutcomeStat = { title, value: comparison.value }
+    if (comparison.previous > 0) base.trend = calcTrendPercent(comparison.value, comparison.previous)
+    if (field !== undefined) base.sparkline = days.map((day) => ({ date: day.date, value: day[field] }))
+    return base
+  }
+  return [
+    stat('Pull requests changed', summary.changedPullRequests),
+    stat('Repair commits', summary.fixCommits, 'fixCommits'),
+    stat('Conflicts resolved', summary.conflictResolutions, 'conflictResolutions'),
+    stat('Pull requests opened', summary.openedPullRequests, 'openedPullRequests'),
+    stat('Review issues found', summary.reviewFindings, 'reviewFindings'),
   ]
-  return rows.map(([label, comparison]) => ({ label, comparison, text: comparisonText(comparison) }))
-}
-
-/**
- * One scale for every Outcomes row: the largest value in either period. A bar
- * is then proportional across rows, so a 4 never draws as long as a 34.
- */
-export function outcomeScale(rows: readonly OutcomeRow[]): number {
-  return rows.reduce((maximum, row) => Math.max(maximum, row.comparison.value, row.comparison.previous), 0)
 }
 
 export function dayTotal(day: StatsDay): number {
@@ -175,7 +162,7 @@ export function coverageText(coverage: StatsCoverage): string | undefined {
 }
 
 /** The work kind a Stats row stands for, so the row carries the same chip as the board. */
-export function workRole(entry: StatsWork): AgentRole {
+export function workRole(entry: StatsWork): WorkKey {
   switch (entry._tag) {
     case 'PullRequestTriage':
       return 'pull_request_triage'
@@ -202,10 +189,14 @@ function countList(parts: Array<[number, string, boolean?]>): string {
 export function workResultText(entry: StatsWork): string {
   switch (entry._tag) {
     case 'PullRequestTriage':
+      // The classified count says how often the model was asked at all. Without
+      // it the row reads as if the model judged every pull request; the path
+      // rule answers nearly all of them without a call.
       return countList([
         [entry.reviewRequired, 'sent to Review'],
         [entry.reviewSkipped, 'skipped'],
         [entry.reviewRequiredAfterFailure, 'could not decide'],
+        [entry.classified, 'decided by the model', true],
       ])
     case 'Review':
       return countList([
@@ -243,6 +234,6 @@ export function medianText(milliseconds: number | null): string {
 }
 
 /** The History query that shows the records behind one Stats row. */
-export function historyQuery(entry: StatsWork, input: StatsDateInputs): { from: string; to: string; work: AgentRole } {
+export function historyQuery(entry: StatsWork, input: StatsDateInputs): { from: string; to: string; work: WorkKey } {
   return { from: input.from, to: input.to, work: workRole(entry) }
 }

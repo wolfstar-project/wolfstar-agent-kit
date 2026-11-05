@@ -1,0 +1,47 @@
+import { expect, it } from 'vitest'
+import { parsePackageReleaseConfig } from '../src/package-release-config.ts'
+
+const input = {
+  manifest: 'package.json',
+  version_files: ['package.json'],
+  tag_prefix: 'v',
+  workflow: 'release.yml',
+  checks: ['test', 'build'],
+}
+it('parses an explicit package release policy', () => {
+  expect(parsePackageReleaseConfig(input)).toEqual({
+    _tag: 'Ok',
+    value: {
+      manifest: 'package.json',
+      versionFiles: ['package.json'],
+      tagPrefix: 'v',
+      workflow: 'release.yml',
+      checks: ['test', 'build'],
+      credential: { _tag: 'Repository' },
+    },
+  })
+})
+it('parses the explicit user credential opt in', () => {
+  const parsed = parsePackageReleaseConfig({ ...input, credential: 'user' })
+  expect(parsed._tag === 'Ok' && parsed.value.credential).toEqual({ _tag: 'User' })
+})
+it('accepts all successful GitHub Actions check runs for inherited policies', () => {
+  const parsed = parsePackageReleaseConfig({ ...input, checks: 'all' })
+  expect(parsed._tag === 'Ok' && parsed.value.checks).toBe('all')
+})
+it.each([
+  { manifest: '../package.json' },
+  { manifest: '/package.json' },
+  { manifest: '.github/package.json' },
+  { version_files: [] },
+  { version_files: ['other.json'] },
+  { version_files: ['package.json', '../other.json'] },
+  { tag_prefix: 'v;command' },
+  { workflow: '../release.yml' },
+  { checks: [] },
+  { checks: [1] },
+  { credential: 'app' },
+  { credential: true },
+])('rejects invalid release configuration: %j', (change) => {
+  expect(parsePackageReleaseConfig({ ...input, ...change })._tag).toBe('Err')
+})

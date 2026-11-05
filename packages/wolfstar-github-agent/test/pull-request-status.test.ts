@@ -22,6 +22,7 @@ describe('pull request status controller', () => {
     })
     const review = {
       _tag: 'ReviewAgent' as const,
+      baseRef: 'main',
       role: 'adversarial_review' as const,
       id: 'attempt-1',
       repository: 'wolfstar-project/example',
@@ -45,6 +46,7 @@ describe('pull request status controller', () => {
       findings: [],
       usage: { _tag: 'Unavailable' as const },
       feedback: null,
+      gatePublication: { _tag: 'Unpublished' as const },
       publications: [],
       title: 'Fix the broken thing',
       author: 'wolfstar-project',

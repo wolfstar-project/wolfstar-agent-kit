@@ -1,5 +1,14 @@
-export { defaultAgentContextPaths, loadAgentContext, opencodeAgentEnvironment } from './agent-context.ts'
-export type { AgentContext, AgentContextPaths } from './agent-context.ts'
+export {
+  claudeProjectSlug,
+  defaultAgentContextPaths,
+  findRepositoryMemory,
+  loadAgentContext,
+  opencodeAgentEnvironment,
+  opencodeTurnEnvironment,
+  repositoryMemoryIndexPath,
+  repositoryMemoryLine,
+} from './agent-context.ts'
+export type { AgentContext, AgentContextPaths, RepositoryMemory } from './agent-context.ts'
 export { createAgentPermitPool } from './agent-permit-pool.ts'
 export {
   AGENT_MODELS,
@@ -23,7 +32,16 @@ export { createAgentApp } from './app.ts'
 export { createApprovalController } from './approval-controller.ts'
 export { APPROVAL_LABELS, approvalLabels } from './approval-labels.ts'
 export { createAutoMergeController } from './auto-merge-controller.ts'
-export { AUTO_MERGE_LABEL, autoMergeDecision, hasAutoMergeLabel } from './auto-merge.ts'
+export { AUTO_MERGE_LABEL, autoMergeCandidate, autoMergeDecision, hasAutoMergeLabel } from './auto-merge.ts'
+export { createBatchScheduler } from './batch-scheduler.ts'
+export { BATCH_MAXIMUM_ISSUES, BATCH_MINIMUM_ISSUES, normalizeBatchPlan } from './batch-store.ts'
+export {
+  BATCH_PLAN_SCHEMA,
+  batchPlanPrompt,
+  createBatchWorker,
+  DEFAULT_BATCH_UNIT_CONCURRENCY,
+  parseBatchPlan,
+} from './batch-worker.ts'
 export {
   candidateIssueBody,
   candidateIssueCommands,
@@ -41,6 +59,20 @@ export {
   validateRepositoryMappings,
 } from './config.ts'
 export { createConflictWorker } from './conflict-worker.ts'
+export { createControlClient } from './control-client.ts'
+export type {
+  ControlApiError,
+  ControlClient,
+  ControlClientConfigurationError,
+  ControlClientError,
+  ControlClientOptions,
+  ControlHealth,
+  ControlReviewRun,
+  ControlStatus,
+  ControlTaskList,
+  ReviewQuery,
+  WorkflowEventQuery,
+} from './control-client.ts'
 export { createExternalWatchController, mergeExternalWatchSnapshot } from './external-watch.ts'
 export { createGitHubAgentSource } from './github-agent-source.ts'
 export { createGitHubAppTokenProvider, createRepositoryTokenProvider } from './github-auth.ts'
@@ -66,7 +98,16 @@ export type { ProviderCapacitySource } from './provider-capacity.ts'
 export { createPublicationScheduler } from './publication-scheduler.ts'
 export type { PublicationRemote } from './publication-scheduler.ts'
 export { createPullRequestStatusController } from './pull-request-status-controller.ts'
+export { parsePullRequestWatchTarget, pullRequestWatchFinished } from './pull-request-watch.ts'
+export type { PullRequestWatchOptions, PullRequestWatchState, PullRequestWatchTarget } from './pull-request-watch.ts'
 export { reconcileAllRepositories, reconcileRepository } from './reconcile.ts'
+export {
+  createRepairRecoveryController,
+  parseRepairRecoveryRequest,
+  parseRepairRecoveryResponse,
+  repairRecoveryProof,
+} from './repair-recovery.ts'
+export type { RepairRecoveryPlan, RepairRecoveryRequest, RepairRecoveryResponse } from './repair-recovery.ts'
 export {
   buildRepositoryMappings,
   discoverGitHubAppRepositories,
@@ -74,7 +115,7 @@ export {
 } from './repository-discovery.ts'
 export type { Result } from './result.ts'
 export { createReviewStatusController } from './review-status-controller.ts'
-export { planRoutineRuns, syncRepositoryRoutines } from './routine-controller.ts'
+export { planRoutineRuns, retireUnmappedRoutines, syncRepositoryRoutines } from './routine-controller.ts'
 export type { RoutinePlan, RoutineSyncOutcome } from './routine-controller.ts'
 export {
   createRoutineReportController,
@@ -85,20 +126,20 @@ export {
 } from './routine-report-controller.ts'
 export { DEFAULT_CATCH_UP_MINUTES, dueRoutine, matchesCron, parseCron, wallClockParts } from './routine-schedule.ts'
 export type { CronExpression, DueRoutine } from './routine-schedule.ts'
-export { parseRoutineSpec, ROUTINE_MODES, ROUTINE_NAMES, ROUTINE_SPEC_PATH } from './routine-spec.ts'
-export {
-  CANDIDATE_SCHEMA,
-  createRoutineScanWorker,
-  DEFAULT_MAXIMUM_CHANGED_FILES,
-  routineScanPrompt,
-} from './routine-worker.ts'
+export { parseRoutineSpec, ROUTINE_MODES, ROUTINE_SPEC_PATH } from './routine-spec.ts'
+export { createRoutineScanWorker } from './routine-worker.ts'
+export { ROUTINE_NAMES } from './routines/index.ts'
 export { startAgentServer } from './server.ts'
 export { combineServiceState } from './service-state.ts'
 export type { CombinedServiceState, CombineServiceStateError, CombineServiceStateInput } from './service-state.ts'
+export { createGitServiceUpdateSource, createServiceUpdateSource } from './service-update.ts'
+export type { ServiceUpdateSource } from './service-update.ts'
 export { createPassIncidentRecorder, replaceServiceIncidents, startAgentService } from './service.ts'
 export { openJournalStore } from './store.ts'
-export { createTaskScheduler } from './task-scheduler.ts'
+export { createTaskScheduler, runClaimedTask } from './task-scheduler.ts'
+export type { ClaimedTaskResult } from './task-scheduler.ts'
 export type * from './types.ts'
+export { createWebhookControls } from './webhook-controls.ts'
 export {
   createReconcileHint,
   createWebhookApp,
@@ -108,4 +149,9 @@ export {
 } from './webhook.ts'
 export type { WebhookHint } from './webhook.ts'
 export { createWorkerTaskScheduler } from './worker-task-scheduler.ts'
-export { createAgentWorkspaceManager, createConflictWorktreeManager, createGitPublicationRemote } from './worktree.ts'
+export {
+  confirmRepairRecoveryRegression,
+  createAgentWorkspaceManager,
+  createConflictWorktreeManager,
+  createGitPublicationRemote,
+} from './worktree.ts'

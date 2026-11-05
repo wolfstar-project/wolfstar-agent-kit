@@ -7,6 +7,7 @@ Review the entire base-to-head diff and its surrounding code. Disprove correctne
 Check:
 
 - Behavior against the linked issue and PR description.
+- Every image in the PR description and in comments by the PR author, with visual inspection for UI defects.
 - Boundary inputs, malformed data, empty states, and unexpected ordering.
 - Error propagation, silent catches, partial writes, retries, and cleanup.
 - Security boundaries, secrets, injection, authorization, and unsafe parsing.
@@ -18,20 +19,33 @@ Check:
 - Code comments against `../../../references/code-comments.md`.
 - Repository architecture and local instructions.
 
-Treat style-only preferences as non-blocking. Treat correctness, security, data loss, public API breakage, and missing regression coverage as material.
+Do not report style preferences. Record credible defects with an impact score from 0 to 100.
+Score harm if merged unfixed. Consider likelihood, affected users, blast radius, and reversibility.
+Scores from 81 to 100 require action. Scores from 0 to 80 stay Logged without Repair.
+Logged findings are optional follow-ups. Show their proposed next action beside the finding.
+They never block Review or start automatic Repair.
+Do not raise a score to trigger Repair. Visible UI defects can qualify when they harm use.
+Use 81 to 90 for common broken paths or wrong results without a practical workaround.
+Use 91 to 100 for credible data loss, security bypass, or broad outage.
+Use 0 to 80 for limited, recoverable defects. Log their proof without starting Repair.
+
+Treat a clearly labelled `Before` image as historical evidence. Verify the current head before recording a finding.
 
 ## Outcome gates
 
 The controller records `Passed`, `Pending`, or `Failed` for three gates:
 
-| Gate   | Passed                                      | Pending                                                                                             | Failed                                                              |
-| ------ | ------------------------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| Merge  | GitHub reports conflict-free                | Mergeability unknown, or conflicts with repair active                                               | Conflicts present                                                   |
-| Review | The Agent report has zero material findings | Never, a valid Agent report completes this gate                                                     | One or more material findings remain                                |
-| CI     | Every required check passed                 | Required CI unavailable, running, or blocked by a confirmed head or base failure with repair active | The PR caused required CI failure, or repair exhausted its attempts |
+| Gate   | Passed                                       | Pending                                                                                                   | Failed                                                                             |
+| ------ | -------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Merge  | GitHub reports conflict-free                 | Mergeability unknown, or conflicts with repair active                                                     | Conflicts present                                                                  |
+| Review | The Agent report has no finding above 80/100 | Never, a valid Agent report completes this gate                                                           | One or more findings score above 80/100                                            |
+| CI     | Every GitHub Actions check run passed        | GitHub Actions CI unavailable, running, or blocked by a confirmed head or base failure with repair active | The PR caused a GitHub Actions check run to fail, or repair exhausted its attempts |
 
-No declared checks, plus available empty base and head check snapshots, passes CI.
-An unavailable snapshot or a declared check with no result stays `Pending`.
+Only check runs from the `github-actions` app count as CI. Ignore commit statuses
+and check runs from other apps, even when GitHub branch rules require them.
+Do not mention ignored checks in the Review finding or status comment.
+Available empty base and head Actions check snapshots pass CI.
+An unavailable Actions snapshot stays `Pending`.
 
 Head stability is an invariant. Store the Agent report against its exact
 Revision before later GitHub reads. If the head moved, keep that history but
@@ -47,7 +61,7 @@ Derive one outcome without judgment:
 Gate outcomes are deterministic. Confidence never changes an outcome. Do not show
 `PENDING` or `BLOCKED` a confidence score or call either a sign-off.
 
-The Agent returns only the premise, material findings, and confidence. It never
+The Agent returns only the premise, scored findings, and confidence. It never
 returns workflow state. The controller derives every gate and the outcome.
 
 ## Confidence
@@ -99,9 +113,11 @@ Next: SHORT_ACTION
 
 Use the controller's phase percentage. Update only at a phase transition or changed blocker. Keep findings out until verified.
 
+The controller reads the Agent's own `▓▓▓░░ NN% next-step` line and publishes that text as the phase. So the line a review prints during its work becomes the line a reader sees on the pull request. Without one, the controller guesses the phase from the shape of each shell command.
+
 Keep the reviewed SHA in hidden metadata. Render one robot emoji. Put disclosure,
 policy, waiting state, and human ownership in one blockquoted line. The visible
-review body only reports material issues found or fixed.
+review body reports actionable findings, Logged findings, and fixes.
 
 ```markdown
 <!-- wolfstar-agent-kit:pr-triage -->
@@ -112,12 +128,13 @@ review body only reports material issues found or fixed.
 > [Wolfstar Agent Kit](https://github.com/wolfstar-project/wolfstar-agent-kit) posted this automated review. It is not a human review or approval. [AI open source policy](https://harlanzw.com/blog/ai-in-open-source). Human merge decision still required.
 ```
 
-When Review found issues, show every material finding once:
+When Review found issues, show each finding once:
 
 ```markdown
 - **Fixed:** SHORT_DESCRIPTION
-- **Open:** SHORT_DESCRIPTION. Next: NEXT_ACTION
-- **Dismissal recommended:** SHORT_DESCRIPTION. Next: Dismiss this pull request.
+- **Logged (IMPACT/100):** SHORT_DESCRIPTION. Optional follow-up: NEXT_ACTION
+- **Open (IMPACT/100):** SHORT_DESCRIPTION. Next: NEXT_ACTION
+- **Dismissal recommended (IMPACT/100):** SHORT_DESCRIPTION. Next: Dismiss this pull request.
 ```
 
 Do not list the reviewed SHA, base state, metadata conformance, commands, passed
@@ -131,17 +148,21 @@ an issue bullet for a clean result.
 
 ## Structured Repair handoff
 
-Record every material Review finding. Never cap the finding count.
+Record every evidence-backed Review finding. Never cap the finding count.
 
-Each finding records a stable fingerprint, exact path and line, proof, summary, next action, and resolution.
+Each finding records impact, a stable fingerprint, exact path and line, proof, summary, and proposed next action.
+An actionable finding also records its resolution.
 
 Decide the pull request premise once before classifying findings.
 
-A sound premise means safe fixes preserve the pull request intent. Every finding uses `Repair` and records the regression test the fresh Repair Agent must write first.
+A sound premise means safe fixes preserve the pull request intent. Findings above 80 use `Repair` and record the regression test the fresh Repair Agent must write first. A finding no test can cover, such as a stale comment or documentation, records none.
 
-A wrong premise means safe fixes must reverse the intent, remove a safeguard, or add unrelated root architecture. Every finding uses `Dismissal` and records no regression test.
+A wrong premise means safe fixes must reverse the intent, remove a safeguard, or add unrelated root architecture. Findings above 80 use `Dismissal` and record no regression test.
 
-Never mix `Repair` and `Dismissal` findings. For a wrong premise, queue no Repair. Publish `BLOCKED` with Action required. Wolfstar decides whether to Dismiss.
+Findings at 80 or below use `Logged`, regardless of premise. They do not fail the Review gate or queue Repair.
+
+Never mix `Repair` and `Dismissal` findings. For an actionable wrong premise, queue no Repair.
+Publish `BLOCKED` with Action required. Wolfstar decides whether to Dismiss.
 
 ## Deployment extension
 
@@ -171,6 +192,33 @@ gh api --method PATCH "repos/$repo/issues/comments/$comment_id" --input payload.
 ```
 
 Build `payload.json` from the final body with `jq`; do not interpolate JSON manually. Never modify another author's marked comment.
+
+## Review outcome labels
+
+A terminal status needs both its confirmed comment and one matching Review outcome label.
+Apply this contract during standalone reviews and when reusing a trusted terminal comment.
+For controller-dispatched Review, the controller owns publication. Its Agents must never write GitHub comments or labels.
+The controller requires stored Review evidence for the current Revision before publishing. A trusted comment alone cannot replace that evidence.
+
+| Outcome   | Label                    | Color    |
+| --------- | ------------------------ | -------- |
+| `READY`   | `wolfstar-agent-ready`   | `0e8a16` |
+| `PENDING` | `wolfstar-agent-pending` | `fbca04` |
+| `BLOCKED` | `wolfstar-agent-blocked` | `d73a4a` |
+
+1. Establish mutation authority before writing labels. If authority is missing, report incomplete publication.
+2. Refetch the pull request before writing. Require an open pull request whose head matches the comment's reviewed SHA.
+3. If the head changed, restart Review. Never apply the previous outcome to the new head.
+4. If the repository lacks the matching label, create it with the listed color. Surface creation failures.
+5. Add the matching label. Remove the other Review outcome labels, `wolfstar-agent-running`, `wolfstar-agent-review-required`, and `wolfstar-agent-review-skipped`.
+6. Preserve all other labels, including `wolfstar-agent-review` and `wolfstar-agent-auto-merge`. Review publication never grants merge authority.
+7. Refetch the pull request and comment. Confirm the head, open state, comment outcome, and matching label. Confirm the conflicting labels are absent.
+
+If confirmation finds a changed head or closed pull request, remove the outcome label this publication added. Report any cleanup failure.
+If the head changed, restart from Snapshot. If the pull request closed, stop Review.
+If a write fails on the same head, retain the confirmed comment and retry label publication alone.
+Do not rerun Review or create another comment to repair a missing label.
+Return completion only after both the comment and labels pass confirmation.
 
 ## Local journal
 

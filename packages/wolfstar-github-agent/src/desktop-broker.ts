@@ -1,0 +1,221 @@
+import type { AgentEvent, AgentProvider, AgentTurnRequest } from './agent-provider.ts'
+import type { DesktopErrorCause, DesktopFailure } from './desktop-protocol.ts'
+import type { DesktopWorktree } from './desktop-worktree.ts'
+import type { ReviewProofAuthorityFactory, ReviewProofOwnership } from './review-proof-authority.ts'
+import type { RunnerJobs } from './runner-jobs.ts'
+import { randomUUID } from 'node:crypto'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
+import {
+  DESKTOP_MEMORY_PER_AGENT_GIB,
+  DESKTOP_PROTOCOL,
+  DESKTOP_TURN_LEASE_MILLISECONDS,
+  desktopErrorCause,
+} from './desktop-protocol.ts'
+import { exportDesktopWorktree, importDesktopWorktree } from './desktop-worktree.ts'
+import { parseReviewProofReceipt, parseReviewProofReservation } from './review-proof-controller.ts'
+
+export interface DesktopTurn {
+  id: string
+  provider: AgentProvider['name']
+  request: Omit<AgentTurnRequest, 'signal'>
+  worktree: DesktopWorktree
+}
+
+interface PendingTurn {
+  turn: DesktopTurn
+  events: AgentEvent[]
+  state: 'queued' | 'running' | 'completed' | 'cancelled'
+  result: DesktopWorktree | null
+  failure: DesktopFailure | null
+  leaseExpiresAt: number
+  nextSequence: number
+  signal: AbortSignal
+}
+
+export interface DesktopReport {
+  /** The turn shape this desktop speaks. See `DESKTOP_PROTOCOL`. */
+  protocol: number
+  memoryGiB: number
+  reservedGiB: number
+  agents: number
+  actions: number
+  jobs?: RunnerJobs
+}
+
+export function createDesktopBroker(options: {
+  now: () => number
+  reviewProofAuthority?: ReviewProofAuthorityFactory
+}) {
+  const pending = new Map<string, PendingTurn>()
+  let report: DesktopReport | null = null
+  let seenAt = 0
+  const connected = () => report !== null && options.now() - seenAt < 15_000
+  // A desktop on another revision reads a turn it was never taught. Standing it
+  // down keeps the work on Hogwild, where the old design instead sent the turn
+  // and failed the Task on the far side.
+  const current = () => report !== null && report.protocol === DESKTOP_PROTOCOL
+  const ownsTurn = (entry: PendingTurn | undefined): entry is PendingTurn =>
+    entry?.state === 'running' && !entry.signal.aborted && options.now() < entry.leaseExpiresAt
+  return {
+    available: () =>
+      connected() &&
+      current() &&
+      report !== null &&
+      report.memoryGiB - report.reservedGiB >= DESKTOP_MEMORY_PER_AGENT_GIB,
+    read: () => ({
+      connected: connected(),
+      current: current(),
+      protocol: DESKTOP_PROTOCOL,
+      report,
+      seenAt: report === null ? null : seenAt,
+    }),
+    report: (value: DesktopReport) => {
+      report = value
+      seenAt = options.now()
+      return { memoryGiB: value.memoryGiB }
+    },
+    claim: (): DesktopTurn | null => {
+      if (!connected() || !current()) return null
+      const entry = [...pending.values()].find((entry) => entry.state === 'queued')
+      if (entry === undefined) return null
+      entry.state = 'running'
+      entry.leaseExpiresAt = options.now() + DESKTOP_TURN_LEASE_MILLISECONDS
+      return entry.turn
+    },
+    defer: (id: string) => {
+      const entry = pending.get(id)
+      if (!ownsTurn(entry)) return false
+      // A lost deferral acknowledgement may be replayed after another claim.
+      // Give that claim a new identity before returning the turn to the Queue.
+      pending.delete(id)
+      entry.turn = { ...entry.turn, id: randomUUID() }
+      entry.nextSequence = 0
+      entry.leaseExpiresAt = 0
+      entry.state = 'queued'
+      pending.set(entry.turn.id, entry)
+      return true
+    },
+    active: (id: string) => {
+      const entry = pending.get(id)
+      if (!ownsTurn(entry)) return false
+      entry.leaseExpiresAt = options.now() + DESKTOP_TURN_LEASE_MILLISECONDS
+      return true
+    },
+    proof: async (id: string, action: unknown, input: unknown): Promise<unknown> => {
+      const entry = pending.get(id)
+      const request = entry?.turn.request as (DesktopTurn['request'] & { toolPolicy?: unknown }) | undefined
+      const policy = request?.toolPolicy
+      if (
+        !ownsTurn(entry) ||
+        !current() ||
+        options.reviewProofAuthority === undefined ||
+        request?.taskId === undefined ||
+        typeof policy !== 'object' ||
+        policy === null ||
+        !('_tag' in policy) ||
+        policy._tag !== 'Review' ||
+        !('headSha' in policy) ||
+        typeof policy.headSha !== 'string' ||
+        !('workerId' in policy) ||
+        typeof policy.workerId !== 'string' ||
+        !('fence' in policy) ||
+        !Number.isSafeInteger(policy.fence)
+      ) {
+        throw new Error('The desktop proof no longer owns an active Review turn.')
+      }
+      const ownership: ReviewProofOwnership = {
+        taskId: request.taskId,
+        headSha: policy.headSha,
+        workerId: policy.workerId,
+        fence: Number(policy.fence),
+      }
+      const authority = options.reviewProofAuthority(ownership)
+      if (action === 'reserve') return authority.reserve(parseReviewProofReservation(input))
+      if (
+        action === 'finish' &&
+        typeof input === 'object' &&
+        input !== null &&
+        'reservationId' in input &&
+        typeof input.reservationId === 'string' &&
+        input.reservationId.length <= 100 &&
+        'receipt' in input &&
+        Object.keys(input).length === 2
+      ) {
+        await authority.finish({ reservationId: input.reservationId, receipt: parseReviewProofReceipt(input.receipt) })
+        return { _tag: 'Recorded' }
+      }
+      throw new Error('The desktop proof callback is invalid.')
+    },
+    events: (id: string, events: AgentEvent[], sequence: number) => {
+      const entry = pending.get(id)
+      if (!ownsTurn(entry)) return false
+      if (!Number.isSafeInteger(sequence) || sequence < 0 || sequence > entry.nextSequence) return false
+      if (sequence < entry.nextSequence) return true
+      entry.nextSequence += 1
+      entry.events.push(...events)
+      return true
+    },
+    complete: (id: string, result: DesktopWorktree | null, failure: DesktopFailure | null) => {
+      const entry = pending.get(id)
+      if (!ownsTurn(entry)) return false
+      entry.result = result
+      entry.failure = failure
+      entry.state = 'completed'
+      return true
+    },
+    provider: (name: AgentProvider['name']): AgentProvider => ({
+      name,
+      runTurn: (request: AgentTurnRequest) =>
+        (async function* () {
+          const temporary = await mkdtemp(join(tmpdir(), 'desktop-turn-'))
+          const id = randomUUID()
+          let entry: PendingTurn | undefined
+          try {
+            const worktree = await exportDesktopWorktree(request.workspace, temporary, { signal: request.signal })
+            const { signal, ...input } = request
+            entry = {
+              turn: { id, provider: name, request: input, worktree },
+              events: [],
+              state: 'queued',
+              result: null,
+              failure: null,
+              leaseExpiresAt: 0,
+              nextSequence: 0,
+              signal,
+            }
+            pending.set(id, entry)
+            while (entry.state !== 'completed') {
+              signal.throwIfAborted()
+              if (entry.state === 'queued' ? !connected() : !ownsTurn(entry))
+                throw new Error('Desktop disconnected during the Agent turn.')
+              for (const event of entry.events.splice(0)) yield event
+              await delay(100, undefined, { signal })
+            }
+            for (const event of entry.events.splice(0)) yield event
+            if (entry.result !== null)
+              await importDesktopWorktree(request.workspace, worktree, entry.result, temporary, signal)
+            if (entry.failure !== null)
+              throw new Error(entry.failure.reason, {
+                cause: entry.failure._tag === 'SetupFailed' ? 'desktop-setup' : 'desktop-execution',
+              })
+            if (entry.result === null) throw new Error('Desktop returned no Worktree.')
+          } catch (error) {
+            // A Worktree the desktop cannot carry, or one it could not set up,
+            // keeps its own cause, so the host pool runs the turn on Hogwild
+            // instead of failing the Task.
+            const cause: DesktopErrorCause = desktopErrorCause(error) ?? 'desktop-execution'
+            throw new Error(error instanceof Error ? error.message : 'Desktop execution failed.', { cause })
+          } finally {
+            if (entry !== undefined) entry.state = 'cancelled'
+            pending.delete(entry?.turn.id ?? id)
+            await rm(temporary, { recursive: true, force: true })
+          }
+        })(),
+    }),
+  }
+}
+
+export type DesktopBroker = ReturnType<typeof createDesktopBroker>

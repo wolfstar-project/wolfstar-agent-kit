@@ -1,10 +1,12 @@
-import type { AgentEvent, AgentProvider } from '../src/agent-provider.ts'
+import type { AgentPhase } from '../src/agent-progress.ts'
+import type { AgentEvent, AgentProvider, AgentTurnRequest } from '../src/agent-provider.ts'
 import type { Result } from '../src/result.ts'
-import type { AgentProgress } from '../src/types.ts'
+import type { AgentRole } from '../src/types.ts'
 import { describe, expect, it } from 'vitest'
 import { CODEX_AGENT_PROFILE } from '../src/agent-profile.ts'
-import { runAgentTurn, runParsedAgentTurn } from '../src/agent-turn.ts'
-import { mayRetryFailure } from '../src/failure.ts'
+import { agentPhase } from '../src/agent-progress.ts'
+import { runAgentTurn, runParsedAgentTurn, runRepairedAgentTurn } from '../src/agent-turn.ts'
+import { classifyFailure, mayRetryFailure } from '../src/failure.ts'
 import { err, ok } from '../src/result.ts'
 import { agentRuntime, turnEvents } from './fixtures.ts'
 
@@ -48,7 +50,167 @@ const input = {
   workspace: '/tmp/worktree',
 }
 
+function rawReplies(texts: string[], capture: { prompts: string[] }): AgentProvider {
+  return {
+    name: 'opencode',
+    runTurn: (request) => {
+      capture.prompts.push(request.prompt)
+      const text = texts[capture.prompts.length - 1] ?? ''
+      return (async function* () {
+        yield { _tag: 'SessionStarted', sessionId: 'session-1' } as AgentEvent
+        yield { _tag: 'Message', text } as AgentEvent
+        yield { _tag: 'TurnCompleted' } as AgentEvent
+      })()
+    },
+  }
+}
+
+function malformedAware(provider: AgentProvider) {
+  return {
+    ...options(provider),
+    parse: (response: string): Result<{ outcome: string }, string> => {
+      let value: { outcome?: string }
+      try {
+        value = JSON.parse(response) as { outcome?: string }
+      } catch {
+        return err('The agent returned malformed conflict resolution JSON.')
+      }
+      return value.outcome === 'resolved'
+        ? ok({ outcome: value.outcome })
+        : err('The agent returned an invalid conflict resolution result.')
+    },
+  }
+}
+
+describe('factory production authority', () => {
+  it.each<AgentRole>([
+    'conflict_resolution',
+    'review_fix',
+    'baseline_repair',
+    'adversarial_review',
+    'issue_triage',
+    'issue_work',
+    'batch_plan',
+    'routine_scan',
+    'routine_fix',
+  ])('delivers the production boundary to %s', async (role) => {
+    const capture = { prompts: [] as string[] }
+    await runAgentTurn(
+      options(replies([{ outcome: 'resolved' }], capture)),
+      { ...input, role },
+      new AbortController().signal,
+    )
+
+    expect(capture.prompts[0]).toContain('Production access is read only for this Agent turn.')
+    expect(capture.prompts[0]).toContain('A read-only POST query is allowed.')
+    expect(capture.prompts[0]).toContain(
+      'Local fixture writes are allowed inside this worktree, in task-owned scratch files, and on loopback services.',
+    )
+    expect(capture.prompts[0]).toContain(
+      'Only a separate controller operation can exercise approved production write authority.',
+    )
+  })
+
+  it('preserves the production boundary during result correction', async () => {
+    const capture = { prompts: [] as string[] }
+    await runParsedAgentTurn(
+      options(replies([{ outcome: 'invalid' }, { outcome: 'resolved' }], capture)),
+      input,
+      new AbortController().signal,
+    )
+
+    expect(capture.prompts[1]).toContain('Production access is read only for this Agent turn.')
+    expect(capture.prompts[1]).toContain('Use no tool.')
+  })
+})
+
 describe('runParsedAgentTurn', () => {
+  it('reads JSON inside a Markdown code fence without a repair turn', async () => {
+    const capture = { prompts: [] as string[] }
+    const provider = rawReplies(['```json\n{"outcome": "resolved"}\n```'], capture)
+
+    const result = await runParsedAgentTurn(malformedAware(provider), input, new AbortController().signal)
+
+    expect(result).toEqual(
+      ok({ value: { outcome: 'resolved' }, sessionId: 'session-1', usage: { _tag: 'Unavailable' } }),
+    )
+    expect(capture.prompts).toHaveLength(1)
+  })
+
+  it('reads JSON after leading prose when the remainder parses', async () => {
+    const capture = { prompts: [] as string[] }
+    const provider = rawReplies(['Here is the result:\n{"outcome": "resolved", "note": "a {brace} inside"}'], capture)
+
+    const result = await runParsedAgentTurn(malformedAware(provider), input, new AbortController().signal)
+
+    expect(result).toEqual(
+      ok({ value: { outcome: 'resolved' }, sessionId: 'session-1', usage: { _tag: 'Unavailable' } }),
+    )
+    expect(capture.prompts).toHaveLength(1)
+  })
+
+  it('reads one JSON result after brace-bearing prose and a code fence', async () => {
+    const capture = { prompts: [] as string[] }
+    const provider = rawReplies(
+      ['The cast to { fonts?: ... } is safe.\n```json\n{"outcome":"resolved","note":"a \\"quoted\\" {brace}"}\n```'],
+      capture,
+    )
+
+    const result = await runParsedAgentTurn(malformedAware(provider), input, new AbortController().signal)
+
+    expect(result).toEqual(
+      ok({ value: { outcome: 'resolved' }, sessionId: 'session-1', usage: { _tag: 'Unavailable' } }),
+    )
+    expect(capture.prompts).toHaveLength(1)
+  })
+
+  it('rejects ambiguous JSON results instead of selecting one', async () => {
+    const capture = { prompts: [] as string[] }
+    const provider = rawReplies(['{"outcome":"wrong"}\n{"outcome":"resolved"}', 'still prose'], capture)
+
+    const result = await runParsedAgentTurn(malformedAware(provider), input, new AbortController().signal)
+
+    expect(result).toEqual(err('The agent returned malformed conflict resolution JSON.'))
+    expect(capture.prompts).toHaveLength(2)
+  })
+
+  it('corrects a fresh result in its exact completed session without repeating the work prompt', async () => {
+    const requests: AgentTurnRequest[] = []
+    const provider: AgentProvider = {
+      name: 'opencode',
+      runTurn: (request) => {
+        requests.push(request)
+        return (async function* () {
+          yield* turnEvents({ outcome: requests.length === 1 ? 'nearly' : 'resolved' })
+        })()
+      },
+    }
+
+    const result = await runParsedAgentTurn(
+      { ...options(provider), store: { getWorkerSession: () => 'other-session', saveWorkerSession: () => undefined } },
+      { ...input, freshSession: true },
+      new AbortController().signal,
+    )
+
+    expect(result).toEqual(
+      ok({ value: { outcome: 'resolved' }, sessionId: 'session-1', usage: { _tag: 'Unavailable' } }),
+    )
+    expect(requests.map((request) => request.sessionId)).toEqual([null, 'session-1'])
+    expect(requests[1]?.prompt).toContain('Use no tool.')
+    expect(requests[1]?.prompt).not.toContain('Resolve the conflict.')
+  })
+
+  it('still rejects an answer with no JSON object with the parser error', async () => {
+    const capture = { prompts: [] as string[] }
+    const provider = rawReplies(['I fixed it {but never', 'still prose'], capture)
+
+    const result = await runParsedAgentTurn(malformedAware(provider), input, new AbortController().signal)
+
+    expect(result).toEqual(err('The agent returned malformed conflict resolution JSON.'))
+    expect(capture.prompts).toHaveLength(2)
+    expect(capture.prompts[1]).toContain('The agent returned malformed conflict resolution JSON.')
+  })
+
   it('asks once for a corrected result, keeping the work behind it', async () => {
     const capture = { prompts: [] as string[] }
     const provider = replies([{ outcome: 'nearly' }, { outcome: 'resolved' }], capture)
@@ -71,6 +233,28 @@ describe('runParsedAgentTurn', () => {
 
     expect(result).toEqual(err('The agent returned an invalid conflict resolution result.'))
     expect(capture.prompts).toHaveLength(2)
+  })
+
+  it('stops retrying a result the agent repeats after the named correction', async () => {
+    const capture = { prompts: [] as string[] }
+    const provider = replies([{ outcome: 'nearly' }, { outcome: 'nearly' }], capture)
+
+    const result = await runParsedAgentTurn(options(provider), input, new AbortController().signal)
+
+    expect(result._tag).toBe('Err')
+    const reason = result._tag === 'Err' ? result.error : ''
+    expect(reason).toContain('The agent returned an invalid conflict resolution result.')
+    expect(classifyFailure({ message: reason })).toEqual({ _tag: 'Permanent', kind: 'agent_result' })
+    expect(mayRetryFailure({ message: reason })).toBe(false)
+  })
+
+  it('keeps retrying a result the correction changed but did not fix', async () => {
+    const capture = { prompts: [] as string[] }
+    const provider = replies([{ outcome: 'nearly' }, { outcome: 'still wrong' }], capture)
+
+    const result = await runParsedAgentTurn(options(provider), input, new AbortController().signal)
+
+    expect(result._tag === 'Err' && mayRetryFailure({ message: result.error })).toBe(true)
   })
 
   it('never asks twice for a result that already fits', async () => {
@@ -169,13 +353,13 @@ describe('agent turn progress', () => {
     return { provider, now: () => new Date(nowMilliseconds) }
   }
 
-  function reportingInput(reported: AgentProgress[]) {
+  function reportingInput(reported: AgentPhase[]) {
     return {
       ...input,
       progress: {
-        current: { percent: 35, label: 'Git worktree ready' },
-        report: (progress: AgentProgress) => {
-          reported.push(progress)
+        current: agentPhase('WorktreeReady', 'Git worktree ready'),
+        report: (phase: AgentPhase) => {
+          reported.push(phase)
           return ok(undefined)
         },
         work: 'fix' as const,
@@ -184,7 +368,7 @@ describe('agent turn progress', () => {
   }
 
   it('restates one unchanged phase on a slow beat and keeps its start time', async () => {
-    const reported: AgentProgress[] = []
+    const reported: AgentPhase[] = []
     const { provider, now } = scriptedTurn([
       { afterMilliseconds: 0, event: { _tag: 'SessionStarted', sessionId: 'session-1' } as AgentEvent },
       {
@@ -212,13 +396,52 @@ describe('agent turn progress', () => {
     // The first edit advances the phase. The second is inside the beat, so it
     // stays quiet. The third restates the same phase, from the same start.
     expect(reported).toEqual([
-      { percent: 70, label: 'Editing files', since: '2026-08-16T00:00:01.000Z' },
-      { percent: 70, label: 'Editing files', since: '2026-08-16T00:00:01.000Z' },
+      { _tag: 'Editing', percent: 65, label: 'Editing files', since: '2026-08-16T00:00:01.000Z' },
+      { _tag: 'Editing', percent: 65, label: 'Editing files', since: '2026-08-16T00:00:01.000Z' },
+    ])
+  })
+
+  it('names the phase the agent goes back to, so a long turn never freezes its label', async () => {
+    const reported: AgentPhase[] = []
+    const { provider, now } = scriptedTurn([
+      { afterMilliseconds: 0, event: { _tag: 'SessionStarted', sessionId: 'session-1' } as AgentEvent },
+      { afterMilliseconds: 1_000, event: { _tag: 'CommandStarted', command: 'pnpm test' } as AgentEvent },
+      {
+        afterMilliseconds: 1_000,
+        event: { _tag: 'FileChanged', changes: [{ path: 'a.ts', kind: 'update' }] } as AgentEvent,
+      },
+      { afterMilliseconds: 1_000, event: { _tag: 'Message', text: '{"outcome":"resolved"}' } as AgentEvent },
+    ])
+
+    await runAgentTurn({ ...options(provider), now }, reportingInput(reported), new AbortController().signal)
+
+    // Editing ranks below the checks, so the rank holds while the label moves.
+    expect(reported.map((phase) => [phase.label, phase.percent])).toEqual([
+      ['Running tests and checks', 75],
+      ['Editing files', 75],
+    ])
+  })
+
+  it('reports the phase the agent named over one guessed from its commands', async () => {
+    const reported: AgentPhase[] = []
+    const { provider, now } = scriptedTurn([
+      { afterMilliseconds: 0, event: { _tag: 'SessionStarted', sessionId: 'session-1' } as AgentEvent },
+      {
+        afterMilliseconds: 1_000,
+        event: { _tag: 'Progress', percent: 40, text: 'disproving the retry path' } as AgentEvent,
+      },
+      { afterMilliseconds: 1_000, event: { _tag: 'Message', text: '{"outcome":"resolved"}' } as AgentEvent },
+    ])
+
+    await runAgentTurn({ ...options(provider), now }, reportingInput(reported), new AbortController().signal)
+
+    expect(reported).toEqual([
+      { _tag: 'Reported', percent: 55, label: 'disproving the retry path', since: '2026-08-16T00:00:01.000Z' },
     ])
   })
 
   it('says nothing extra while one phase stays inside the beat', async () => {
-    const reported: AgentProgress[] = []
+    const reported: AgentPhase[] = []
     const { provider, now } = scriptedTurn([
       { afterMilliseconds: 0, event: { _tag: 'SessionStarted', sessionId: 'session-1' } as AgentEvent },
       {
@@ -235,5 +458,25 @@ describe('agent turn progress', () => {
     await runAgentTurn({ ...options(provider), now }, reportingInput(reported), new AbortController().signal)
 
     expect(reported).toHaveLength(1)
+  })
+})
+
+describe('runRepairedAgentTurn', () => {
+  it('names the answer that still did not fit after one repair, with both turns counted', async () => {
+    const capture = { prompts: [] as string[] }
+    const provider = replies([{ outcome: 'nearly' }, { outcome: 'still wrong' }], capture)
+
+    const result = await runRepairedAgentTurn(options(provider), input, new AbortController().signal)
+
+    expect(result).toEqual(
+      ok({
+        _tag: 'Unparsed',
+        reason: 'The agent returned an invalid conflict resolution result.',
+        response: JSON.stringify({ outcome: 'still wrong' }),
+        sessionId: 'session-1',
+        usage: { _tag: 'Unavailable' },
+      }),
+    )
+    expect(capture.prompts).toHaveLength(2)
   })
 })

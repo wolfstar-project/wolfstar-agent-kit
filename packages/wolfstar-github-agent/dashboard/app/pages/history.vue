@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import type { DropdownMenuItem } from '@nuxt/ui'
 import type { HistoryRow, OutcomeFilter } from '../utils/history.ts'
-import { routineRunPresentation, taskNumber, taskStateDetail, taskSubjectUrl } from '../utils/dashboard.ts'
+import HistoryEvidenceSlideover from '../components/HistoryEvidenceSlideover.vue'
+import { routineRunPresentation, taskNumber, taskRowSummary, taskSubjectUrl } from '../utils/dashboard.ts'
 import {
   canRerunReview,
   historyRangeFromQuery,
@@ -11,14 +12,23 @@ import {
   historyRowWork,
   outcomeFilters,
 } from '../utils/history.ts'
-import HistoryEvidenceSlideover from './_HistoryEvidenceSlideover.vue'
 
 /**
  * What already happened, on what evidence. GitHub style list rows; every row
  * opens the Evidence slideover. Layout and the two local filters live here,
  * the rows are decided in `utils/history.ts`.
  */
-const { snapshot, loading, relativeTime, duration, rerunPending, rerunErrors, rerunReview, itemKey } = useDashboard()
+const {
+  snapshot,
+  controlsUnavailable,
+  loading,
+  relativeTime,
+  duration,
+  rerunPending,
+  rerunErrors,
+  rerunReview,
+  itemKey,
+} = useDashboard()
 const route = useRoute()
 
 const outcomeFilter = ref<OutcomeFilter>('all')
@@ -39,7 +49,9 @@ const slideoverOpen = computed({
 
 const emptyLine = computed(() => {
   if (allRows.value.length === 0) return 'Nothing has finished yet.'
-  return outcomeFilter.value === 'all' ? 'Nothing finished in the Stats range.' : 'Nothing matches the filter.'
+  return outcomeFilter.value === 'all' && range.value._tag === 'All'
+    ? 'Nothing has finished yet.'
+    : 'Nothing matches the filter.'
 })
 
 function rowName(row: HistoryRow): string {
@@ -50,6 +62,8 @@ function rowName(row: HistoryRow): string {
       return `${row.task.repository} number ${taskNumber(row.task)}`
     case 'Routine':
       return `${row.run.name} on ${row.run.repository}`
+    case 'TriageSkip':
+      return `${row.skip.repository} pull request ${row.skip.pullRequestNumber}`
   }
 }
 
@@ -60,6 +74,8 @@ function rowDuration(row: HistoryRow): string | undefined {
     case 'Routine':
       return duration(row.run.createdAt, row.run.updatedAt)
     case 'Task':
+      return undefined
+    case 'TriageSkip':
       return undefined
   }
 }
@@ -90,7 +106,7 @@ function menuItems(row: HistoryRow): DropdownMenuItem[][] {
     items.push({
       label: 'Rerun review',
       icon: 'i-octicon-sync-16',
-      disabled: rerunPending.value !== undefined,
+      disabled: rerunPending.value !== undefined || controlsUnavailable.value,
       onSelect: () => {
         void rerunReview(agent.repository, agent.pullRequestNumber, agent.revisionId)
       },
@@ -107,28 +123,37 @@ useHead({
 
 <template>
   <div class="flex flex-col gap-4">
-    <div class="flex flex-wrap items-center gap-x-6 gap-y-2">
-      <div class="min-w-0 flex-1 basis-48">
-        <ColumnHeading label="History" :count="rows.length" :level="1" />
-      </div>
-      <div class="flex flex-wrap items-center gap-1" role="group" aria-label="Filter by outcome">
-        <UButton
-          v-for="filter in outcomeFilters"
-          :key="filter.value"
-          size="xs"
-          color="neutral"
-          :variant="outcomeFilter === filter.value ? 'outline' : 'ghost'"
-          :aria-pressed="outcomeFilter === filter.value"
-          @click="outcomeFilter = filter.value"
-        >
-          {{ filter.label }}
-        </UButton>
-      </div>
-    </div>
+    <h1 class="sr-only">History</h1>
+    <UiSectionHeader title="History" class="mb-0">
+      <template #after-title>
+        <span class="font-mono text-sm font-normal text-muted">{{ rows.length }}</span>
+      </template>
+      <template #actions>
+        <div class="flex flex-wrap items-center gap-1" role="group" aria-label="Filter by outcome">
+          <UButton
+            v-for="filter in outcomeFilters"
+            :key="filter.value"
+            size="xs"
+            color="neutral"
+            :variant="outcomeFilter === filter.value ? 'outline' : 'ghost'"
+            :aria-pressed="outcomeFilter === filter.value"
+            @click="outcomeFilter = filter.value"
+          >
+            {{ filter.label }}
+          </UButton>
+        </div>
+      </template>
+    </UiSectionHeader>
 
     <div v-if="range._tag === 'Stats'" class="flex flex-wrap items-center justify-between gap-3 text-sm">
-      <span class="text-muted">Showing the Stats range.</span>
-      <UButton to="/history" size="xs" color="neutral" variant="outline" icon="i-octicon-x-16"> Clear </UButton>
+      <span v-if="range.repository || range.routine || range.work === 'routine_scan'" class="text-muted"
+        >Routine runs<span v-if="range.repository"> · {{ range.repository }}</span
+        ><span v-if="range.routine"> · {{ range.routine }}</span></span
+      >
+      <span v-else class="text-muted">Showing the Stats range.</span>
+      <UButton to="/history" size="xs" color="neutral" variant="outline" icon="i-octicon-x-16" class="min-h-11">
+        Clear
+      </UButton>
     </div>
 
     <div
@@ -155,13 +180,18 @@ useHead({
         <div
           class="pointer-events-none relative flex min-h-11 flex-wrap items-center gap-x-3 gap-y-1.5 px-2 py-2 [&_a]:pointer-events-auto [&_button]:pointer-events-auto"
         >
-          <StateBadge
-            :tone="historyRowBadge(row).tone"
-            :label="historyRowBadge(row).label"
-            :confidence="historyRowBadge(row).confidence"
-            :uppercase="historyRowBadge(row).uppercase"
-          />
-          <WorkChip :work="historyRowWork(row)" />
+          <!-- Fixed slots above sm, so the identity column starts on one line down the page. -->
+          <span class="flex shrink-0 sm:w-30">
+            <StateBadge
+              :tone="historyRowBadge(row).tone"
+              :label="historyRowBadge(row).label"
+              :confidence="historyRowBadge(row).confidence"
+              :uppercase="historyRowBadge(row).uppercase"
+            />
+          </span>
+          <span class="flex shrink-0 sm:w-34">
+            <WorkChip :work="historyRowWork(row)" />
+          </span>
 
           <div class="order-last w-full min-w-0 sm:order-none sm:w-auto sm:flex-1">
             <EntityIdentity
@@ -180,15 +210,25 @@ useHead({
                 target="_blank"
                 rel="noreferrer"
                 class="entity-link shrink-0 font-mono text-sm"
-                >{{ row.task.repository }}#{{ taskNumber(row.task) }}</a
+                ><RepositoryIdentity :repository="row.task.repository">
+                  #{{ taskNumber(row.task) }}</RepositoryIdentity
+                ></a
               >
-              <span v-if="taskStateDetail(row.task)" class="min-w-0 flex-1 truncate text-sm text-muted">{{
-                taskStateDetail(row.task)
+              <span v-if="taskRowSummary(row.task)" class="min-w-0 flex-1 truncate text-sm text-muted">{{
+                taskRowSummary(row.task)
               }}</span>
+            </p>
+            <p v-else-if="row._tag === 'TriageSkip'" class="flex min-w-0 flex-wrap items-baseline gap-x-2">
+              <a :href="row.skip.url" target="_blank" rel="noreferrer" class="entity-link shrink-0 font-mono text-sm"
+                ><RepositoryIdentity :repository="row.skip.repository">
+                  #{{ row.skip.pullRequestNumber }}</RepositoryIdentity
+                ></a
+              >
+              <span v-if="row.skip.title" class="min-w-0 flex-1 truncate text-sm text-muted">{{ row.skip.title }}</span>
             </p>
             <p v-else class="flex min-w-0 flex-wrap items-baseline gap-x-2">
               <span class="text-sm font-medium text-highlighted">{{ row.run.name }}</span>
-              <span class="font-mono text-sm text-dimmed">{{ row.run.repository }}</span>
+              <RepositoryIdentity :repository="row.run.repository" class="font-mono text-sm text-dimmed" />
               <span v-if="routineRunPresentation(row.run).detail" class="min-w-0 flex-1 truncate text-sm text-muted">{{
                 routineRunPresentation(row.run).detail
               }}</span>
@@ -219,9 +259,7 @@ useHead({
       </li>
     </ul>
 
-    <p v-else class="text-sm text-dimmed">
-      {{ emptyLine }}
-    </p>
+    <UiEmptyState v-else compact icon="clock" title="Nothing here" :description="emptyLine" />
 
     <HistoryEvidenceSlideover v-model:open="slideoverOpen" :row="selected" />
   </div>

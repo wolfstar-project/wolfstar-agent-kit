@@ -7,6 +7,7 @@ import type {
   GitHubPullRequestItem,
   RepositoryMapping,
 } from '../src/types.ts'
+import type { GitHubOwnershipEvidence } from '../src/worker-github-evidence.ts'
 import { CODEX_AGENT_PROFILE } from '../src/agent-profile.ts'
 
 /** One fixed Agent runtime, for a worker that never switches mid test. */
@@ -29,6 +30,7 @@ export function repositoryMapping(overrides: Partial<RepositoryMapping> = {}): R
     pullRequestReview: true,
     conflictResolution: true,
     takeOwnership: { _tag: 'Disabled' },
+    autoMerge: { _tag: 'Labelled' },
     ...overrides,
   }
 }
@@ -50,6 +52,24 @@ export function issueItem(overrides: Partial<GitHubIssueItem> = {}): GitHubIssue
     updatedAt: '2026-08-13T00:00:00.000Z',
     ...overrides,
   }
+}
+
+export function githubOwnershipEvidence(overrides: Partial<GitHubOwnershipEvidence> = {}): GitHubOwnershipEvidence {
+  return {
+    observedAt: '2026-11-01T07:00:00.000Z',
+    issues: { _tag: 'Available', entries: [], truncated: false },
+    pullRequests: { _tag: 'Available', entries: [], truncated: false },
+    ownership: {
+      _tag: 'Available',
+      issues: { _tag: 'Available', entries: [], truncated: false },
+      pullRequests: { _tag: 'Available', entries: [], truncated: false },
+    },
+    ...overrides,
+  }
+}
+
+export function githubOwnershipSource(evidence = githubOwnershipEvidence()) {
+  return { collectOwnership: async () => evidence }
 }
 
 export function pullRequestItem(overrides: Partial<GitHubPullRequestItem> = {}): GitHubPullRequestItem {
@@ -88,9 +108,17 @@ export function dashboardSnapshot(overrides: Partial<DashboardSnapshot> = {}): D
     mutationsEnabled: false,
     agentControl: { _tag: 'Running' },
     restartRequest: null,
+    serviceUpdate: {
+      _tag: 'Current',
+      deployedCommit: 'a'.repeat(40),
+      latestCommit: 'a'.repeat(40),
+      checkedAt: '2026-08-13T01:00:00.000Z',
+    },
     selectionMode: 'auto',
     openPullRequests: 0,
     maxOpenPullRequests: 8,
+    triageDecisions: { reviewRequired: 0, reviewSkipped: 0, couldNotDecide: 0 },
+    triageSkips: [],
     agentProfile: CODEX_AGENT_PROFILE,
     agentSelection: { _tag: 'FollowsConfiguration' },
     agentStart: { _tag: 'WritesDisabled' },
@@ -102,15 +130,18 @@ export function dashboardSnapshot(overrides: Partial<DashboardSnapshot> = {}): D
     },
     reasoningEfforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
     providerCapacities: [],
+    githubRateLimits: [],
     providerCircuits: [],
     agents: [],
     incidents: [],
+    repairRecoveryCandidates: [],
     queue: [],
     repositories: [],
     items: [],
     tasks: [],
     routines: [],
     routineRuns: [],
+    batches: [],
     ...overrides,
   }
 }

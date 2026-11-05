@@ -1,7 +1,7 @@
 ---
 name: pkg-conform
 description: 'Conform or scaffold TypeScript packages and Nuxt modules. Use for workspace catalogs, package config, CI, Oxlint, Oxfmt, Vitest, playgrounds, fixtures, or Nuxt module setup.'
-user_invocable: true
+license: MIT
 ---
 
 # Package Conform Skill
@@ -10,13 +10,8 @@ Conform a package to standardized architecture, or scaffold a new one.
 
 ## Worktree isolation
 
-Before any edit, follow the [worktree isolation contract](../../references/worktree-isolation.md). It provides the atomic live-agent claim used below.
-
-An existing worktree alone does not prove another agent is active.
-
-`wt` is the only worktree tool. Never run `git worktree add`, and never use a harness worktree option such as `EnterWorktree` or `isolation: "worktree"`. Those write to `.claude/worktrees/`, which is banned. `wt` places every worktree at `<parent>/<repo>.<branch-slug>`.
-
-Keep the primary checkout read only. Before mutation, run `wt list --format=json`. Reuse the task's worktree with `wt switch <branch>`, or create one with `wt switch --create <branch> --base <base>`. Read its absolute `path` from the JSON, then pass that path as `workdir` to every later command. Never share a mutation worktree between tasks.
+Before any edit, read and follow the [worktree isolation contract](../../references/worktree-isolation.md).
+Keep mutation in a task-owned `wt` worktree with a live claim. Keep the primary checkout read only.
 
 ## Usage
 
@@ -47,7 +42,7 @@ Determine project type from the **absolute path** of the working directory:
 
 If path doesn't match either pattern, fall back to heuristics: `private: true` + `nuxt` in deps -> Site, otherwise Package.
 
-**IMPORTANT:** The project type determines which rules apply. Do NOT apply Package-only rules (exports, obuild, test:attw, prepack, release) to Sites, and do NOT apply Site-only rules (nuxi scripts, generate, preview) to Packages.
+The project type selects the rule set. Package-only rules (exports, obuild, test:attw, prepack, release) never apply to Sites. Site-only rules (nuxi scripts, generate, preview) never apply to Packages.
 
 ---
 
@@ -60,7 +55,10 @@ If path doesn't match either pattern, fall back to heuristics: `private: true` +
 - **`pnpm install` after catalog changes** -- lockfile must be regenerated. If you edit `pnpm-workspace.yaml` catalogs, always run `pnpm install` before running any other commands.
 - **Nuxt module `dev:prepare` order** -- must run before `typecheck` or `test`. Missing this causes confusing "module not found" errors from auto-generated types.
 - **Site vs Package misdetection** -- path-based detection (`*/pkg/*` vs `*/sites/*`) can fail for unusual directory structures. Always verify the detected type before applying rules.
-- **Markdown-only CI**: Test, build, and deploy events ignore `**/*.md` by default.
+- **Markdown-only CI**: Test, build, and deploy workflows skip Markdown-only changes by default.
+  If the default branch requires checks, skip at the job level, never at the event.
+  An event filter starts no run, so a required check never reports and the pull request blocks.
+  If the branch requires no checks, `paths-ignore: ['**/*.md']` at the event is fine.
   An explicit `paths` list may include Markdown.
   GitHub forbids `paths` and `paths-ignore` on the same event.
 
@@ -84,6 +82,17 @@ Always prefer UnJS ecosystem packages over Node.js builtins:
 | `git clone` templates    | `giget`     | `import { downloadTemplate } from 'giget'`    |
 
 **Principles:** ESM-only, minimal deps, full TypeScript, universal (Node/browser/edge)
+
+---
+
+## Root docs
+
+Every project carries the same root documents and the same docs lifecycle. Read
+[root-docs.md](../../references/root-docs.md) before creating, moving, or
+renaming any Markdown at the root or under `docs/`.
+
+`AGENTS.md` is the only file an agent loads every turn, so it routes rather than
+explains. Scaffold it from [templates/AGENTS.md](templates/AGENTS.md).
 
 ---
 
@@ -156,6 +165,8 @@ See `references/` for detailed templates:
 - `references/nuxt-module-template.md` - full src/module.ts template
 - `references/nuxt-configs.md` - vitest, tsconfig, build.config, package.json for Nuxt
 - `references/nuxt-test-patterns.md` - playground, fixtures, e2e tests
+- `../../references/root-docs.md` - the root document set, docs lifecycle, and brief contract
+- `templates/AGENTS.md` - the router template
 
 ---
 
@@ -171,40 +182,42 @@ See `references/` for detailed templates:
 6. [ ] Oxlint and Oxfmt configs - `.oxlintrc.json` and `.oxfmtrc.json`
 7. [ ] `tsconfig.json` - Package: `module: preserve`, `moduleDetection: force`; Site: `extends .nuxt/tsconfig.json`
 8. [ ] Git hooks - `lint-staged` in devDeps, `pre-commit` runs `lint-staged`
+9. [ ] `AGENTS.md` - router shape, 30 to 80 lines. No `CLAUDE.md`, no `CONTEXT.md`. See `../../references/root-docs.md`
+10. [ ] Root Markdown - only the allowed set. Reference docs move to `docs/arch/`, open work to `docs/work/`
 
 ### Package-only (when in `*/pkg/*`)
 
-9. [ ] `vitest.config.ts` - coverage config, projects if unit + e2e
-10. [ ] `tsconfig.json` - add `types: ["node", "vitest/globals"]`
-11. [ ] `build.config.ts` - obuild with explicit entry points
-12. [ ] Package exports - ESM-only (`.d.mts` + `.mjs`), no CJS
-13. [ ] Package scripts - `obuild`, `dev:prepare`, `test:attw`, `lint:fix`, `prepack`, `release`
-14. [ ] `.github/workflows/release.yml` - action versions, `bumpp --output=CHANGELOG.md`
+11. [ ] `vitest.config.ts` - coverage config, projects if unit + e2e
+12. [ ] `tsconfig.json` - add `types: ["node", "vitest/globals"]`
+13. [ ] `build.config.ts` - obuild with explicit entry points
+14. [ ] Package exports - ESM-only (`.d.mts` + `.mjs`), no CJS
+15. [ ] Package scripts - `obuild`, `dev:prepare`, `test:attw`, `lint:fix`, `prepack`, `release`
+16. [ ] `.github/workflows/release.yml` - action versions, `bumpp --output=CHANGELOG.md`
 
 ### Site-only (when in `*/sites/*` or `*/site/*`)
 
-9. [ ] `package.json` - `private: true`, `engines.node` set to latest stable even-numbered Node (e.g. `>=22.0.0`, `>=24.0.0`), no `exports`/`main`/`types`/`files`
-10. [ ] Scripts - `dev` (nuxi dev), `build` (nuxi prepare && nuxi build), `postinstall` (nuxt prepare), `lint`, `lint:fix`, `typecheck` (nuxt typecheck)
-11. [ ] `pnpm.overrides` - `vite` set to `^8.0.0`
-12. [ ] `nuxt.config.ts` - `future.compatibilityVersion: 5`, `compatibilityDate`, standard module stack
-13. [ ] `tsconfig.json` - just `{ "extends": "./.nuxt/tsconfig.json" }`
-14. [ ] `.oxlintrc.json` and `.oxfmtrc.json` - site build directories ignored
-15. [ ] `.npmrc` - `shamefully-hoist=true`
-16. [ ] `.gitignore` - includes `.nuxt/`, `.output/`, `.data/`, `.wrangler/`, `wrangler.toml`
-17. [ ] `.editorconfig` - 2-space indent, LF, UTF-8, trim trailing whitespace (except `.md`)
-18. [ ] `content.config.ts` - Zod schemas for content collections (if using `@nuxt/content`)
-19. [ ] `app/` directory - Nuxt 4 structure (`app.vue`, `pages/`, `layouts/`, `components/`, `composables/`)
-20. [ ] `.github/workflows/ci.yml` - calls the shared gate and ignores Markdown-only changes. See `references/site-github-actions.md`.
+11. [ ] `package.json` - `private: true`, `engines.node` set to latest stable even-numbered Node (e.g. `>=22.0.0`, `>=24.0.0`), no `exports`/`main`/`types`/`files`
+12. [ ] Scripts - `dev` (nuxi dev), `build` (nuxi prepare && nuxi build), `postinstall` (nuxt prepare), `lint`, `lint:fix`, `typecheck` (nuxt typecheck)
+13. [ ] `pnpm.overrides` - `vite` set to `^8.0.0`
+14. [ ] `nuxt.config.ts` - `future.compatibilityVersion: 5`, `compatibilityDate`, standard module stack
+15. [ ] `tsconfig.json` - just `{ "extends": "./.nuxt/tsconfig.json" }`
+16. [ ] `.oxlintrc.json` and `.oxfmtrc.json` - site build directories ignored
+17. [ ] `.npmrc` - `shamefully-hoist=true`
+18. [ ] `.gitignore` - includes `.nuxt/`, `.output/`, `.data/`, `.wrangler/`, `wrangler.toml`
+19. [ ] `.editorconfig` - 2-space indent, LF, UTF-8, trim trailing whitespace (except `.md`)
+20. [ ] `content.config.ts` - Zod schemas for content collections (if using `@nuxt/content`)
+21. [ ] `app/` directory - Nuxt 4 structure (`app.vue`, `pages/`, `layouts/`, `components/`, `composables/`)
+22. [ ] `.github/workflows/ci.yml` - calls the shared gate and skips Markdown-only changes in the shape its required checks allow. See `references/site-github-actions.md`.
 
 ### Additional Nuxt Module Checklist
 
 When `@nuxt/module-builder` detected, also check (extends Package checklist):
 
-**Structure:** 15. [ ] `src/module.ts` - main module entry exists 16. [ ] `src/runtime/app/` - client/SSR code directory 17. [ ] `src/runtime/server/` - Nitro server code directory 18. [ ] `src/types.ts` - module options types 19. [ ] `playground/` - nuxt.config.ts, app.vue, pages/ 20. [ ] `test/fixtures/basic/` - nuxt.config.ts
+**Structure:** 17. [ ] `src/module.ts` - main module entry exists 18. [ ] `src/runtime/app/` - client/SSR code directory 19. [ ] `src/runtime/server/` - Nitro server code directory 20. [ ] `src/types.ts` - module options types 21. [ ] `playground/` - nuxt.config.ts, app.vue, pages/ 22. [ ] `test/fixtures/basic/` - nuxt.config.ts
 
-**Config:** 21. [ ] `pnpm-workspace.yaml` - add `nuxt:` catalog 22. [ ] `package.json` - nuxt module exports, peerDependencies 23. [ ] `tsconfig.json` - extends `.nuxt/tsconfig.json` 24. [ ] `vitest.config.ts` - use `defineVitestProject` for e2e 25. [ ] `build.config.ts` - nuxt externals including `#imports` 26. [ ] `.oxlintrc.json` and `.oxfmtrc.json` - ignore fixtures/playground 27. [ ] `.gitignore` - nuxt build dirs
+**Config:** 23. [ ] `pnpm-workspace.yaml` - add `nuxt:` catalog 24. [ ] `package.json` - nuxt module exports, peerDependencies 25. [ ] `tsconfig.json` - extends `.nuxt/tsconfig.json` 26. [ ] `vitest.config.ts` - use `defineVitestProject` for e2e 27. [ ] `build.config.ts` - nuxt externals including `#imports` 28. [ ] `.oxlintrc.json` and `.oxfmtrc.json` - ignore fixtures/playground 29. [ ] `.gitignore` - nuxt build dirs
 
-**Scripts:** 28. [ ] `typecheck` - uses `nuxt typecheck` (not `tsc`) 29. [ ] `dev:prepare` - prepares module + playground 30. [ ] `prepare:fixtures` - prepares test fixtures 31. [ ] `.github/workflows/test.yml` - includes the prepare step and Markdown path filtering
+**Scripts:** 30. [ ] `typecheck` - uses `nuxt typecheck` (not `tsc`) 31. [ ] `dev:prepare` - prepares module + playground 32. [ ] `prepare:fixtures` - prepares test fixtures 33. [ ] `.github/workflows/test.yml` - includes the prepare step and Markdown path filtering
 
 ## Sync Process
 

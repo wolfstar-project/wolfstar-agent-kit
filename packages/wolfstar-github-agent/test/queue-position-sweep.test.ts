@@ -15,6 +15,7 @@ function queuedRepair(overrides: Partial<QueuedReviewStatus> = {}): QueuedReview
     queue: { _tag: 'Waiting', position: 3, total: 7 },
     verdict: { _tag: 'Answered' },
     history: { _tag: 'FirstReview' },
+    attempt: { _tag: 'FirstAttempt' },
     commentId: 42,
     publishedBody: '### 🤖 REVIEWING · Repair queued',
     ...overrides,
@@ -29,6 +30,7 @@ function snapshot(overrides: Parameters<typeof pullRequestItem>[0] = {}) {
     comments: [],
     priorAutomatedReview: { _tag: 'None' as const },
     pullRequest: pullRequestItem({ headSha: 'abc123', ...overrides }),
+    findingDiscussions: [],
     requiredChecks: { _tag: 'None' as const },
     reviews: [],
   })
@@ -93,6 +95,54 @@ describe('the queued review history line', () => {
 
     expect(body).toContain('A Repair pushed this commit, so this Review answers the Repair.')
     expect(body).toContain('Next: Review starts when an Agent is free.')
+  })
+})
+
+describe('a comment for a failed attempt', () => {
+  const reason = 'The opencode session failed: Unexpected server error.'
+
+  it('says the attempt stopped and when it restarts', () => {
+    const body = queuePositionComment(
+      queuedRepair({
+        taskKind: 'adversarial_review',
+        attempt: {
+          _tag: 'Retrying',
+          reason,
+          retry: { spent: 3, limit: 12 },
+          nextAttemptAt: '2026-10-21T02:37:00.000Z',
+        },
+      }),
+    )
+
+    expect(body).toContain('### 🤖 RETRYING')
+    expect(body).toContain(`The last attempt stopped: ${reason} Retry 3 of 12.`)
+    expect(body).toContain('Next: Review restarts after 02:37 UTC.')
+  })
+
+  it('says a person has to act once nothing will retry', () => {
+    const body = queuePositionComment(
+      queuedRepair({
+        taskKind: 'adversarial_review',
+        attempt: { _tag: 'Stuck', reason },
+      }),
+    )
+
+    expect(body).toContain('### 🤖 STUCK')
+    expect(body).toContain(`The Review stopped and will not run again on its own: ${reason}`)
+    expect(body).toContain('Next: Fix the cause, then push a commit to start a new Review.')
+  })
+
+  it('keeps a long reason to one readable line', () => {
+    const body = queuePositionComment(
+      queuedRepair({
+        attempt: { _tag: 'Retrying', reason: `line one\n${'x'.repeat(400)}`, retry: null, nextAttemptAt: null },
+      }),
+    )
+    const line = body.split('\n').find((entry) => entry.startsWith('The last attempt stopped:'))
+
+    expect(line).toBeDefined()
+    expect(line!.length).toBeLessThan(320)
+    expect(body).toContain('Next: Repair restarts when an Agent is free.')
   })
 })
 
@@ -363,6 +413,42 @@ describe('publishQueuePositions', () => {
     ])
     expect(recorded).toBe(0)
     expect(retired).toEqual([42])
+  })
+
+  it('retires the publication once the comment belongs to another actor', async () => {
+    const retired: Array<{ commentId: number; reason: string }> = []
+    let recorded = 0
+    const reason = 'The stored automated review comment belongs to another GitHub actor.' as const
+    const results = await publishQueuePositions(
+      {
+        github: {
+          clearAgentLabels: () => Promise.resolve(ok(undefined)),
+          getPullRequestReviewSnapshot: () => Promise.resolve(snapshot()),
+          editReviewStatus: () => Promise.resolve(ok({ _tag: 'Foreign', reason })),
+        },
+        now: () => new Date('2026-08-15T04:00:00.000Z'),
+        repositories: [repositoryMapping()],
+        store: {
+          recordDeletedReviewComment: (input) => {
+            retired.push({ commentId: input.commentId, reason: input.reason })
+            return true
+          },
+          listQueuedReviewStatuses: () => [queuedRepair()],
+          isQueuedReviewStatus: () => true,
+          recordQueuedReviewStatus: () => {
+            recorded += 1
+            return true
+          },
+        },
+      },
+      new AbortController().signal,
+    )
+
+    expect(results).toEqual([
+      ok({ _tag: 'Retired', repository: 'wolfstar-project/example', pullRequestNumber: 24, reason }),
+    ])
+    expect(recorded).toBe(0)
+    expect(retired).toEqual([{ commentId: 42, reason }])
   })
   it('leaves the comment alone once the head commit moves', async () => {
     let writes = 0

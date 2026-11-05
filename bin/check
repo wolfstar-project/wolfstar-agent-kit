@@ -51,28 +51,38 @@ else
   skipped+=("oxfmt")
 fi
 
-# typecheck — prefer nuxi > vue-tsc > tsc > pnpm script
+# Use the repository script before choosing a compiler.
 if should_skip typecheck; then
   skipped+=("typecheck")
+elif has_script typecheck; then
+  run_check typecheck pnpm typecheck
 elif { [ -f "nuxt.config.ts" ] || [ -f "nuxt.config.js" ]; } && [ -f "node_modules/.bin/nuxi" ]; then
   run_check typecheck ./node_modules/.bin/nuxi typecheck
 elif [ -f "node_modules/.bin/vue-tsc" ]; then
   run_check typecheck ./node_modules/.bin/vue-tsc --noEmit
 elif [ -f "node_modules/.bin/tsc" ] && { [ -f "tsconfig.json" ] || [ -f "tsconfig.app.json" ]; }; then
   run_check typecheck ./node_modules/.bin/tsc --noEmit
-elif has_script typecheck; then
-  run_check typecheck pnpm typecheck
 else
   skipped+=("typecheck")
 fi
 
-# test — prefer vitest direct > pnpm script
+# Use the repository script before choosing a test runner.
+# Running the binary from a workspace root with no configuration of its own
+# globs every package's tests and applies none of their settings. One package
+# here raises the five second timeout because its tests drive real git and wt
+# binaries, and running it this way silently put that back to five seconds, so
+# the gate failed under load on tests that pass in CI.
+has_vitest_config() {
+  compgen -G "vitest.config.*" >/dev/null || compgen -G "vitest.workspace.*" >/dev/null
+}
 if should_skip test; then
   skipped+=("test")
+elif has_script test; then
+  run_check test env CI=true pnpm test
+elif [ -f "node_modules/.bin/vitest" ] && has_vitest_config; then
+  run_check test ./node_modules/.bin/vitest run
 elif [ -f "node_modules/.bin/vitest" ]; then
   run_check test ./node_modules/.bin/vitest run
-elif has_script test; then
-  run_check test pnpm test
 else
   skipped+=("test")
 fi

@@ -40,6 +40,7 @@ function legacySource(initialBody = oldBody) {
     }) as unknown as Octokit
   const source = createGitHubAgentSource({
     actorLogin: () => 'wolfstar-github-agent[bot]',
+    ownAppId: 98114,
     createClient: (token) => (token === 'user-token' ? client(userUpdate) : client(appUpdate)),
     legacyActor: {
       login: 'wolfstar-project',
@@ -91,6 +92,32 @@ describe('review status actor handoff', () => {
     expect(appUpdate).not.toHaveBeenCalled()
   })
 
+  it('preserves a checked control until cancellation closes the comment', async () => {
+    const unchecked = `${oldBody}\n\n- [ ] Stop Review and any follow-up repair`
+    const checked = unchecked.replace('[ ]', '[x]')
+    const { source, userUpdate } = legacySource(checked)
+    const pending = await source.upsertReviewStatus(
+      repositoryMapping(),
+      24,
+      null,
+      newBody,
+      false,
+      new AbortController().signal,
+    )
+    expect(pending).toEqual({ _tag: 'Err', error: 'Review cancellation is pending.' })
+    expect(userUpdate).not.toHaveBeenCalled()
+    const stopped = await source.editReviewStatus(
+      repositoryMapping(),
+      24,
+      5,
+      unchecked,
+      newBody,
+      new AbortController().signal,
+    )
+    expect(stopped._tag === 'Ok' && stopped.value._tag).toBe('Edited')
+    expect(userUpdate).toHaveBeenCalledOnce()
+  })
+
   it('refuses an unmarked comment from the original user actor', async () => {
     const { appUpdate, source, userUpdate } = legacySource('Human review comment')
 
@@ -103,10 +130,9 @@ describe('review status actor handoff', () => {
       new AbortController().signal,
     )
 
-    expect(result).toEqual({
-      _tag: 'Err',
-      error: 'The stored automated review comment belongs to another GitHub actor.',
-    })
+    expect(result).toEqual(
+      ok({ _tag: 'Foreign', reason: 'The stored automated review comment belongs to another GitHub actor.' }),
+    )
     expect(userUpdate).not.toHaveBeenCalled()
     expect(appUpdate).not.toHaveBeenCalled()
   })

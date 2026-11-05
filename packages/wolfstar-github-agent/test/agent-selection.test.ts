@@ -2,7 +2,8 @@ import type { AgentSelection } from '../src/agent-profile.ts'
 import type { AgentProvider, AgentTurnRequest } from '../src/agent-provider.ts'
 import { describe, expect, it } from 'vitest'
 import { createAgentRuntimeSource, parseAgentSelection, resolveAgentProfile } from '../src/agent-profile.ts'
-import { runAgentTurn } from '../src/agent-turn.ts'
+import { runAgentTurn, runRepairedAgentTurn } from '../src/agent-turn.ts'
+import { err, ok } from '../src/result.ts'
 import { openJournalStore } from '../src/store.ts'
 import { stubProvider, turnEvents } from './fixtures.ts'
 
@@ -118,15 +119,69 @@ describe('agent profile resolution', () => {
   it('keeps each role default when the selection names only a provider', () => {
     const profile = resolveAgentProfile({ provider: 'codex', model: null, reasoningEffort: null }, 3)
 
-    expect(profile.roles.adversarial_review).toEqual({ model: 'gpt-5.6-sol', reasoningEffort: 'high' })
-    expect(profile.roles.issue_work).toEqual({ model: 'gpt-5.6-terra', reasoningEffort: 'medium' })
+    expect(profile.roles.adversarial_review).toEqual({ model: 'gpt-6.1-sol', reasoningEffort: 'high' })
+    for (const [role, settings] of Object.entries(profile.roles)) {
+      expect(settings.model).toBe('gpt-6.1-sol')
+      expect(settings.reasoningEffort).toBe(role === 'adversarial_review' ? 'high' : 'medium')
+    }
   })
 
   it('applies one model and one reasoning effort to every role', () => {
     const profile = resolveAgentProfile({ provider: 'codex', model: 'gpt-5.6-luna', reasoningEffort: 'low' }, 3)
 
     for (const role of Object.values(profile.roles))
-      expect(role).toEqual({ model: 'gpt-5.6-luna', reasoningEffort: 'low' })
+      expect(role).toEqual({ model: 'gpt-5.6-luna', reasoningEffort: 'low', reasoningEffortExplicit: true })
+  })
+
+  it('replaces one role default with the configured Reasoning effort and keeps the others', () => {
+    const profile = resolveAgentProfile({ provider: 'opencode', model: null, reasoningEffort: null }, 3, {
+      opencode: { review_fix: 'medium', issue_triage: 'low' },
+    })
+
+    expect(profile.roles.review_fix).toEqual({
+      model: 'zai-coding-plan/glm-5.3-flash',
+      reasoningEffort: 'medium',
+      reasoningEffortExplicit: true,
+    })
+    expect(profile.roles.issue_triage).toEqual({
+      model: 'zai-coding-plan/glm-5.3-flash',
+      reasoningEffort: 'low',
+      reasoningEffortExplicit: true,
+    })
+    expect(profile.roles.adversarial_review).toEqual({
+      model: 'zai-coding-plan/glm-5.3-flash',
+      reasoningEffort: 'high',
+    })
+  })
+
+  it('applies the configured Reasoning effort only to its own Agent provider', () => {
+    const profile = resolveAgentProfile({ provider: 'codex', model: null, reasoningEffort: null }, 3, {
+      opencode: { review_fix: 'low' },
+    })
+
+    expect(profile.roles.review_fix).toEqual({ model: 'gpt-6.1-sol', reasoningEffort: 'medium' })
+  })
+
+  it('lets a pinned Reasoning effort beat the configured override', () => {
+    const profile = resolveAgentProfile({ provider: 'opencode', model: null, reasoningEffort: 'xhigh' }, 3, {
+      opencode: { review_fix: 'medium' },
+    })
+
+    expect(profile.roles.review_fix.reasoningEffort).toBe('xhigh')
+  })
+
+  it('answers with the configured override for a pinned selection that names no Reasoning effort', () => {
+    const profile = resolveAgentProfile(
+      { provider: 'opencode', model: 'zai-coding-plan/glm-5.3', reasoningEffort: null },
+      3,
+      { opencode: { review_fix: 'medium' } },
+    )
+
+    expect(profile.roles.review_fix).toEqual({
+      model: 'zai-coding-plan/glm-5.3',
+      reasoningEffort: 'medium',
+      reasoningEffortExplicit: true,
+    })
   })
 
   it('takes agent capacity from the caller, because the service fixes it at start', () => {
@@ -138,6 +193,65 @@ describe('agent profile resolution', () => {
 })
 
 describe('agent runtime source', () => {
+  it.each(['codex', 'opencode'] as const)(
+    'scopes %s Review effort by repository and preserves global and pinned settings',
+    async (provider) => {
+      const capture = { requests: [] as AgentTurnRequest[] }
+      let selection: AgentSelection = { _tag: 'Automatic', order: [provider] }
+      const runtime = createAgentRuntimeSource({
+        configuredProvider: provider,
+        maximumActiveAgents: 6,
+        providers: {
+          claude: stubProvider(turnEvents({ outcome: 'resolved' }), capture, 'claude'),
+          codex: stubProvider(turnEvents({ outcome: 'resolved' }), capture),
+          opencode: stubProvider(turnEvents({ outcome: 'resolved' }), capture, 'opencode'),
+        },
+        roleReasoningEfforts: { [provider]: { review_fix: 'low' } },
+        repositoryReasoningEfforts: new Map([
+          ['wolfstar-project/melbjs-clone', { [provider]: { adversarial_review: 'medium' as const } }],
+        ]),
+        selection: () => selection,
+      })
+      const options = {
+        now: () => new Date('2026-09-09T01:00:00.000Z'),
+        runtime,
+        store: { getWorkerSession: () => null, saveWorkerSession: () => undefined },
+      }
+      const input = {
+        number: 24,
+        prompt: 'Review this pull request.',
+        repository: 'wolfstar-project/melbjs-clone',
+        role: 'adversarial_review' as const,
+        schema: { type: 'object' },
+        taskId: 'task-1',
+        workspace: '/tmp/worktree',
+      }
+      const signal = new AbortController().signal
+      await runAgentTurn(options, input, signal)
+      await runAgentTurn(options, { ...input, repository: 'wolfstar-project/another-repository' }, signal)
+      await runAgentTurn(options, { ...input, role: 'review_fix' }, signal)
+
+      selection = { _tag: 'Pinned', provider, model: null, reasoningEffort: 'xhigh' }
+      await runAgentTurn(options, input, signal)
+      expect(capture.requests.map((request) => request.reasoningEffort)).toEqual(['medium', 'high', 'low', 'xhigh'])
+
+      selection = { _tag: 'FollowsConfiguration' }
+      let parses = 0
+      await runRepairedAgentTurn(
+        {
+          ...options,
+          parse: () => {
+            selection = { _tag: 'Pinned', provider, model: null, reasoningEffort: 'xhigh' }
+            return ++parses === 1 ? err('Invalid result.') : ok('resolved')
+          },
+        },
+        input,
+        signal,
+      )
+      expect(capture.requests.slice(-2).map((request) => request.reasoningEffort)).toEqual(['medium', 'medium'])
+    },
+  )
+
   it('answers with the configured provider until the selection pins one', () => {
     let selection: AgentSelection = { _tag: 'FollowsConfiguration' }
     const runtime = createAgentRuntimeSource({
@@ -152,7 +266,7 @@ describe('agent runtime source', () => {
     const after = runtime()
 
     expect(before.provider).toBe(codexProvider)
-    expect(before.profile.roles.issue_triage.model).toBe('gpt-5.6-terra')
+    expect(before.profile.roles.issue_triage.model).toBe('gpt-6.1-sol')
     expect(after.provider).toBe(opencodeProvider)
     expect(after.profile.roles.issue_triage.model).toBe('zai-coding-plan/glm-5.3-flash')
   })
@@ -199,7 +313,7 @@ describe('switching the Agent selection at runtime', () => {
     }
 
     expect(codex.requests.map((request) => [request.model, request.reasoningEffort])).toEqual([
-      ['gpt-5.6-terra', 'medium'],
+      ['gpt-6.1-sol', 'medium'],
     ])
     expect(opencode.requests.map((request) => [request.model, request.reasoningEffort])).toEqual([
       ['opencode-go/deepseek-v4-pro', 'low'],

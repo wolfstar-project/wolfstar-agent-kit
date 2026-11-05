@@ -1,10 +1,9 @@
 ---
 name: nuxt-frontend-design
 description: 'Build or polish Nuxt UI v4+ pages and design systems. Use for landing pages, dashboards, tokens, motion, or generic-looking UX.'
-user_invocable: true
 argument-hint: '[component/page/area]'
-model: opus
 effort: max
+license: MIT
 ---
 
 # Nuxt Frontend Design
@@ -13,38 +12,13 @@ Full lifecycle frontend skill: setup, build, polish. Detects the right phase fro
 
 ## Worktree isolation
 
-Before any edit, follow the [worktree isolation contract](../../references/worktree-isolation.md). It provides the atomic live-agent claim used below.
-
-An existing worktree alone does not prove another agent is active.
-
-`wt` is the only worktree tool. Never run `git worktree add`, and never use a harness worktree option such as `EnterWorktree` or `isolation: "worktree"`. Those write to `.claude/worktrees/`, which is banned. `wt` places every worktree at `<parent>/<repo>.<branch-slug>`.
-
-Keep the primary checkout read only. Before mutation, run `wt list --format=json`. Reuse the task's worktree with `wt switch <branch>`, or create one with `wt switch --create <branch> --base <base>`. Read its absolute `path` from the JSON, then pass that path as `workdir` to every later command. Never share a mutation worktree between tasks.
+Before any edit, follow the [worktree isolation contract](../../references/worktree-isolation.md).
 
 Job artifacts, contract format, dev server, checkpointing, and the handoff schema live in [references/workflow.md](references/workflow.md). Read it before Phase 2 or Phase 3.
 
-## Craft Principles
-
-These justify the specificity in the rest of the skill. Hold them while working; cite them when the user questions a rule.
-
-- **Taste is trained, not innate.** Good defaults come from reverse-engineering interfaces that feel right, not from invention. Before building a pattern, recall the best version of it you have seen and borrow the invariants (timing, origin, easing, rhythm). Generic output is a sign you skipped this step.
-- **Unseen details compound.** No single user consciously notices that a popover scales from its trigger, that a tooltip skips its delay on the second hover, or that a button releases faster than it presses. In aggregate these decisions separate "feels designed" from "feels assembled".
-- **Beauty is leverage.** When every product works, the one that feels best wins the user. Polish is the only thing still up for grabs once the feature set is commoditised.
-
 ## Project State
 
-!`if [ -f nuxt.config.ts ]; then echo "IS_NUXT=true"; else echo "IS_NUXT=false"; fi`
-!`bash -c 'F=""; if [ -f app.config.ts ]; then F="app.config.ts"; fi; if [ -f app/app.config.ts ]; then F="app/app.config.ts"; fi; if [ -n "$F" ] && grep -q "colors:" "$F" 2>/dev/null; then echo "HAS_COLORS=true"; else echo "HAS_COLORS=false"; fi'`
-!`bash -c 'for f in app/assets/css/main.css app/css/main.css app/css/global.css app/assets/css/global.css; do if [ -f "$f" ] && grep -q "@theme" "$f" 2>/dev/null; then echo "HAS_THEME=true"; exit 0; fi; done; echo "HAS_THEME=false"'`
-!`if [ -f DESIGN.md ]; then echo "HAS_GUIDELINES=true"; else echo "HAS_GUIDELINES=false"; fi`
-!`bash -c 'OUT=$(ls -t .claude/context/jobs/ 2>/dev/null | head -10); if [ -n "$OUT" ]; then echo "$OUT"; else echo "NO_JOBS"; fi'`
-!`bash -c 'JOB=$(ls -t .claude/context/jobs/ 2>/dev/null | head -1); if [ -n "$JOB" ]; then echo "LATEST_JOB=$JOB"; if [ -f ".claude/context/jobs/$JOB/build-handoff.json" ]; then echo "PRIOR_BUILD=true"; jq -r "\"PRIOR_BUILD_DATE=\" + (.created // \"unknown\")" ".claude/context/jobs/$JOB/build-handoff.json" 2>/dev/null; else echo "PRIOR_BUILD=false"; fi; else echo "PRIOR_BUILD=false"; fi'`
-!`bash -c 'JOB=$(ls -t .claude/context/jobs/ 2>/dev/null | head -1); if [ -n "$JOB" ] && [ -f ".claude/context/jobs/$JOB/review-report.md" ]; then echo "PRIOR_REVIEW=true"; grep -m1 "^verdict:" ".claude/context/jobs/$JOB/review-report.md" 2>/dev/null; else echo "PRIOR_REVIEW=false"; fi'`
-!`bash -c 'JOB=$(ls -t .claude/context/jobs/ 2>/dev/null | head -1); if [ -n "$JOB" ] && [ -f ".claude/context/jobs/$JOB/build-progress.md" ]; then printf "PAGES_BUILT="; grep -c "^## " ".claude/context/jobs/$JOB/build-progress.md" 2>/dev/null; else echo "PAGES_BUILT=0"; fi'`
-!`if command -v dev-browser >/dev/null 2>&1; then echo "DEV_BROWSER=true"; else echo "DEV_BROWSER=false"; fi`
-!`bash -c 'OUT=$(find app/pages -name "*.vue" 2>/dev/null | head -10); if [ -n "$OUT" ]; then echo "$OUT"; else echo "NO_PAGES"; fi'`
-!`bash -c 'OUT=$(ls "${CLAUDE_SKILL_DIR}/references/themes/" 2>/dev/null | sed "s/.md$//"); if [ -n "$OUT" ]; then echo "$OUT"; else echo "NO_THEMES"; fi'`
-!`bash -c 'F=""; if [ -f app.config.ts ]; then F="app.config.ts"; fi; if [ -f app/app.config.ts ]; then F="app/app.config.ts"; fi; if [ -n "$F" ] && grep -q "colors:" "$F" 2>/dev/null; then N=$(grep -E "neutral:" "$F" 2>/dev/null | head -1 | sed "s/.*neutral:[[:space:]]*['"'"'\"]//" | sed "s/['"'"'\"].*//" ); if [ -n "$N" ]; then echo "$N"; else echo "NO_NEUTRAL"; fi; else echo "NO_NEUTRAL"; fi'`
+!`bash "${CLAUDE_SKILL_DIR}/scripts/project-state.sh"`
 
 ## Phase Detection
 
@@ -66,7 +40,7 @@ IS_NUXT=false: this skill needs a Nuxt project (`nuxt.config.ts`). Say so and st
 
 Phase 2 depends on a complete design system. If any of the three indicators is missing, run Phase 1 first and tell the user you're doing so.
 
-Phase 1 consumes a lot of context. When Phase 1 completes in the current conversation, prefer emitting the handoff and telling the user: "Design system ready. Start a new conversation and run `/nuxt-frontend-design {page}` to build with fresh context." Continue in the same conversation only if the remaining build is small and context is still clean.
+After Phase 1, emit the handoff and continue into Phase 2 when pages were asked for. Offer a fresh conversation with `/nuxt-frontend-design {page}` only after repair passes or for multi-page builds.
 
 ## Content & Asset Rules
 
@@ -74,11 +48,32 @@ Apply across Phase 2 and Phase 3. Review treats violations as hard rejects.
 
 ### Every Element Earns Its Place
 
-One thousand no's for every yes. Do not pad designs with placeholder sections, dummy stats, filler copy, or decorative content to fill space. If a section feels empty, solve it with layout, composition, or scale, not invented content.
+Each visible element does one job:
 
-Ask before adding material. If another section, page, stat block, or copy block would strengthen the design, raise it with the user rather than adding content the contract did not name.
+- **Inform**: data the reader acts on or decides with.
+- **Teach**: something the reader does not know yet and needs now.
+- **Orient**: navigation, wayfinding, current location.
+- **Brand**: an element the site's `DESIGN.md` registers as a brand asset.
 
-Watch for "data slop": rows of stat counters, icon grids, logo bars, testimonial strips, feature bullets added reflexively rather than because the content demanded them.
+If an element has no job, delete it. Noise is any element that fails this test.
+
+**Show, don't tell.** If a sentence describes what the UI does, show the UI doing it with a real component, real data, or a working demo. This applies to dashboards and empty states too.
+
+**No text decoration.** These fail the test unless `DESIGN.md` registers them as brand:
+
+- Eyebrows: a small label above a heading.
+- Subtitles or taglines that restate the heading.
+- Labels that restate the value ("Status: Active" becomes "Active").
+- Counts or facts that do not vary ("Watching 3 of 3 sites"). For table columns, see Hierarchy in [craft-rules.md](references/craft-rules.md).
+- Decorative icons beside headings, cards, or list items. A per-metric icon that encodes its data, a trend direction or a status, informs. The same constant icon on every card carries no data and fails.
+- Section numbers where the order means nothing.
+- Metadata lines joined with "·" that nobody acts on.
+
+If a section reads flat after removal, fix it with separation, scale, or layout. Do not add the decoration back. Sanctioned replacements: a data line below the heading, a hairline with a directional action, numbering where order is real, emphasis on one lead item.
+
+**Start with less.** Build the first version with the fewest elements. Each addition names its job. Never pad with placeholder sections, dummy stats, filler copy, icon grids, or logo bars. Ask before you add content the contract did not name.
+
+**Subtraction pass.** Before handoff, list each visible element with its job. Delete the ones with none. Show before and after screenshots.
 
 ### AI Slop Ban List
 
@@ -90,7 +85,7 @@ Hard rejections unless the user explicitly asked for them:
 - Emoji in UI copy unless the brand system registers emoji as a token
 - Generic stat blocks ("10M+ users, 99.9% uptime, 24/7 support")
 - Overused sans stacks: Inter, Roboto, Open Sans, Lato, Montserrat, Arial, any bare `system-ui` / `sans-serif` fallback as the only font
-- SaaS-landing cliché serifs (Fraunces, Playfair, DM Serif) used _without commitment_, i.e. paired with a generic sans for body copy as decoration only. A theme that genuinely commits to an editorial, paper-craft, or literary aesthetic (kinetic-paper, flow) is right to use an editorial serif. The ban targets "add a serif heading for personality" tokenism.
+- SaaS-landing cliché serifs (Fraunces, Playfair, DM Serif) used _without commitment_, i.e. paired with a generic sans for body copy as decoration only. A theme that genuinely commits to an editorial, paper-craft, or literary aesthetic (kinetic-paper, flow, monograph) is right to use an editorial serif. The ban targets "add a serif heading for personality" tokenism.
 
 ### Placeholder Over Fake
 
@@ -103,7 +98,7 @@ A labelled placeholder beats a bad attempt at the real thing.
 
 Never leave broken `<img>` tags or unstyled fallback boxes. Placeholders should look intentional.
 
-Scope: placeholders suit internal tools, dashboards, and prototypes. Landing and marketing pages want real product demos, screenshots, and named logos per [pages/landing.md](references/pages/landing.md) "Show, Don't Tell"; a labelled grey box on a hero kills the sale. Fall back to placeholders only when real assets genuinely don't exist yet.
+Scope: placeholders suit internal tools, dashboards, and prototypes. Landing and marketing pages want real product demos, screenshots, and named logos per "Show, don't tell" above; a labelled grey box on a hero kills the sale. Fall back to placeholders only when real assets genuinely don't exist yet.
 
 ### Minimum Scales
 
@@ -142,7 +137,7 @@ Theme signature tokens are the exception: when a theme's voice depends on an eff
 - [design-system.md](references/design-system.md): full setup guide (colors, fonts, tokens, component theming)
 - [themes/{name}.md](references/themes/): complete theme implementation files
 
-Available themes: frost, clay, blueprint, nebula, zen, neon, teenage-engineering, kinetic-paper, flow, devtool (the live list is injected above).
+Available themes: frost, clay, blueprint, nebula, zen, neon, teenage-engineering, kinetic-paper, flow, devtool, monograph (the live list is injected above).
 
 Read exactly one theme file: `${CLAUDE_SKILL_DIR}/references/themes/{chosen-theme}.md`. Reading several for comparison burns context without improving the choice. With no theme specified, default to `frost` for dark mode projects and `zen` for light mode; ask only when the choice is genuinely ambiguous.
 
@@ -150,15 +145,33 @@ Read exactly one theme file: `${CLAUDE_SKILL_DIR}/references/themes/{chosen-them
 
 Emit `DESIGN.md` at the project root after writing `app.config.ts`, `main.css`, and `nuxt.config.ts`:
 
-1. **Collision guard**: if `DESIGN.md` exists, ask before overwriting. Offer to merge (preserving `## Design Decisions`) or abort.
+1. **Collision guard**: if `DESIGN.md` exists, ask before overwriting. Offer to merge (keeping the decisions log) or abort.
 2. Read the template: [templates/DESIGN.md](templates/DESIGN.md)
 3. **YAML front matter**: the chosen theme file already carries a DESIGN.md-compatible YAML block. Copy it, then apply user-specific customisations (brand name, swapped primary hex, additional registered colours, extra component surfaces). Prefer token refs (`{colors.primary}`, `{rounded.md}`) over restating hex/px values.
 4. **Prose sections**: fill every section below the front matter from the decisions just made, no placeholders.
 5. Write to `DESIGN.md` at the project root.
 6. **Verify placeholders removed**: `grep -cE '\{\{|TODO|placeholder' DESIGN.md` returns 0. (Single-brace `{colors.primary}` token refs are legitimate and stay.)
-7. **Verify tokens lint**: `npx --yes @google/design.md lint DESIGN.md 2>/dev/null | jq -r '.summary.errors'` returns `0`. If the linter crashes (`raw.match is not a function`) because a component prop holds a float or `rgba()`, quote floats and convert `rgba()` to 8-digit hex. Contrast warnings on button-primary are informational here; if the theme's signature colour intentionally trades 4.5:1 for aesthetic, document it under `## Design Decisions`.
+7. **Verify tokens lint**: run `pnpm dlx @google/design.md lint DESIGN.md` without hiding stderr or piping away its exit status. Require a successful exit and zero reported errors. If the linter crashes, preserve the diagnostic and repair its input before retrying. For `raw.match is not a function`, quote floats and convert `rgba()` values to 8-digit hex. Record intentional button-primary contrast tradeoffs in `docs/design-decisions.md`.
+8. **Verify budget**: `DESIGN.md` is at or under 300 lines, and every section is at or under 40. The caps and the audit live in the [root docs contract](../../references/root-docs.md#size-budgets).
 
 Modifying an existing design system: update `DESIGN.md` in place.
+
+`DESIGN.md` binds [craft-rules.md](references/craft-rules.md) to the project's components. It never restates those rules.
+
+### After Setup: COPY.md is the other half
+
+`DESIGN.md` owns the pixels. It does not own the words, and a page built with no decision about
+its words ships whatever sentence each agent liked that day.
+
+After emitting `DESIGN.md`, check for `COPY.md` at the project root. If the project has
+user-visible strings and no `COPY.md`, say so and offer to run the
+installed Brundlefly `copywriting` Skill `init` workflow. Do not write one from inside
+this skill: it bootstraps from the strings that already ship, and that is a different harvest
+from the one done here.
+
+When `COPY.md` exists, read it before writing a single label, heading, empty state or error, and
+keep `DESIGN.md` pointing at it rather than restating voice rules. `DESIGN.md`'s Voice section
+is one line: which file owns this.
 
 ### Setup Recovery
 
@@ -184,12 +197,15 @@ Run the dev server setup and contract steps in [references/workflow.md](referenc
 
 If not already in context from Phase 1:
 
-```
-DESIGN.md                 -> aesthetic intent, component rules, avoid list, custom utilities
-app/assets/css/main.css   -> @theme tokens, --ui-* overrides, custom classes
-app.config.ts             -> colors, component theme overrides, defaultVariants
-nuxt.config.ts            -> fonts, colorMode, ui.theme.colors
-```
+1. Read the `DESIGN.md` core.
+2. Read the topic file its load map names for the layer you work in. Skip the others.
+3. Read `COPY.md`.
+4. Grep `GLOSSARY.md` for each noun you will render. Do not read it whole.
+5. Open `main.css`, `app.config.ts` or `nuxt.config.ts` only to look up a token you need.
+
+Every string the page renders comes from `COPY.md` and `GLOSSARY.md`, in that order: the noun
+from the glossary, the sentence around it from the copy file. Inventing either while building a
+component is how a product ends up describing itself four ways.
 
 Use the project's semantic tokens, fonts, and component overrides. Never hardcode colors, shadows, or radii that bypass the design system. For a design variation, override an existing Nuxt UI token rather than introducing a new one.
 
@@ -197,15 +213,16 @@ Use the project's semantic tokens, fonts, and component overrides. Never hardcod
 
 Load the reference matching what you're building. Loading several before writing any code costs context without improving the first page; pull the next one when you reach a new component type.
 
-| Building…                                  | Reference                                                       |
-| ------------------------------------------ | --------------------------------------------------------------- |
-| Landing / marketing page                   | [pages/landing.md](references/pages/landing.md)                 |
-| Dashboard / admin                          | [pages/dashboard.md](references/pages/dashboard.md)             |
-| Forms                                      | [components/forms.md](references/components/forms.md)           |
-| Data tables                                | [components/tables.md](references/components/tables.md)         |
-| Navigation                                 | [components/navigation.md](references/components/navigation.md) |
-| Feedback / overlays                        | [components/feedback.md](references/components/feedback.md)     |
-| Charts, dashboards, sparklines, stat cards | [polish/data-viz.md](references/polish/data-viz.md)             |
+| Building…                                       | Reference                                                       |
+| ----------------------------------------------- | --------------------------------------------------------------- |
+| Landing / marketing page                        | [pages/landing.md](references/pages/landing.md)                 |
+| Dashboard / admin                               | [pages/dashboard.md](references/pages/dashboard.md)             |
+| Forms                                           | [components/forms.md](references/components/forms.md)           |
+| Data tables                                     | [components/tables.md](references/components/tables.md)         |
+| Navigation                                      | [components/navigation.md](references/components/navigation.md) |
+| Feedback / overlays                             | [components/feedback.md](references/components/feedback.md)     |
+| Charts, dashboards, sparklines, stat cards      | [polish/data-viz.md](references/polish/data-viz.md)             |
+| Lists, tables, async states, custom CSS classes | [craft-rules.md](references/craft-rules.md)                     |
 
 ### When The User Asks For Variations
 
@@ -267,7 +284,7 @@ Review's mechanical checks are the authoritative list (hardcoded hex/rgb, `slate
 Lead with the class-token inventory, the same command review runs:
 
 ```bash
-npx -y @ripast/cli css-class-scan --glob 'app/**' --sort count-desc --json
+pnpm dlx @ripast/cli css-class-scan --glob 'app/**' --sort count-desc --json
 ```
 
 Look for:
@@ -297,17 +314,10 @@ Aesthetic observations (need your input):
 
 - Token and consistency violations are objectively wrong per the design system: present as "will fix".
 - Aesthetic judgments (sizing, hierarchy, rhythm, visual weight) need user input. Do not assume they are problems.
-- Read `## Design Decisions` in `DESIGN.md` first. Anything already ruled on is settled; present only new observations. If all of them are covered, fix the token issues and move to Elevate.
+- Read the decisions log first: `docs/design-decisions.md`, or `## Design Decisions` in `DESIGN.md` if the repo has not split. Anything already ruled on is settled; present only new observations. If all of them are covered, fix the token issues and move to Elevate.
 - Wait for the user to mark each aesthetic item "intentional" or "fix".
 
-After confirmation, update `DESIGN.md`: append new "intentional" choices to `## Design Decisions`, remove entries the user just marked "fix", create the section if absent.
-
-```markdown
-## Design Decisions
-
-- Hero uses text-3xl intentionally: minimal aesthetic for utility tool
-- Cards use uniform treatment: flat hierarchy is intentional
-```
+After confirmation, append each "intentional" choice to `docs/design-decisions.md` with a date. If it changes a standing rule, edit that rule in `DESIGN.md` in one sentence. Never add dated text to `DESIGN.md`. Follow the [root docs budgets](../../references/root-docs.md#size-budgets).
 
 Fix only approved items.
 

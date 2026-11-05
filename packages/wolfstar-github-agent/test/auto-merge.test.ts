@@ -8,7 +8,7 @@ import type {
   ReviewRun,
 } from '../src/types.ts'
 import { describe, expect, it } from 'vitest'
-import { AUTO_MERGE_LABEL, autoMergeDecision, hasAutoMergeLabel } from '../src/auto-merge.ts'
+import { AUTO_MERGE_LABEL, autoMergeCandidate, autoMergeDecision, hasAutoMergeLabel } from '../src/auto-merge.ts'
 import { pullRequestItem, repositoryMapping } from './fixtures.ts'
 
 const passed: ReviewGateState = { _tag: 'Passed', evidence: [] }
@@ -43,10 +43,12 @@ function attempt(
 ): ReviewRun {
   return {
     id: 'attempt-1',
+    gatePublication: { _tag: 'Published', publicationId: 'publication-1' },
     repository: 'wolfstar-project/example',
     pullRequestNumber: 24,
     revisionId: 'revision-1',
     headSha: overrides.headSha ?? 'abc123',
+    baseRef: 'main',
     provider: 'codex',
     sessionId: 'session-1',
     model: 'gpt-5.6-sol',
@@ -90,6 +92,28 @@ describe('auto merge label', () => {
 })
 
 describe('auto merge decision', () => {
+  it('holds when a newer Review is PENDING for the same head', () => {
+    expect(
+      decide({
+        attempts: [
+          attempt(),
+          attempt({ completedAt: '2026-08-18T01:00:00.000Z', outcome: { _tag: 'Pending', confidence: 100 } }),
+        ],
+      })._tag,
+    ).toBe('Hold')
+  })
+
+  it('holds when the latest gates have no confirmed Publication', () => {
+    expect(decide({ attempts: [{ ...attempt(), gatePublication: { _tag: 'Unpublished' } }] })._tag).toBe('Hold')
+  })
+
+  it('holds a reviewed stack until it targets the default branch', () => {
+    expect(decide({ pullRequest: { baseRef: 'fix/parent' } })).toEqual({
+      _tag: 'Hold',
+      reason: 'The pull request must target the default branch before Auto merge.',
+    })
+  })
+
   it('merges a labelled pull request with a READY review at full confidence', () => {
     expect(decide()).toEqual({ _tag: 'Merge', headSha: 'abc123', method: 'squash', reviewRunId: 'attempt-1' })
   })
@@ -121,6 +145,10 @@ describe('auto merge decision', () => {
     expect(decide({ pullRequest: { mergeState: 'conflicting' } })._tag).toBe('Hold')
     expect(decide({ pullRequest: { mergeState: 'unknown' } })._tag).toBe('Hold')
     expect(decide({ pullRequest: { state: 'closed' } })._tag).toBe('Hold')
+  })
+
+  it('holds when the same head was reviewed against a different target branch', () => {
+    expect(decide({ attempts: [{ ...attempt(), baseRef: 'fix/parent' }] })._tag).toBe('Hold')
   })
 
   it('holds when the READY review covers an older head commit', () => {
@@ -180,5 +208,46 @@ describe('auto merge decision', () => {
       method: 'merge',
       reviewRunId: 'attempt-1',
     })
+  })
+})
+
+describe('auto merge scoped to every pull request', () => {
+  const every = { autoMerge: { _tag: 'Every', minimumConfidence: 80 } } as const
+
+  it('merges an unlabelled pull request at the repository minimum, below the service minimum', () => {
+    expect(
+      decide({
+        attempts: [attempt({ outcome: { _tag: 'Ready', confidence: 80 } })],
+        pullRequest: { autoMerge: false },
+        repository: every,
+      }),
+    ).toEqual({ _tag: 'Merge', headSha: 'abc123', method: 'squash', reviewRunId: 'attempt-1' })
+  })
+
+  it('holds below the repository minimum even with the label', () => {
+    expect(
+      decide({
+        attempts: [attempt({ outcome: { _tag: 'Ready', confidence: 79 } })],
+        pullRequest: { autoMerge: true },
+        repository: every,
+      }),
+    ).toEqual({ _tag: 'Hold', reason: 'Review confidence is below 80.' })
+  })
+
+  it('still needs a trusted author and a READY review', () => {
+    expect(decide({ pullRequest: { autoMerge: false, author: 'stranger' }, repository: every })).toEqual({
+      _tag: 'Hold',
+      reason: 'The pull request author is not a trusted author.',
+    })
+    expect(decide({ attempts: [], pullRequest: { autoMerge: false }, repository: every })).toEqual({
+      _tag: 'Hold',
+      reason: 'The current head commit has no READY review.',
+    })
+  })
+
+  it('names the candidates the controller may spend a merge check on', () => {
+    expect(autoMergeCandidate(repositoryMapping(), pullRequestItem({ autoMerge: false }))).toBe(false)
+    expect(autoMergeCandidate(repositoryMapping(), pullRequestItem({ autoMerge: true }))).toBe(true)
+    expect(autoMergeCandidate(repositoryMapping(every), pullRequestItem({ autoMerge: false }))).toBe(true)
   })
 })

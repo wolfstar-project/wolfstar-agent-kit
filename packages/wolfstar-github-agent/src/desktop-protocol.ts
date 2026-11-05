@@ -1,0 +1,303 @@
+import type { AgentEvent } from './agent-provider.ts'
+import type { DesktopReport } from './desktop-broker.ts'
+import type { DesktopHistory, DesktopWorktree } from './desktop-worktree.ts'
+import { DESKTOP_WORKTREE_LIMITS, desktopWorktreeRefusal } from './desktop-worktree.ts'
+import { parseRunnerJobs } from './runner-jobs.ts'
+import { parseVitalsComparisonResult } from './vitals-comparison.ts'
+
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * The shape of one desktop turn, as both hosts must agree on it.
+ *
+ * Hogwild and the desktop deploy from their own checkouts, so one can move
+ * without the other. Raise this whenever the turn or report shape changes, and
+ * a desktop on the older revision is stood down instead of being sent a turn it
+ * cannot read.
+ *
+ * 1: the original whole-history payload.
+ * 2: tagged `DesktopHistory`, which carries only what the receiver lacks.
+ * 3: tagged `DesktopFailure`, which says whether the Agent provider started.
+ * 4: the `ContextBudgetWarned` Agent event.
+ * 5: bounded controller image evidence carried in the turn request.
+ * 6: provider processes require the isolated Agent worker configuration.
+ * 7: authenticated controller proof callbacks through desktop child duplex IO.
+ * 8: exact base revision supplied for immutable Review static evidence.
+ * 9: fenced event delivery and host failure attribution across the desktop boundary.
+ * 11: proposed next actions carried by selected Logged findings.
+ * 13: trusted SEO and vitals Routine provenance carried into implementation turns.
+ * 14: fresh vitals comparison requests and provider-verified evidence carried across hosts.
+ */
+export const DESKTOP_PROTOCOL = 14
+
+export const DESKTOP_TURN_LEASE_MILLISECONDS = 15_000
+
+/**
+ * Why one desktop turn failed.
+ *
+ * The desktop used to report every failure as one string. A branch Worktrunk
+ * refused to create then read as a failed Agent turn, and each retry spent a
+ * Task attempt on the same refusal.
+ */
+export type DesktopFailure =
+  /** The turn stopped before the Agent provider started, so Hogwild may run it. */
+  | { _tag: 'SetupFailed'; reason: string }
+  /** The Agent provider started and failed. */
+  | { _tag: 'AgentFailed'; reason: string }
+
+/**
+ * The error cause each desktop failure carries to the host pool.
+ *
+ * The first two leave the turn untouched, so the pool runs it on Hogwild.
+ */
+export type DesktopErrorCause = 'desktop-unsupported' | 'desktop-setup' | 'desktop-execution'
+
+export function desktopErrorCause(error: unknown): DesktopErrorCause | null {
+  if (!(error instanceof Error)) return null
+  const cause = error.cause
+  return cause === 'desktop-unsupported' || cause === 'desktop-setup' || cause === 'desktop-execution' ? cause : null
+}
+
+/** Whether another host may still run a turn that failed with this error. */
+export function desktopTurnMayMove(error: unknown): boolean {
+  const cause = desktopErrorCause(error)
+  return cause === 'desktop-unsupported' || cause === 'desktop-setup'
+}
+
+export function parseDesktopFailure(value: unknown): DesktopFailure | null {
+  if (value === null) return null
+  if (
+    record(value) &&
+    (value._tag === 'SetupFailed' || value._tag === 'AgentFailed') &&
+    typeof value.reason === 'string'
+  )
+    return { _tag: value._tag, reason: value.reason }
+  throw new Error('The desktop failure is invalid.')
+}
+
+/**
+ * Memory one desktop Agent reserves through `wolfstar-desktop-capacity`.
+ *
+ * The controller and the desktop client both count in this unit, so a turn the
+ * controller sends always has memory waiting for it.
+ */
+export const DESKTOP_MEMORY_PER_AGENT_GIB = 8
+
+/**
+ * The most Agent slots the desktop may be set to.
+ *
+ * The desktop shares its memory with GitHub Actions and with Wolfstar. Two
+ * Agents already commit 16 GiB, so a higher ceiling would promise memory the
+ * desktop cannot hold.
+ */
+export const DESKTOP_AGENT_SLOT_CEILING = 2
+
+export function parseDesktopReport(value: unknown): DesktopReport {
+  if (
+    !record(value) ||
+    !['memoryGiB', 'reservedGiB', 'agents', 'actions'].every(
+      (key) => Number.isSafeInteger(value[key]) && Number(value[key]) >= 0,
+    ) ||
+    Number(value.memoryGiB) < 1 ||
+    Number(value.memoryGiB) > 256
+  ) {
+    throw new Error('Desktop memory and activity must be whole numbers.')
+  }
+  // A desktop that names no protocol predates this field, so it cannot be one
+  // this controller may send a turn to.
+  const protocol = Number.isSafeInteger(value.protocol) ? Number(value.protocol) : 1
+  const jobs =
+    record(value.jobs) && value.jobs._tag === 'Available' && Array.isArray(value.jobs.jobs)
+      ? parseRunnerJobs(
+          {
+            updatedAt: 0,
+            runners: value.jobs.jobs.map((job) =>
+              record(job) ? { activity: 'Running', name: job.runner, repository: job.repository, job } : job,
+            ),
+          },
+          0,
+        )
+      : { _tag: 'Unavailable' as const }
+  return {
+    protocol,
+    memoryGiB: Number(value.memoryGiB),
+    reservedGiB: Number(value.reservedGiB),
+    agents: Number(value.agents),
+    actions: Number(value.actions),
+    jobs,
+  }
+}
+
+/** A turn carries only what the receiver cannot reach, so the shape says which. */
+function parseDesktopHistory(value: unknown): DesktopHistory {
+  if (record(value) && value._tag === 'Held') return { _tag: 'Held' }
+  if (record(value) && (value._tag === 'Incremental' || value._tag === 'Whole') && typeof value.bundle === 'string')
+    return { _tag: value._tag, bundle: value.bundle }
+  throw new Error('The desktop Worktree history is invalid.')
+}
+
+/**
+ * Reads one Worktree the other host sent.
+ *
+ * Every refusal names the part that failed. One message covered eight
+ * conditions before, so a repository too large to offload and a corrupt
+ * payload read the same, and the cause took a bundle measurement to find.
+ */
+export function parseDesktopWorktree(value: unknown): DesktopWorktree {
+  if (!record(value) || typeof value.head !== 'string' || !/^[a-f0-9]{40,64}$/.test(value.head))
+    throw new Error('The desktop Worktree head commit is invalid.')
+  if (
+    typeof value.origin !== 'string' ||
+    !/^(?:https:\/\/github.com\/|git@github.com:)[\w.-]+\/[\w.-]+$/.test(value.origin)
+  )
+    throw new Error('The desktop Worktree origin is not a GitHub repository.')
+  if (typeof value.patch !== 'string' || !Array.isArray(value.files))
+    throw new Error('Desktop Worktree data is invalid.')
+  const history = parseDesktopHistory(value.history)
+  const files = value.files.map((file) => {
+    if (
+      !record(file) ||
+      typeof file.path !== 'string' ||
+      typeof file.data !== 'string' ||
+      file.data.length > DESKTOP_WORKTREE_LIMITS.file ||
+      !Number.isInteger(file.mode) ||
+      Number(file.mode) < 0 ||
+      Number(file.mode) > 0o777
+    )
+      throw new Error('Desktop file data is invalid.')
+    return { path: file.path, data: file.data, mode: Number(file.mode) }
+  })
+  const worktree = { head: value.head, origin: value.origin, history, patch: value.patch, files }
+  const refusal = desktopWorktreeRefusal(worktree)
+  if (refusal !== null)
+    throw new Error(`The desktop cannot run a turn for ${worktree.origin}. ${refusal}`, {
+      cause: 'desktop-unsupported',
+    })
+  return worktree
+}
+
+/** The desktop forwards only provider messages and session identity across the boundary. */
+export function parseDesktopEvents(value: unknown): AgentEvent[] {
+  if (!Array.isArray(value) || value.length > 1000) throw new Error('Desktop events must be a bounded list.')
+  return value.map((event): AgentEvent => {
+    if (!record(event)) throw new Error('Desktop event is invalid.')
+    if (event._tag === 'SessionStarted' && typeof event.sessionId === 'string')
+      return { _tag: 'SessionStarted', sessionId: event.sessionId }
+    if (event._tag === 'Message' && typeof event.text === 'string') return { _tag: 'Message', text: event.text }
+    if (event._tag === 'VitalsComparison') {
+      const directory = event.retainedDirectory
+      if (
+        directory !== null &&
+        (typeof directory !== 'string' ||
+          !directory.startsWith('/') ||
+          directory.includes('\0') ||
+          directory.length > 4096)
+      )
+        throw new Error('The performance evidence location is invalid.')
+      const result = parseVitalsComparisonResult(event.result)
+      if (result._tag === 'Accepted' && directory === null)
+        throw new Error('Accepted performance evidence must retain its raw reports.')
+      return { _tag: 'VitalsComparison', result, retainedDirectory: directory }
+    }
+    if (event._tag === 'Failed' && typeof event.reason === 'string') {
+      if (
+        event.cause !== undefined &&
+        event.cause !== 'host-cancelled' &&
+        event.cause !== 'sandbox-setup' &&
+        event.cause !== 'resource-limit'
+      )
+        throw new Error('The desktop failure cause is invalid.')
+      return { _tag: 'Failed', reason: event.reason, ...(event.cause === undefined ? {} : { cause: event.cause }) }
+    }
+    if (
+      event._tag === 'Progress' &&
+      typeof event.text === 'string' &&
+      Number.isFinite(event.percent) &&
+      Number(event.percent) >= 0 &&
+      Number(event.percent) <= 100
+    )
+      return { _tag: 'Progress', text: event.text, percent: Number(event.percent) }
+    if (event._tag === 'CommandStarted' && typeof event.command === 'string')
+      return { _tag: 'CommandStarted', command: event.command }
+    if (
+      event._tag === 'CommandCompleted' &&
+      typeof event.command === 'string' &&
+      typeof event.output === 'string' &&
+      (event.exitCode === null || Number.isSafeInteger(event.exitCode))
+    )
+      return {
+        _tag: 'CommandCompleted',
+        command: event.command,
+        output: event.output,
+        exitCode: event.exitCode === null ? null : Number(event.exitCode),
+      }
+    if (event._tag === 'Reasoning' && typeof event.text === 'string') return { _tag: 'Reasoning', text: event.text }
+    if (event._tag === 'FileChanged' && Array.isArray(event.changes)) {
+      const changes = event.changes.map((change): { path: string; kind: 'add' | 'delete' | 'update' } => {
+        if (
+          !record(change) ||
+          typeof change.path !== 'string' ||
+          (change.kind !== 'add' && change.kind !== 'delete' && change.kind !== 'update')
+        )
+          throw new Error('Desktop file event is invalid.')
+        return { path: change.path, kind: change.kind }
+      })
+      return { _tag: 'FileChanged', changes }
+    }
+    if (event._tag === 'WebSearch' || event._tag === 'TurnCompleted') return { _tag: event._tag }
+    if (
+      event._tag === 'ContextBudgetWarned' &&
+      Number.isFinite(event.cachedTokensRead) &&
+      Number(event.cachedTokensRead) >= 0 &&
+      record(event.delivery)
+    ) {
+      const delivery = event.delivery
+      if (delivery._tag === 'Sent')
+        return {
+          _tag: 'ContextBudgetWarned',
+          cachedTokensRead: Number(event.cachedTokensRead),
+          delivery: { _tag: 'Sent' },
+        }
+      if (delivery._tag === 'Failed' && typeof delivery.reason === 'string')
+        return {
+          _tag: 'ContextBudgetWarned',
+          cachedTokensRead: Number(event.cachedTokensRead),
+          delivery: { _tag: 'Failed', reason: delivery.reason },
+        }
+    }
+    if (
+      event._tag === 'ContextBudgetExhausted' &&
+      Number.isFinite(event.cachedTokensRead) &&
+      Number(event.cachedTokensRead) >= 0
+    )
+      return { _tag: 'ContextBudgetExhausted', cachedTokensRead: Number(event.cachedTokensRead) }
+    if (event._tag === 'Usage' && record(event.usage) && event.usage._tag === 'Available') {
+      const usage = event.usage
+      if (
+        ['input', 'cachedInput', 'cacheWrite', 'output', 'reasoning'].every(
+          (key) => Number.isFinite(usage[key]) && Number(usage[key]) >= 0,
+        )
+      )
+        return {
+          _tag: 'Usage',
+          usage: {
+            _tag: 'Available',
+            input: Number(usage.input),
+            cachedInput: Number(usage.cachedInput),
+            cacheWrite: Number(usage.cacheWrite),
+            output: Number(usage.output),
+            reasoning: Number(usage.reasoning),
+          },
+        }
+    }
+    throw new Error('Desktop event is unsupported.')
+  })
+}
+
+/** Decode controller responses before consumers handle an empty Queue. */
+export async function readDesktopResponse(response: Response): Promise<unknown> {
+  const body = await response.text()
+  return body === '' ? null : JSON.parse(body)
+}

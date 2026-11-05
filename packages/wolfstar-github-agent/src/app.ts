@@ -1,33 +1,81 @@
 import type { AgentActivityLog } from './agent-activity.ts'
+import type { BrowserAuth } from './browser-auth.ts'
+import type { DesktopBroker } from './desktop-broker.ts'
+import type { EmergencyProxy } from './emergency-isolation.ts'
+import type { AgentHost, AgentSlotLimits, HostAgentPool, HostCapacity } from './host-capacity.ts'
+import type { createPullRequestDiffSource } from './pull-request-diff.ts'
+import type { PullRequestWatchState, PullRequestWatchTarget } from './pull-request-watch.ts'
+import type { RepairRecoveryRequest, RepairRecoveryResponse } from './repair-recovery.ts'
+import type { Result } from './result.ts'
+import type { SessionController } from './session-controller.ts'
 import type { StatsRangeError } from './stats.ts'
 import type { JournalStore } from './store.ts'
-import type { DashboardSnapshot, WorkflowEventStream } from './types.ts'
+import type { DashboardSnapshot, PinnedAgentSelection, WorkflowEventStream } from './types.ts'
 import { Buffer } from 'node:buffer'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
-import { existsSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { dirname, extname, join, relative } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { createError, createEventStream, H3, setResponseStatus } from 'h3'
 import { parseAgentFeedback } from './agent-feedback.ts'
 import { parseAgentSelection } from './agent-profile.ts'
+import {
+  parseDesktopEvents,
+  parseDesktopFailure,
+  parseDesktopReport,
+  parseDesktopWorktree,
+} from './desktop-protocol.ts'
+import { registerEmergencyRoutes } from './emergency-routes.ts'
+import { parseAgentSlots } from './host-capacity.ts'
+import { parseIncidentResolutionRequest } from './incident-resolution.ts'
+import { latestDelivery } from './latest-delivery.ts'
+import { parsePullRequestWatchTarget } from './pull-request-watch.ts'
+import { parseRepairRecoveryRequest } from './repair-recovery.ts'
+import { registerSessionRoutes } from './session-routes.ts'
 import { parseStatsRange } from './stats.ts'
 
 export interface AgentAppOptions {
+  emergencyIsolation?: EmergencyProxy
+  pullRequestDiff?: ReturnType<typeof createPullRequestDiffSource>
+  repairRecovery?: (request: RepairRecoveryRequest) => Promise<Result<RepairRecoveryResponse, string>>
+  pullRequestWatch?: {
+    state: (repository: string, number: number) => PullRequestWatchState | null
+    observe: (target: PullRequestWatchTarget, signal: AbortSignal) => Promise<Result<void, string>>
+  }
+  reloadExternalWatches?: () => Promise<Result<{ repositories: number; issues: number }, string>>
+  sessions?: SessionController
+  desktop?: DesktopBroker
+  hostCapacity?: () => HostCapacity
+  hostTasks?: HostAgentPool['tasks']
+  /** The bounds of the Agent slot control. Absent means the control is unavailable. */
+  agentSlots?: AgentSlotLimits
+  setAgentSlots?: (host: AgentHost, slots: number) => HostCapacity | Promise<HostCapacity>
+  hostSlotPolicy?: () => { hogwild: number; desktop: number }
   store: Pick<
     JournalStore,
-    | 'approveIssueWork'
+    | 'getTask'
+    | 'listTasks'
+    | 'listCompletionTasks'
+    | 'listIncidents'
+    | 'getOpenPullRequest'
+    | 'approveIssue'
     | 'approvePullRequest'
     | 'cancelTask'
     | 'getDashboardSnapshot'
+    | 'getOpenPullRequestStatus'
+    | 'getOpenIssueStatus'
     | 'getStats'
     | 'listReviewRuns'
     | 'listWorkflowEvents'
+    | 'listRoutines'
+    | 'openRoutineRun'
     | 'pauseAgents'
     | 'recordAgentFeedback'
     | 'requestRestart'
+    | 'finishUpdatePreparation'
     | 'requestReviewRerun'
+    | 'requestIssueTriageRerun'
     | 'resumeAgents'
     | 'selectAgent'
     | 'setRepositoryPaused'
@@ -35,11 +83,20 @@ export interface AgentAppOptions {
     | 'dismissItem'
     | 'restoreItem'
     | 'setRepositoryWritesEnabled'
+    | 'stopReviewForHead'
+    | 'resolveIncident'
   >
-  settleTask?: (taskId: string) => Promise<boolean>
-  ejectSettlementTimeoutMilliseconds?: number
   allowedOrigin: string
+  /**
+   * The service's own listen address, such as `http://127.0.0.1:3210`. The
+   * service host may not resolve its public name, so the control CLI there
+   * reaches this address instead. Each address accepts only its own origin.
+   */
+  listenOrigin?: string
   dashboardPassword: string
+  browserAuth?: { private: BrowserAuth; public?: BrowserAuth }
+  /** Origins allowed to frame the dashboard, such as a talk deck. Empty denies framing. */
+  frameAncestors?: readonly string[]
   dashboardRoot?: string
   now: () => Date
   eventIntervalMilliseconds?: number
@@ -48,14 +105,22 @@ export interface AgentAppOptions {
 }
 
 /** Prerendered dashboard routes below `/`, each with its own payload. */
-const DASHBOARD_PAGES = ['history', 'watching', 'flow', 'stats'] as const
-const EJECT_SETTLEMENT_TIMEOUT_MILLISECONDS = 12_000
+const DASHBOARD_PAGES = ['sessions', 'history', 'watching', 'routines', 'flow', 'stats'] as const
 
 const securityHeaders = {
   'cache-control': 'no-store',
   'referrer-policy': 'no-referrer',
   'x-content-type-options': 'nosniff',
-  'x-frame-options': 'DENY',
+}
+
+/** Framing headers: `frame-ancestors` is the source of truth; `x-frame-options` only backs up the default deny. */
+function framingHeaders(frameAncestors: readonly string[]): {
+  securityHeaders: Record<string, string>
+  frameAncestors: string
+} {
+  if (frameAncestors.length === 0)
+    return { securityHeaders: { ...securityHeaders, 'x-frame-options': 'DENY' }, frameAncestors: "'none'" }
+  return { securityHeaders, frameAncestors: ["'self'", ...frameAncestors].join(' ') }
 }
 
 const contentTypes: Record<string, string> = {
@@ -81,8 +146,14 @@ function defaultDashboardRoot(): string {
  * They only meet here, on the way out to the dashboard.
  */
 function dashboardSnapshot(options: AgentAppOptions): DashboardSnapshot {
-  const snapshot = options.store.getDashboardSnapshot(options.now().toISOString())
+  const snapshot: DashboardSnapshot = {
+    ...options.store.getDashboardSnapshot(options.now().toISOString()),
+    ...(options.hostCapacity === undefined ? {} : { hostCapacity: options.hostCapacity() }),
+    ...(options.agentSlots === undefined ? {} : { agentSlots: options.agentSlots }),
+    ...(options.desktop === undefined ? {} : { desktop: options.desktop.read() }),
+  }
   const activityLog = options.activityLog
+  if (options.hostTasks !== undefined) snapshot.hostTasks = options.hostTasks()
   if (activityLog === undefined) return snapshot
   return {
     ...snapshot,
@@ -91,24 +162,6 @@ function dashboardSnapshot(options: AgentAppOptions): DashboardSnapshot {
     ),
     routineRuns: snapshot.routineRuns.map((run) => ({ ...run, activity: activityLog.read(run.id) })),
   }
-}
-
-function settleEjectedTask(options: AgentAppOptions, taskId: string): Promise<boolean> {
-  const settleTask = options.settleTask
-  if (settleTask === undefined) return Promise.resolve(false)
-  const timeoutMilliseconds = options.ejectSettlementTimeoutMilliseconds ?? EJECT_SETTLEMENT_TIMEOUT_MILLISECONDS
-  return new Promise((resolve) => {
-    let answered = false
-    const answer = (settled: boolean) => {
-      if (answered) return
-      answered = true
-      clearTimeout(timeout)
-      resolve(settled)
-    }
-    const timeout = setTimeout(answer, timeoutMilliseconds, false)
-    timeout.unref()
-    settleTask(taskId).then(answer, () => answer(false))
-  })
 }
 
 async function setRepositoryWrites(
@@ -158,22 +211,42 @@ function dashboardPath(root: string, requestPath: string): string {
   return candidate
 }
 
-function staticAsset(root: string, requestPath: string): Promise<Response> {
-  const path = dashboardPath(root, requestPath)
-  return readFile(path)
-    .then(
-      (body) =>
-        new Response(body, {
-          headers: { 'content-type': contentTypes[extname(path)] ?? 'application/octet-stream' },
-        }),
-    )
-    .catch(() => {
-      throw createError({ status: 404, statusText: 'Not Found' })
-    })
+/** Pin the complete build before an update replaces its files during drain. */
+function dashboardAssets(root: string): ReadonlyMap<string, Buffer> {
+  const assets = new Map<string, Buffer>()
+  // The Control API can start before the dashboard has been built.
+  if (!existsSync(root)) return assets
+  const readDirectory = (directory: string): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) readDirectory(path)
+      else if (entry.isFile()) assets.set(path, readFileSync(path))
+      // Do not follow symlinks outside the dashboard build.
+    }
+  }
+  readDirectory(root)
+  return assets
 }
 
-async function dashboardHtml(root: string, requestPath: string, nonce: string): Promise<Response> {
-  const html = await readFile(dashboardPath(root, requestPath), 'utf8')
+function readDashboardAsset(assets: ReadonlyMap<string, Buffer>, root: string, requestPath: string): Buffer {
+  const body = assets.get(dashboardPath(root, requestPath))
+  if (body === undefined) throw createError({ status: 404, statusText: 'Not Found' })
+  return body
+}
+
+function staticAsset(assets: ReadonlyMap<string, Buffer>, root: string, requestPath: string): Response {
+  return new Response(readDashboardAsset(assets, root, requestPath), {
+    headers: { 'content-type': contentTypes[extname(requestPath)] ?? 'application/octet-stream' },
+  })
+}
+
+function dashboardHtml(
+  assets: ReadonlyMap<string, Buffer>,
+  root: string,
+  requestPath: string,
+  nonce: string,
+): Response {
+  const html = readDashboardAsset(assets, root, requestPath).toString('utf8')
   return new Response(
     html.replaceAll('<script', `<script nonce="${nonce}"`).replaceAll('<style', `<style nonce="${nonce}"`),
     { headers: { 'content-type': 'text/html; charset=utf-8' } },
@@ -197,9 +270,14 @@ function hasDashboardAccess(request: Request, password: string): boolean {
   )
 }
 
-function observableState(options: AgentAppOptions): string {
+function dashboardEvent(options: AgentAppOptions): { observable: string; heartbeat: string; serialize: () => string } {
   const snapshot = dashboardSnapshot(options)
-  return JSON.stringify({ ...snapshot, generatedAt: '' })
+  let serialized: string | undefined
+  return {
+    observable: JSON.stringify({ ...snapshot, generatedAt: '' }),
+    heartbeat: JSON.stringify(snapshot.generatedAt),
+    serialize: () => (serialized ??= JSON.stringify(snapshot)),
+  }
 }
 
 interface ApprovalRequest {
@@ -219,23 +297,6 @@ interface CancelTaskRequest {
   taskId: string
 }
 
-type ParsedAgentSession =
-  | { _tag: 'Claude'; id: string; provider: 'claude' }
-  | { _tag: 'Codex'; id: string; provider: 'codex' }
-  | { _tag: 'Opencode'; id: string; provider: 'opencode' }
-
-function parseAgentSession(provider: 'claude' | 'codex' | 'opencode', id: string): ParsedAgentSession | undefined {
-  if (provider === 'claude')
-    return /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(id)
-      ? { _tag: 'Claude', id, provider }
-      : undefined
-  if (provider === 'codex')
-    return /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(id)
-      ? { _tag: 'Codex', id, provider }
-      : undefined
-  return /^ses_[a-z\d]{8,}$/i.test(id) ? { _tag: 'Opencode', id, provider } : undefined
-}
-
 interface ReviewRerunRequest {
   repository: string
   pullRequestNumber: number
@@ -245,7 +306,7 @@ interface ReviewRerunRequest {
 function cancelTaskRequest(value: unknown): CancelTaskRequest | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
   const taskId = (value as Record<string, unknown>).taskId
-  return typeof taskId === 'string' && /^[a-f\d]{64}$/.test(taskId) ? { taskId } : undefined
+  return typeof taskId === 'string' && /^(?:logged-finding:)?[a-f\d]{64}$/.test(taskId) ? { taskId } : undefined
 }
 
 function reviewRerunRequest(value: unknown): ReviewRerunRequest | undefined {
@@ -255,6 +316,24 @@ function reviewRerunRequest(value: unknown): ReviewRerunRequest | undefined {
   if (!Number.isSafeInteger(body.pullRequestNumber) || (body.pullRequestNumber as number) < 1) return undefined
   if (typeof body.revisionId !== 'string' || !/^[a-f\d]{64}$/.test(body.revisionId)) return undefined
   return body as unknown as ReviewRerunRequest
+}
+
+function stopReviewRequest(
+  value: unknown,
+): { repository: string; pullRequestNumber: number; headSha: string } | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const body = value as Record<string, unknown>
+  if (
+    typeof body.repository !== 'string' ||
+    !/^[^/]+\/[^/]+$/.test(body.repository) ||
+    !Number.isSafeInteger(body.pullRequestNumber) ||
+    (body.pullRequestNumber as number) < 1 ||
+    typeof body.headSha !== 'string' ||
+    !/^[a-f\d]{40}$/.test(body.headSha)
+  ) {
+    return undefined
+  }
+  return body as { repository: string; pullRequestNumber: number; headSha: string }
 }
 
 function statsRangeMessage(error: StatsRangeError): string {
@@ -331,39 +410,141 @@ async function changeDismissal(options: AgentAppOptions, event: { req: Request }
   return result
 }
 
+async function desktopBody(event: { req: { json: () => Promise<unknown> } }): Promise<Record<string, unknown>> {
+  const body = await event.req.json().catch(() => {
+    throw createError({ status: 400, statusText: 'Bad Request', message: 'Desktop requests must contain valid JSON.' })
+  })
+  if (typeof body !== 'object' || body === null || Array.isArray(body))
+    throw createError({
+      status: 400,
+      statusText: 'Bad Request',
+      message: 'Desktop requests must contain a JSON object.',
+    })
+  return body as Record<string, unknown>
+}
+
+function desktopInput<Value>(parse: (value: unknown) => Value, value: unknown): Value {
+  try {
+    return parse(value)
+  } catch (error) {
+    throw createError({
+      status: 400,
+      statusText: 'Bad Request',
+      message: error instanceof Error ? error.message : 'Desktop input is invalid.',
+    })
+  }
+}
+
 export function createAgentApp(options: AgentAppOptions): H3 {
   const dashboardRoot = options.dashboardRoot ?? defaultDashboardRoot()
-  const allowedHost = new URL(options.allowedOrigin).host
+  const assets = dashboardAssets(dashboardRoot)
+  const originByHost = new Map(
+    [options.allowedOrigin, options.listenOrigin]
+      .filter((origin) => origin !== undefined)
+      .map((origin) => [new URL(origin).host, new URL(origin).origin]),
+  )
+  const framing = framingHeaders(options.frameAncestors ?? [])
+  function machineDashboardAccess(request: Request) {
+    if (
+      request.headers.get('x-wolfstar-agent-ingress') === 'public' &&
+      options.browserAuth?.public?.bootstrapKind === 'passkey'
+    )
+      return false
+    return hasDashboardAccess(request, options.dashboardPassword)
+  }
+  function browserStream(request: Request, revoked: () => void) {
+    if (machineDashboardAccess(request)) return { valid: () => true, close: () => {} }
+    const authority =
+      request.headers.get('x-wolfstar-agent-ingress') === 'public'
+        ? options.browserAuth?.public
+        : options.browserAuth?.private
+    const session = authority?.session(request.headers)
+    const valid = () => Boolean(authority?.session(request.headers))
+    if (!session || !authority) return { valid, close: () => {} }
+    const unsubscribe = authority.onSessionRevocation((hash) => {
+      if (hash === session.hash) revoked()
+    })
+    const interval = setInterval(() => {
+      if (!valid()) revoked()
+    }, 1000)
+    interval.unref()
+    return {
+      valid,
+      close() {
+        unsubscribe()
+        clearInterval(interval)
+      },
+    }
+  }
   const app = new H3({
     onRequest(event) {
-      if (event.req.headers.get('host') !== allowedHost)
+      const expectedOrigin = originByHost.get(event.req.headers.get('host') ?? '')
+      if (expectedOrigin === undefined)
         throw createError({ status: 421, statusText: 'Misdirected Request', message: 'Host is not allowed.' })
-      if (!hasDashboardAccess(event.req, options.dashboardPassword)) {
+      event.context.dashboardNonce = randomBytes(18).toString('base64')
+      if (
+        event.req.method !== 'GET' &&
+        event.req.method !== 'HEAD' &&
+        event.req.headers.get('origin') !== expectedOrigin
+      )
+        throw createError({ status: 403, statusText: 'Forbidden', message: 'Request origin is not allowed.' })
+      const publicIngress = event.req.headers.get('x-wolfstar-agent-ingress') === 'public'
+      const authority = publicIngress ? options.browserAuth?.public : options.browserAuth?.private
+      const path = new URL(event.req.url).pathname
+      if (authority && path.startsWith('/api/browser-auth/')) return
+      const browserShell =
+        options.browserAuth &&
+        (event.req.method === 'GET' || event.req.method === 'HEAD') &&
+        !path.startsWith('/api/') &&
+        path !== '/health'
+      if (!browserShell && !machineDashboardAccess(event.req) && !authority?.session(event.req.headers)) {
         throw createError({
           status: 401,
           statusText: 'Unauthorized',
           message: 'Dashboard credentials are required.',
-          headers: { 'www-authenticate': 'Basic realm="wolfstar-github-agent", charset="UTF-8"' },
+          ...(options.browserAuth
+            ? {}
+            : { headers: { 'www-authenticate': 'Basic realm="wolfstar-github-agent", charset="UTF-8"' } }),
         })
       }
-      if (
-        event.req.method !== 'GET' &&
-        event.req.method !== 'HEAD' &&
-        event.req.headers.get('origin') !== options.allowedOrigin
-      )
-        throw createError({ status: 403, statusText: 'Forbidden', message: 'Request origin is not allowed.' })
-      event.context.dashboardNonce = randomBytes(18).toString('base64')
     },
     onResponse(response, event) {
-      Object.entries(securityHeaders).forEach(([name, value]) => response.headers.set(name, value))
+      Object.entries(framing.securityHeaders).forEach(([name, value]) => response.headers.set(name, value))
       const nonce = String(event.context.dashboardNonce)
       // GitHub avatars come from github.com and redirect to avatars.githubusercontent.com.
       response.headers.set(
         'content-security-policy',
-        `default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; frame-ancestors 'none'; img-src 'self' data: https://github.com https://avatars.githubusercontent.com; object-src 'none'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'`,
+        `default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; frame-ancestors ${framing.frameAncestors}; img-src 'self' data: https://github.com https://avatars.githubusercontent.com; object-src 'none'; script-src 'self' 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'`,
       )
     },
   })
+  app.all('/api/browser-auth/**', (event) => {
+    const publicIngress = event.req.headers.get('x-wolfstar-agent-ingress') === 'public'
+    const authority = publicIngress ? options.browserAuth?.public : options.browserAuth?.private
+    return (
+      authority?.handle(event.req, publicIngress ? options.allowedOrigin : undefined) ??
+      new Response(JSON.stringify({ _tag: 'Err', reason: 'AuthenticationRequired' }), { status: 401 })
+    )
+  })
+
+  if (options.emergencyIsolation) {
+    registerEmergencyRoutes(app, options.emergencyIsolation, (headers) => {
+      if (headers.get('x-wolfstar-agent-ingress') !== 'public') return null
+      const authority = options.browserAuth?.public
+      return authority?.bootstrapKind === 'passkey' ? (authority.session(headers)?.credentialId ?? null) : null
+    })
+  }
+
+  if (options.sessions !== undefined) {
+    registerSessionRoutes(app, options.sessions)
+  } else {
+    app.get('/api/sessions', () => {
+      throw createError({ status: 503, message: 'Enable Agent sessions after installing the private ingress.' })
+    })
+    // A disabled interactive feature must leave maintenance offload working.
+    app.post('/api/desktop/sessions/report', () => ({ accepted: false, stops: [] }))
+    app.post('/api/desktop/sessions/claim', () => null)
+  }
 
   app.get('/health', () => {
     const snapshot = options.store.getDashboardSnapshot(options.now().toISOString())
@@ -381,6 +562,171 @@ export function createAgentApp(options: AgentAppOptions): H3 {
   })
 
   app.get('/api/state', () => dashboardSnapshot(options))
+
+  app.get('/api/tasks', () => ({
+    tasks: options.store.listTasks(),
+    completionTasks: options.store.listCompletionTasks(),
+  }))
+  app.get('/api/incidents', () => ({ incidents: options.store.listIncidents() }))
+  app.get('/api/tasks/activity', (event) => {
+    const taskId = new URL(event.req.url).searchParams.get('task')
+    if (taskId === null || taskId.length === 0 || taskId.length > 128)
+      throw createError({ status: 400, message: 'Provide one Task ID.' })
+    const task = options.store.getTask(taskId)
+    if (task === null)
+      return {
+        _tag: 'Err',
+        error: { _tag: 'TaskNotFound', taskId, message: 'The Service has no record of this Task.' },
+      }
+    if (task.state._tag !== 'Running' && task.state._tag !== 'Publishing')
+      return {
+        _tag: 'Err',
+        error: {
+          _tag: 'TaskActivityUnavailable',
+          taskId,
+          state: task.state._tag,
+          message: `This Task is ${task.state._tag}. Live activity is available while a Task runs.`,
+        },
+      }
+    if (options.activityLog === undefined)
+      return {
+        _tag: 'Err',
+        error: {
+          _tag: 'TaskActivityUnavailable',
+          taskId,
+          state: task.state._tag,
+          message: 'Live activity is unavailable for this Task.',
+        },
+      }
+    return { _tag: 'Ok', value: { taskId, activity: options.activityLog.read(taskId) } }
+  })
+
+  app.get('/api/items/pull-request-diff', async (event) => {
+    if (event.req.headers.get('x-wolfstar-agent-ingress') === 'public')
+      throw createError({ status: 403, message: 'Connect through private ingress to view the diff.' })
+    const query = new URL(event.req.url).searchParams
+    const repository = query.get('repository') ?? ''
+    const number = Number(query.get('number'))
+    if (!/^[\w.-]+\/[\w.-]+$/.test(repository) || !Number.isSafeInteger(number) || number < 1)
+      return { _tag: 'Err', error: 'InvalidRequest' }
+    if (options.pullRequestDiff === undefined) return { _tag: 'Err', error: 'Unavailable' }
+    const item = options.store.getOpenPullRequest(repository, number)
+    if (item === null) return { _tag: 'Err', error: 'Unavailable' }
+    const snapshot = query.get('snapshot')
+    const path = query.get('path')
+    if (snapshot !== null || path !== null) {
+      if (snapshot === null || path === null) return { _tag: 'Err', error: 'InvalidRequest' }
+      return options.pullRequestDiff.file({ repository, number, snapshot, path }, event.req.signal)
+    }
+    const base = query.get('base') ?? ''
+    const head = query.get('head') ?? ''
+    if (item.baseSha !== base || item.headSha !== head) return { _tag: 'Err', error: 'Changed' }
+    return options.pullRequestDiff.list({ repository, number, base, head }, event.req.signal)
+  })
+
+  app.get('/api/items/pull-request-status', (event) => {
+    const query = new URL(event.req.url).searchParams
+    const repository = query.get('repository')
+    const number = Number(query.get('number'))
+    if (repository === null || !/^[^/]+\/[^/]+$/.test(repository) || !Number.isSafeInteger(number) || number < 1)
+      throw createError({
+        status: 400,
+        statusText: 'Bad Request',
+        message: 'Valid repository and number query values are required.',
+      })
+    const item = options.store.getOpenPullRequestStatus(repository, number)
+    if (item === null)
+      throw createError({ status: 404, statusText: 'Not Found', message: 'The open pull request is not tracked.' })
+    return item
+  })
+
+  app.get('/api/items/issue-status', (event) => {
+    const query = new URL(event.req.url).searchParams
+    const repository = query.get('repository')
+    const number = Number(query.get('number'))
+    if (repository === null || !/^[^/]+\/[^/]+$/.test(repository) || !Number.isSafeInteger(number) || number < 1)
+      throw createError({
+        status: 400,
+        statusText: 'Bad Request',
+        message: 'Set valid repository and number query values.',
+      })
+    const item = options.store.getOpenIssueStatus(repository, number)
+    if (item === null)
+      throw createError({ status: 404, statusText: 'Not Found', message: 'The open issue is not tracked.' })
+    return item
+  })
+
+  app.post('/api/desktop/capacity', () => {
+    throw createError({ statusCode: 403, message: 'Change Desktop memory in the host configuration.' })
+  })
+  app.post('/api/desktop/report', async (event) => {
+    if (options.desktop === undefined)
+      throw createError({ statusCode: 503, message: 'Desktop execution is unavailable.' })
+    const policy = options.hostSlotPolicy?.()
+    return {
+      ...options.desktop.report(desktopInput(parseDesktopReport, await desktopBody(event))),
+      ...(policy === undefined ? {} : { agentSlots: policy.desktop, maintenanceReserve: Math.min(1, policy.desktop) }),
+    }
+  })
+  app.post('/api/desktop/claim', () => options.desktop?.claim() ?? null)
+  app.post('/api/desktop/defer', async (event) => {
+    const body = await desktopBody(event)
+    return { accepted: typeof body.id === 'string' && options.desktop?.defer(body.id) === true }
+  })
+  app.post('/api/desktop/heartbeat', async (event) => {
+    const body = await desktopBody(event)
+    return { active: typeof body.id === 'string' && options.desktop?.active(body.id) === true }
+  })
+  app.post('/api/desktop/events', async (event) => {
+    const body = await desktopBody(event)
+    return {
+      accepted:
+        typeof body.id === 'string' &&
+        Number.isSafeInteger(body.sequence) &&
+        options.desktop?.events(body.id, desktopInput(parseDesktopEvents, body.events), Number(body.sequence)) === true,
+    }
+  })
+  app.post('/api/desktop/proof', async (event) => {
+    const body = await desktopBody(event)
+    if (typeof body.id !== 'string' || options.desktop === undefined)
+      throw createError({ statusCode: 400, message: 'An active desktop turn is required.' })
+    return options.desktop.proof(body.id, body.action, body.input)
+  })
+  app.post('/api/desktop/complete', async (event) => {
+    const body = await desktopBody(event)
+    const result = body.result === null ? null : desktopInput(parseDesktopWorktree, body.result)
+    const failure = desktopInput(parseDesktopFailure, body.failure ?? null)
+    return { accepted: typeof body.id === 'string' && options.desktop?.complete(body.id, result, failure) === true }
+  })
+
+  app.post('/api/agents/slots', async (event) => {
+    const limits = options.agentSlots
+    const write = options.setAgentSlots
+    if (limits === undefined || write === undefined)
+      throw createError({
+        status: 503,
+        statusText: 'Service Unavailable',
+        message: 'Agent slots cannot be set right now.',
+      })
+    const body = await event.req.json().catch(() => {
+      throw createError({
+        status: 400,
+        statusText: 'Bad Request',
+        message: 'An Agent slot request must contain valid JSON.',
+      })
+    })
+    let request: { host: AgentHost; slots: number }
+    try {
+      request = parseAgentSlots(body, limits)
+    } catch (error) {
+      throw createError({
+        status: 400,
+        statusText: 'Bad Request',
+        message: error instanceof Error ? error.message : 'The Agent slot request is invalid.',
+      })
+    }
+    return write(request.host, request.slots)
+  })
 
   app.post('/api/agents/pause', () => options.store.pauseAgents(options.now().toISOString()))
 
@@ -400,10 +746,156 @@ export function createAgentApp(options: AgentAppOptions): H3 {
     const request = options.store.requestRestart({
       id: randomUUID(),
       source: body.source,
+      operation: { _tag: 'Restart' },
       at: options.now().toISOString(),
     })
     setResponseStatus(event, 202)
     return request
+  })
+
+  app.post('/api/external-watches/reload', async () => {
+    if (options.reloadExternalWatches === undefined)
+      throw createError({ status: 503, statusText: 'Unavailable', message: 'External watch reload is unavailable.' })
+    const result = await options.reloadExternalWatches()
+    if (result._tag === 'Err')
+      throw createError({ status: 422, statusText: 'Unprocessable Entity', message: result.error })
+    return result.value
+  })
+
+  app.post('/api/service/update', async (event) => {
+    const body = (await event.req.json().catch(() => {
+      // Validation below reports malformed JSON as a bad request.
+      return undefined
+    })) as { source?: unknown; targetCommit?: unknown; preparation?: unknown } | undefined
+    if (body?.source !== 'dashboard' && body?.source !== 'helper')
+      throw createError({
+        status: 400,
+        statusText: 'Bad Request',
+        message: 'Update source must be dashboard or helper.',
+      })
+    if (
+      body.targetCommit !== undefined &&
+      (body.source !== 'helper' || typeof body.targetCommit !== 'string' || !/^[0-9a-f]{40}$/.test(body.targetCommit))
+    )
+      throw createError({
+        status: 400,
+        statusText: 'Bad Request',
+        message: 'A helper Update requires a full lowercase commit SHA.',
+      })
+    if (
+      body.preparation !== undefined &&
+      (body.source !== 'helper' || body.targetCommit === undefined || body.preparation !== 'Pending')
+    )
+      throw createError({
+        status: 400,
+        statusText: 'Bad Request',
+        message: 'Pending preparation requires a helper Update and target commit.',
+      })
+    const update = options.store.getDashboardSnapshot(options.now().toISOString()).serviceUpdate
+    if (body.targetCommit === undefined && update._tag !== 'Available')
+      throw createError({ status: 409, statusText: 'Conflict', message: 'No service update is available.' })
+    const targetCommit =
+      typeof body.targetCommit === 'string'
+        ? body.targetCommit
+        : update._tag === 'Available'
+          ? update.latestCommit
+          : undefined
+    if (targetCommit === undefined) throw new Error('The Update target was not resolved.')
+    const requestId = randomUUID()
+    const request = options.store.requestRestart({
+      id: requestId,
+      source: body.source,
+      operation: { _tag: 'Update', targetCommit, preparation: body.preparation === 'Pending' ? 'Pending' : 'Ready' },
+      at: options.now().toISOString(),
+    })
+    if (body.preparation === 'Pending' && request.id !== requestId)
+      throw createError({ status: 409, statusText: 'Conflict', message: 'Another Restart request owns the Service.' })
+    setResponseStatus(event, 202)
+    return request
+  })
+
+  app.get('/api/service/update/preparation', () => ({ supported: true }))
+
+  app.post('/api/service/update/preparation', async (event) => {
+    const body = (await event.req.json().catch(() => {
+      // The parser below reports malformed JSON as a bad request.
+      return undefined
+    })) as { id?: unknown; _tag?: unknown; reason?: unknown } | undefined
+    if (
+      body === undefined ||
+      body === null ||
+      typeof body.id !== 'string' ||
+      !body.id ||
+      (body._tag !== 'Ready' && body._tag !== 'Failed') ||
+      (body._tag === 'Failed' && (typeof body.reason !== 'string' || !body.reason))
+    ) {
+      throw createError({
+        status: 400,
+        statusText: 'Bad Request',
+        message: 'An Update preparation receipt requires its request ID and outcome.',
+      })
+    }
+    const at = options.now().toISOString()
+    const request = options.store.finishUpdatePreparation(
+      body._tag === 'Ready'
+        ? { id: body.id, _tag: 'Ready', at }
+        : { id: body.id, _tag: 'Failed', reason: body.reason as string, at },
+    )
+    if (request === null)
+      throw createError({ status: 409, statusText: 'Conflict', message: 'This Update no longer owns preparation.' })
+    return request
+  })
+
+  app.post('/api/routines/run', async (event) => {
+    const body = (await event.req.json().catch(() => {
+      // Validation below reports malformed JSON as a bad request.
+      return undefined
+    })) as { routineId?: unknown; agentSelection?: unknown } | undefined
+    if (typeof body?.routineId !== 'string' || body.routineId === '')
+      throw createError({ status: 400, statusText: 'Bad Request', message: 'A Routine ID is required.' })
+    let agentSelection: PinnedAgentSelection | undefined
+    if (body.agentSelection !== undefined) {
+      const requested = body.agentSelection
+      if (typeof requested !== 'object' || requested === null || Array.isArray(requested))
+        throw createError({
+          status: 400,
+          statusText: 'Bad Request',
+          message: 'Choose an Agent provider and model for this run.',
+        })
+      const parsed = parseAgentSelection({ ...requested, _tag: 'Pinned' })
+      if (parsed._tag === 'Err') throw createError({ status: 400, statusText: 'Bad Request', message: parsed.error })
+      if (parsed.value._tag !== 'Pinned') throw new Error('Expected a pinned Routine Agent selection.')
+      const { provider, model, reasoningEffort } = parsed.value
+      agentSelection = { provider, model, reasoningEffort }
+    }
+    const routine = options.store.listRoutines().find((candidate) => candidate.id === body.routineId)
+    if (routine === undefined)
+      throw createError({ status: 404, statusText: 'Not Found', message: 'The Routine was not found.' })
+    if (!routine.enabled)
+      throw createError({
+        status: 409,
+        statusText: 'Conflict',
+        message: 'The Routine is disabled, so a run would never start.',
+      })
+    const at = options.now()
+    // A manual run answers the current minute. The cron instant that follows it
+    // today is newer, so it still opens on its own.
+    const scheduledFor = new Date(Math.floor(at.getTime() / 60_000) * 60_000).toISOString()
+    const run = options.store.openRoutineRun({
+      routineId: routine.id,
+      scheduledFor,
+      specSha: routine.specSha,
+      at: at.toISOString(),
+      ...(agentSelection === undefined ? {} : { agentSelection }),
+    })
+    if (run === null)
+      throw createError({
+        status: 409,
+        statusText: 'Conflict',
+        message: 'A run already exists for this minute. Try again in a minute.',
+      })
+    setResponseStatus(event, 202)
+    return run
   })
 
   app.post('/api/agents/selection-mode', async (event) => {
@@ -426,61 +918,6 @@ export function createAgentApp(options: AgentAppOptions): H3 {
     if (selection._tag === 'Err')
       throw createError({ status: 400, statusText: 'Bad Request', message: selection.error })
     return options.store.selectAgent(selection.value, options.now().toISOString())
-  })
-
-  app.post('/api/agents/eject', async (event) => {
-    const body = cancelTaskRequest(
-      await event.req.json().catch(() => {
-        // Request validation below reports malformed JSON as a bad request.
-        return undefined
-      }),
-    )
-    if (body === undefined)
-      throw createError({ status: 400, statusText: 'Bad Request', message: 'A valid task ID is required.' })
-    const agent = dashboardSnapshot(options).agents.find(
-      (candidate) => candidate._tag === 'ActiveAgent' && candidate.id === body.taskId,
-    )
-    if (agent?._tag !== 'ActiveAgent')
-      throw createError({ status: 404, statusText: 'Not Found', message: 'The running agent was not found.' })
-    if (agent.session._tag !== 'Connected')
-      throw createError({ status: 409, statusText: 'Conflict', message: 'The agent session is still starting.' })
-    const session = parseAgentSession(agent.provider, agent.session.id)
-    if (session === undefined)
-      throw createError({ status: 409, statusText: 'Conflict', message: 'The saved agent session is invalid.' })
-    if (options.settleTask === undefined)
-      throw createError({
-        status: 503,
-        statusText: 'Service Unavailable',
-        message: 'The agent session cannot be transferred safely.',
-      })
-    const cancelled = options.store.cancelTask({ taskId: body.taskId, at: options.now().toISOString() })
-    if (cancelled._tag === 'Rejected')
-      throw createError({
-        status: 409,
-        statusText: 'Conflict',
-        message: 'The agent already finished. Refresh before ejecting.',
-      })
-    const settled = await settleEjectedTask(options, body.taskId)
-    if (!settled) {
-      throw createError({
-        status: 503,
-        statusText: 'Service Unavailable',
-        message: 'The agent stop could not be confirmed.',
-        data: {
-          _tag: 'EjectDelayed',
-          provider: session.provider,
-          sessionId: session.id,
-          nextAction: 'Stop Wolfstar GitHub Agent. Then resume this saved session.',
-        },
-      })
-    }
-    return {
-      _tag: 'Ejected',
-      provider: session.provider,
-      sessionId: session.id,
-      repository: agent.repository,
-      itemNumber: agent.itemNumber,
-    }
   })
 
   app.post('/api/repositories/writes/enable', (event) => setRepositoryWrites(options, event, true))
@@ -549,6 +986,7 @@ export function createAgentApp(options: AgentAppOptions): H3 {
       'candidate_issue',
       'routine_report',
       'provider_circuit',
+      'incident',
     ])
     if (stream !== null && !allowed.has(stream))
       throw createError({ status: 400, statusText: 'Bad Request', message: 'Select a valid workflow event stream.' })
@@ -592,7 +1030,7 @@ export function createAgentApp(options: AgentAppOptions): H3 {
     )
     if (body === undefined)
       throw createError({ status: 400, statusText: 'Bad Request', message: 'A valid issue Approval is required.' })
-    const result = options.store.approveIssueWork({ ...body, at: options.now().toISOString() })
+    const result = options.store.approveIssue({ ...body, at: options.now().toISOString() })
     if (result._tag !== 'Rejected') return result
     switch (result.reason._tag) {
       case 'ItemNotFound':
@@ -609,13 +1047,65 @@ export function createAgentApp(options: AgentAppOptions): H3 {
           statusText: 'Conflict',
           message: 'This issue does not require local approval.',
         })
-      case 'TriageRequired':
-        throw createError({ status: 409, statusText: 'Conflict', message: 'Issue triage must finish before approval.' })
+      case 'NothingToStart':
+        throw createError({
+          status: 409,
+          statusText: 'Conflict',
+          message: 'Nothing on this issue is waiting for approval.',
+        })
       case 'NotAuthorized':
         throw createError({
           status: 409,
           statusText: 'Conflict',
           message: 'Repository policy does not permit issue work.',
+        })
+    }
+  })
+
+  app.post('/api/issues/rerun-triage', async (event) => {
+    const body = issueApprovalRequest(
+      await event.req.json().catch(() => {
+        // The parser reports malformed JSON as a bad request.
+        return undefined
+      }),
+    )
+    if (body === undefined)
+      throw createError({
+        status: 400,
+        statusText: 'Bad Request',
+        message: 'Set a valid repository, issue number, and Revision ID.',
+      })
+    const result = options.store.requestIssueTriageRerun({ ...body, at: options.now().toISOString() })
+    if (result._tag !== 'Rejected')
+      return new Response(JSON.stringify(result), { status: 202, headers: { 'content-type': 'application/json' } })
+    switch (result.reason._tag) {
+      case 'ItemNotFound':
+        throw createError({ status: 404, statusText: 'Not Found', message: 'The issue is no longer open.' })
+      case 'RevisionMismatch':
+        throw createError({
+          status: 409,
+          statusText: 'Conflict',
+          message: 'The issue changed. Refresh before rerunning triage.',
+        })
+      case 'Dismissed':
+        throw createError({ status: 409, statusText: 'Conflict', message: 'The issue is dismissed.' })
+      case 'NotAuthorized':
+        throw createError({
+          status: 409,
+          statusText: 'Conflict',
+          message: 'Repository policy does not permit Issue triage.',
+        })
+      case 'ApprovalRequired':
+        throw createError({
+          status: 409,
+          statusText: 'Conflict',
+          message: 'Approve this issue Revision before rerunning triage.',
+        })
+      case 'WorkActive':
+        throw createError({
+          status: 409,
+          statusText: 'Conflict',
+          message: 'Issue work is active. Wait before rerunning triage.',
         })
     }
   })
@@ -638,6 +1128,69 @@ export function createAgentApp(options: AgentAppOptions): H3 {
     if (result.reason._tag === 'TaskNotFound')
       throw createError({ status: 404, statusText: 'Not Found', message: 'The task was not found.' })
     throw createError({ status: 409, statusText: 'Conflict', message: 'The task already finished.' })
+  })
+
+  app.post('/api/tasks/recover-repair', async (event) => {
+    const parsed = parseRepairRecoveryRequest(
+      await event.req.json().catch(() => {
+        // The parser reports malformed JSON as a bad request.
+        return undefined
+      }),
+    )
+    if (parsed._tag === 'Err') throw createError({ status: 400, message: parsed.error })
+    if (options.repairRecovery === undefined)
+      throw createError({ status: 409, message: 'Repair recovery is unavailable on this Service.' })
+    const result = await options.repairRecovery(parsed.value)
+    if (result._tag === 'Err') throw createError({ status: 409, message: result.error })
+    if (result.value._tag === 'Accepted') setResponseStatus(event, 202)
+    return result.value
+  })
+
+  app.post('/api/incidents/resolve', async (event) => {
+    const body = parseIncidentResolutionRequest(
+      await event.req.json().catch(() => {
+        // The parser reports malformed JSON as a bad request.
+        return undefined
+      }),
+    )
+    if (body._tag === 'Err') throw createError({ status: 400, message: body.error })
+    const result = options.store.resolveIncident({ ...body.value, at: options.now().toISOString() })
+    if (result._tag === 'Ok') return result.value
+    const message =
+      result.error._tag === 'NotFound'
+        ? 'The incident was not found.'
+        : result.error._tag === 'TaskActive'
+          ? 'The owning Task is active. Wait for it to finish.'
+          : 'The incident changed. Read it again before resolving it.'
+    throw createError({ status: result.error._tag === 'NotFound' ? 404 : 409, message })
+  })
+
+  app.post('/api/reviews/stop', async (event) => {
+    const body = stopReviewRequest(
+      await event.req.json().catch(() => {
+        // Validation below reports malformed JSON as a bad request.
+        return undefined
+      }),
+    )
+    if (body === undefined)
+      throw createError({
+        status: 400,
+        statusText: 'Bad Request',
+        message: 'Set a valid repository, pull request number, and head commit.',
+      })
+    const result = options.store.stopReviewForHead({ ...body, at: options.now().toISOString() })
+    if (result._tag !== 'Rejected') return result
+    if (result.reason === 'ItemNotFound')
+      throw createError({ status: 404, statusText: 'Not Found', message: 'The open pull request is not tracked.' })
+    if (result.reason === 'HeadChanged')
+      throw createError({ status: 409, statusText: 'Conflict', message: 'The pull request head commit changed.' })
+    if (result.reason === 'Dismissed')
+      throw createError({ status: 409, statusText: 'Conflict', message: 'The pull request is dismissed.' })
+    throw createError({
+      status: 409,
+      statusText: 'Conflict',
+      message: 'The Service Review has started. Wait for its outcome.',
+    })
   })
 
   app.post('/api/reviews/rerun', async (event) => {
@@ -669,44 +1222,150 @@ export function createAgentApp(options: AgentAppOptions): H3 {
         statusText: 'Conflict',
         message: 'The pull request head commit changed. Refresh before rerunning.',
       })
+    if (result.reason._tag === 'ReviewStopped')
+      throw createError({ status: 409, statusText: 'Conflict', message: 'Another Agent took this head commit Review.' })
     throw createError({ status: 409, statusText: 'Conflict', message: 'The pull request is not ready for review.' })
   })
 
+  app.get('/api/items/pull-request-events', async (event) => {
+    const watch = options.pullRequestWatch
+    if (watch === undefined) throw createError({ status: 503, message: 'Pull request watching is unavailable.' })
+    const query = new URL(event.req.url).searchParams
+    const target = parsePullRequestWatchTarget({
+      repository: query.get('repository'),
+      number: Number(query.get('number')),
+    })
+    if (target._tag === 'Err') throw createError({ status: 400, message: target.error })
+    const { repository, number } = target.value
+    const readState = (): PullRequestWatchState | null => {
+      const state = watch.state(repository, number)
+      if (state?._tag !== 'Open' || !state.tasks.some((task) => task.state._tag === 'Queued')) return state
+      return { ...state, agentStart: options.store.getDashboardSnapshot(options.now().toISOString()).agentStart }
+    }
+    let initial = readState()
+    if (initial === null) throw createError({ status: 404, message: 'The repository is not enabled in this service.' })
+    if (initial._tag === 'NotObserved' || initial._tag === 'PendingClosure') {
+      const observed = await watch.observe(
+        target.value,
+        AbortSignal.any([event.req.signal, AbortSignal.timeout(60_000)]),
+      )
+      if (observed._tag === 'Err') throw createError({ status: 502, message: observed.error })
+      initial = readState()
+      if (initial === null || initial._tag === 'NotObserved')
+        throw createError({ status: 404, message: 'The service cannot observe this pull request.' })
+    }
+    const stream = createEventStream(event)
+    let previous = JSON.stringify(initial)
+    let stopped = false
+    const interval = setInterval(() => {
+      if (!authorization.valid()) {
+        shutdown()
+        return
+      }
+      const next = readState()
+      if (next === null) {
+        stop()
+        void stream.close()
+        return
+      }
+      const serialized = JSON.stringify(next)
+      if (serialized !== previous) {
+        previous = serialized
+        void stream.push({ event: 'pull-request', data: serialized }).catch(stop)
+      }
+    }, options.eventIntervalMilliseconds ?? 2_000)
+    const heartbeat = setInterval(() => void stream.pushComment('keepalive').catch(stop), 15_000)
+    interval.unref()
+    heartbeat.unref()
+    function stop(): void {
+      if (stopped) return
+      stopped = true
+      clearInterval(interval)
+      clearInterval(heartbeat)
+      authorization.close()
+      options.shutdownSignal?.removeEventListener('abort', shutdown)
+    }
+    function shutdown(): void {
+      stop()
+      void stream.close()
+    }
+    const authorization = browserStream(event.req, shutdown)
+    stream.onClosed(stop)
+    options.shutdownSignal?.addEventListener('abort', shutdown, { once: true })
+    if (options.shutdownSignal?.aborted || !authorization.valid()) shutdown()
+    else void stream.push({ event: 'pull-request', data: previous }).catch(stop)
+    return stream
+  })
+
+  const dashboardSubscribers = new Set<(sample: ReturnType<typeof dashboardEvent>) => void>()
+  let dashboardInterval: ReturnType<typeof setInterval> | undefined
   app.get('/api/events', (event) => {
     const stream = createEventStream(event)
-    let previous = observableState(options)
-    void stream.pushComment('connected')
-    const interval = setInterval(() => {
-      const next = observableState(options)
-      if (next === previous) return
-      previous = next
-      const snapshot = dashboardSnapshot(options)
-      void stream.push({ event: 'state', data: JSON.stringify(snapshot) }).catch(() => {
-        // The browser closed this live update connection.
-        clearInterval(interval)
-      })
-    }, options.eventIntervalMilliseconds ?? 2_000)
-    interval.unref()
+    const initial = dashboardEvent(options)
+    let previous: string | undefined
+    const delivery = latestDelivery(
+      async (sample: ReturnType<typeof dashboardEvent>) => {
+        if (!authorization.valid()) {
+          shutdown()
+          return
+        }
+        await stream.push(
+          sample.observable === previous
+            ? { event: 'heartbeat', data: sample.heartbeat }
+            : { event: 'state', data: sample.serialize() },
+        )
+        previous = sample.observable
+      },
+      () => stop(),
+    )
+    const update = delivery.push
     const stop = (): void => {
-      clearInterval(interval)
-      options.shutdownSignal?.removeEventListener('abort', stop)
+      delivery.close()
+      authorization.close()
+      dashboardSubscribers.delete(update)
+      if (dashboardSubscribers.size === 0 && dashboardInterval !== undefined) {
+        clearInterval(dashboardInterval)
+        dashboardInterval = undefined
+      }
+      options.shutdownSignal?.removeEventListener('abort', shutdown)
     }
-    if (options.shutdownSignal?.aborted) void stream.close()
-    else options.shutdownSignal?.addEventListener('abort', stop, { once: true })
+    function shutdown(): void {
+      stop()
+      void stream.close()
+    }
+    const authorization = browserStream(event.req, shutdown)
     stream.onClosed(stop)
+    if (options.shutdownSignal?.aborted || !authorization.valid()) {
+      shutdown()
+    } else {
+      dashboardSubscribers.add(update)
+      options.shutdownSignal?.addEventListener('abort', shutdown, { once: true })
+      void stream.pushComment('connected').catch(stop)
+      // A subscriber may have fetched /api/state before this connection while
+      // the service changed. Always resync on attach/reconnect before sending
+      // lightweight freshness-only heartbeats.
+      update(initial)
+      if (dashboardInterval === undefined) {
+        dashboardInterval = setInterval(() => {
+          const sample = dashboardEvent(options)
+          for (const subscriber of dashboardSubscribers) subscriber(sample)
+        }, options.eventIntervalMilliseconds ?? 2_000)
+        dashboardInterval.unref()
+      }
+    }
     return stream
   })
 
   app.get('/favicon.ico', () => new Response(null, { status: 204 }))
-  app.get('/_payload.json', () => staticAsset(dashboardRoot, '_payload.json'))
-  app.get('/_nuxt/**', (event) => staticAsset(dashboardRoot, new URL(event.req.url).pathname.slice(1)))
-  app.get('/_fonts/**', (event) => staticAsset(dashboardRoot, new URL(event.req.url).pathname.slice(1)))
-  app.get('/', (event) => dashboardHtml(dashboardRoot, 'index.html', String(event.context.dashboardNonce)))
+  app.get('/_payload.json', () => staticAsset(assets, dashboardRoot, '_payload.json'))
+  app.get('/_nuxt/**', (event) => staticAsset(assets, dashboardRoot, new URL(event.req.url).pathname.slice(1)))
+  app.get('/_nuxt-skew-sw.js', () => staticAsset(assets, dashboardRoot, '_nuxt-skew-sw.js'))
+  app.get('/', (event) => dashboardHtml(assets, dashboardRoot, 'index.html', String(event.context.dashboardNonce)))
   DASHBOARD_PAGES.forEach((page) => {
     app.get(`/${page}`, (event) =>
-      dashboardHtml(dashboardRoot, `${page}/index.html`, String(event.context.dashboardNonce)),
+      dashboardHtml(assets, dashboardRoot, `${page}/index.html`, String(event.context.dashboardNonce)),
     )
-    app.get(`/${page}/_payload.json`, () => staticAsset(dashboardRoot, `${page}/_payload.json`))
+    app.get(`/${page}/_payload.json`, () => staticAsset(assets, dashboardRoot, `${page}/_payload.json`))
   })
 
   return app

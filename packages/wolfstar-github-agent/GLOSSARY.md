@@ -8,61 +8,68 @@ did not cover it.
 
 ## Map
 
-| Term                 | Storage                                                                                                                                 | Owner              | Relationship                                                        | Customer word                                   |
-| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------ | ------------------------------------------------------------------- | ----------------------------------------------- |
-| Agent provider       | `agent.provider`                                                                                                                        | Configuration      | 1 to N Agents                                                       | agent provider                                  |
-| Agent selection      | `agent_selection`                                                                                                                       | Controller         | One per service                                                     | Agent selection                                 |
-| Follow configuration | `agent_selection.tag`                                                                                                                   | Configuration      | One Agent selection state                                           | Follow configuration                            |
-| Automatic selection  | `agent_selection.provider_order`                                                                                                        | Controller         | One Agent selection state                                           | Automatic                                       |
-| Reserve              | `agent.reservePercent`                                                                                                                  | Configuration      | One per service                                                     | Reserve                                         |
-| Reasoning effort     | `agent_selection.reasoning_effort`                                                                                                      | Controller         | One per Agent selection                                             | Reasoning effort                                |
-| Repository mapping   | `repositories`                                                                                                                          | Configuration      | 1 to N Items                                                        | repository                                      |
-| Item                 | `subjects`                                                                                                                              | Journal            | 1 to N Revisions, Tasks, Agents                                     | issue or pull request                           |
-| Observation          | `observations`                                                                                                                          | Reconciliation     | N to 1 Revision                                                     | none                                            |
-| Revision             | `revisions`                                                                                                                             | Journal            | N to 1 Item, 1 to N Review runs                                     | none                                            |
-| Agent                | `worker_sessions`                                                                                                                       | Runner             | N to 1 Item, 1 to N Review runs                                     | agent                                           |
-| Task                 | `tasks`, `worker_tasks`                                                                                                                 | Scheduler          | N to 1 Item and Revision                                            | task                                            |
-| Routine              | `routines`                                                                                                                              | Scheduler          | N to 1 Repository mapping, 1 to N Routine runs                      | Routine                                         |
-| Routine run          | `routine_runs`                                                                                                                          | Scheduler          | N to 1 Routine                                                      | run                                             |
-| Lease holder         | `tasks.worker_id`                                                                                                                       | Scheduler          | One per Running Task                                                | none                                            |
-| Queue                | derived dashboard state                                                                                                                 | Controller         | Orders active Tasks and actionable Items                            | queue                                           |
-| Stats                | derived from Journal records                                                                                                            | Dashboard          | N completed records per date range                                  | Stats                                           |
-| Pause                | `agent_control`                                                                                                                         | Controller         | Stops new agent Tasks from starting                                 | Pause                                           |
-| Restart request      | `restart_requests`                                                                                                                      | Controller         | N per service, one active                                           | Restart after current work                      |
-| Selection mode       | `agent_control.selection_mode`                                                                                                          | Controller         | One per service                                                     | Selection mode                                  |
-| Dismissal            | `item_dismissals`                                                                                                                       | Controller         | One per Item                                                        | Dismiss                                         |
-| Eject                | dashboard and System pane action                                                                                                        | Controller         | Transfers one active agent session to Wolfstar's terminal           | Eject                                           |
-| Watch logs           | System pane action                                                                                                                      | Observer           | Opens one read-only live Task event stream                          | Watch logs                                      |
-| Weekly Codex limit   | live Codex account                                                                                                                      | System pane        | One seven-day usage window                                          | Weekly Codex limit                              |
-| Recently finished    | derived dashboard state                                                                                                                 | System pane        | Three newest finished Tasks or Review runs                          | Recently finished                               |
-| Self-hosted runner   | Docker container labels                                                                                                                 | GitHub Actions     | N per repository, independent of this service                       | self-hosted runner                              |
-| Conflict resolution  | `tasks.kind`                                                                                                                            | Scheduler          | One Task kind                                                       | conflict resolution                             |
-| Baseline repair      | `tasks.kind`                                                                                                                            | Scheduler          | One Task for one failing default branch commit                      | Baseline repair                                 |
-| Repair               | `tasks.kind`                                                                                                                            | Scheduler          | One Task for the findings of one Review run                         | repair                                          |
-| Context budget       | `agent.contextBudget`                                                                                                                   | Runner             | One per agent session                                               | Context budget                                  |
-| Stack                | `subjects` base ref, `publication_commands.base_ref`                                                                                    | GitHub             | A pull request whose base is another pull request's head            | stack                                           |
-| Issue triage         | `worker_tasks.kind`                                                                                                                     | Scheduler          | One Task for one issue Revision                                     | issue triage                                    |
-| Issue triage comment | `issue_triage_comment_commands`                                                                                                         | Controller         | One canonical comment per issue                                     | automated triage                                |
-| Issue triage label   | `wolfstar-agent-ready-to-implement`, `wolfstar-agent-ready-to-spec`, `wolfstar-agent-needs-info`, or `wolfstar-agent-wait-to-implement` | GitHub             | One per triaged issue Revision                                      | triage route                                    |
-| Issue work           | `tasks.kind`                                                                                                                            | Scheduler          | One authorized Task for one issue Revision                          | issue work                                      |
-| Pull request triage  | Pull request title, `pull_request_triage` Agent role, or `pull_request_triage_runs`                                                     | Controller, Runner | One deterministic or low-cost decision per pull request head commit | pull request triage                             |
-| Take Ownership       | `repositories.take_ownership`                                                                                                           | Controller         | One policy per Repository mapping                                   | Take Ownership                                  |
-| Publication command  | `publication_commands`                                                                                                                  | Controller         | One to one Task                                                     | none                                            |
-| Review run           | `review_runs`                                                                                                                           | Runner             | N to 1 Revision, 1 to N Publications                                | review                                          |
-| Agent feedback       | `agent_feedback`                                                                                                                        | Controller         | One per Review run                                                  | Agent feedback                                  |
-| Review usage         | `review_runs.usage`                                                                                                                     | Runner             | One per Review run                                                  | Review usage                                    |
-| Review gate          | `review_runs.gates`                                                                                                                     | Controller         | Three per Review run                                                | gate                                            |
-| Review outcome       | `review_runs.outcome_tag`                                                                                                               | Controller         | One per Review run                                                  | READY, PENDING, or BLOCKED                      |
-| Running label        | `wolfstar-agent-running` label                                                                                                          | GitHub             | One per Item with a Running Task                                    | none                                            |
-| Review finding       | `review_runs.findings`                                                                                                                  | Adversarial review | N per Review run                                                    | issue                                           |
-| Auto merge           | `wolfstar-agent-auto-merge` label                                                                                                       | GitHub             | One per pull request                                                | auto-merge                                      |
-| Publication          | `review_publications`                                                                                                                   | Journal            | N to 1 Review run                                                   | automated review                                |
-| Approval             | `pull_request_approvals` or `tasks.kind = issue_work`                                                                                   | Controller         | N to 1 Revision                                                     | approval                                        |
-| Legacy issue cutoff  | `issue_cutoff`                                                                                                                          | Configuration      | One per service                                                     | none                                            |
-| Action required      | `tasks.state_tag`                                                                                                                       | Scheduler          | One Task state                                                      | action required                                 |
-| Incident             | `incidents`                                                                                                                             | Controller         | N to 1 Repository mapping, Task, or the service                     | incident                                        |
-| Recovery             | `incidents.recovery`                                                                                                                    | Controller         | One per Incident                                                    | Retrying, Retries exhausted, or Action required |
-| Process finding      | `process_findings`                                                                                                                      | Supervision        | N per workflow                                                      | none                                            |
+| Term                 | Storage                                                                                                                                 | Owner                        | Relationship                                                        | Customer word                                                    |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- | ------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| Agent session        | terminal host records; `desktop-sessions.json` for History                                                                              | Selected host and Controller | N to 1 Project, one persistent Worktree                             | Agent session                                                    |
+| Project              | host inventories                                                                                                                        | Selected host                | 1 to N Agent sessions                                               | Project                                                          |
+| Agent provider       | `agent.provider`                                                                                                                        | Configuration                | 1 to N Agents                                                       | agent provider                                                   |
+| Agent selection      | `agent_selection`                                                                                                                       | Controller                   | One per service                                                     | Agent selection                                                  |
+| Follow configuration | `agent_selection.tag`                                                                                                                   | Configuration                | One Agent selection state                                           | Follow configuration                                             |
+| Automatic selection  | `agent_selection.provider_order`                                                                                                        | Controller                   | One Agent selection state                                           | Automatic                                                        |
+| Reserve              | `agent.reservePercent`                                                                                                                  | Configuration                | One per service                                                     | Reserve                                                          |
+| Reasoning effort     | `agent_selection.reasoning_effort`                                                                                                      | Controller                   | One per Agent selection                                             | Reasoning effort                                                 |
+| Repository mapping   | `repositories`                                                                                                                          | Configuration                | 1 to N Items                                                        | repository                                                       |
+| Item                 | `subjects`                                                                                                                              | Journal                      | 1 to N Revisions, Tasks, Agents                                     | issue or pull request                                            |
+| Observation          | `observations`                                                                                                                          | Reconciliation               | N to 1 Revision                                                     | none                                                             |
+| Revision             | `revisions`                                                                                                                             | Journal                      | N to 1 Item, 1 to N Review runs                                     | none                                                             |
+| Agent                | `worker_sessions`                                                                                                                       | Runner                       | N to 1 Item, 1 to N Review runs                                     | agent                                                            |
+| Task                 | `tasks`, `worker_tasks`                                                                                                                 | Scheduler                    | N to 1 Item and Revision                                            | task                                                             |
+| Routine              | `routines`                                                                                                                              | Scheduler                    | N to 1 Repository mapping, 1 to N Routine runs                      | Routine                                                          |
+| Routine run          | `routine_runs`                                                                                                                          | Scheduler                    | N to 1 Routine                                                      | run                                                              |
+| d1-query-review      | compiled Routine definition                                                                                                             | Scheduler                    | One weekly Routine per production site                              | d1-query-review                                                  |
+| Lease holder         | `tasks.worker_id`                                                                                                                       | Scheduler                    | One per Running Task                                                | none                                                             |
+| Queue                | derived dashboard state                                                                                                                 | Controller                   | Orders active Tasks and actionable Items                            | queue                                                            |
+| Stats                | derived from Journal records                                                                                                            | Dashboard                    | N completed records per date range                                  | Stats                                                            |
+| Control API          | authenticated HTTP routes                                                                                                               | Controller                   | One per service, used by the dashboard and CLI                      | Control API                                                      |
+| Agent slots          | `agent_slots`                                                                                                                           | Controller                   | One count per host, 1 to N Agents                                   | Agent slots                                                      |
+| Pause                | `agent_control`                                                                                                                         | Controller                   | Stops new agent Tasks from starting                                 | Pause                                                            |
+| Restart request      | `restart_requests`                                                                                                                      | Controller                   | N per service, one active                                           | Restart after current work                                       |
+| Service update       | `origin/main`, `restart_requests.operation_tag`                                                                                         | Controller                   | One check, optional Restart request                                 | Update available; Update after current work                      |
+| Selection mode       | `agent_control.selection_mode`                                                                                                          | Controller                   | One per service                                                     | Selection mode                                                   |
+| Dismissal            | `item_dismissals`                                                                                                                       | Controller                   | One per Item                                                        | Dismiss                                                          |
+| Watch logs           | Sessions and running Agent actions                                                                                                      | Observer                     | Opens read-only live Task or Routine activity                       | Watch logs                                                       |
+| Weekly Codex limit   | live Codex account                                                                                                                      | System pane                  | One seven-day usage window                                          | Weekly Codex limit                                               |
+| Recently finished    | derived dashboard state                                                                                                                 | System pane                  | Three newest finished Tasks or Review runs                          | Recently finished                                                |
+| Self-hosted runner   | Docker container labels                                                                                                                 | GitHub Actions               | N per repository, independent of this service                       | self-hosted runner                                               |
+| Conflict resolution  | `tasks.kind`                                                                                                                            | Scheduler                    | One Task kind                                                       | conflict resolution                                              |
+| Baseline repair      | `tasks.kind`                                                                                                                            | Scheduler                    | One Task for one failing default branch commit                      | Baseline repair                                                  |
+| Repair               | `tasks.kind`                                                                                                                            | Scheduler                    | One Task for the findings of one Review run                         | repair                                                           |
+| Repair round         | `repair_reports`, Repair lineage in `publication_commands`                                                                              | Scheduler                    | One Repair in a chain of controller Repairs on one pull request     | repair round                                                     |
+| Context budget       | `agent.contextBudget`                                                                                                                   | Runner                       | One per agent session                                               | Context budget                                                   |
+| Stack                | `subjects` base ref, `publication_commands.base_ref`                                                                                    | GitHub                       | A pull request whose base is another pull request's head            | stack                                                            |
+| Issue triage         | `worker_tasks.kind`                                                                                                                     | Scheduler                    | One Task for one issue Revision                                     | issue triage                                                     |
+| Issue triage comment | `issue_triage_comment_commands`                                                                                                         | Controller                   | One canonical comment per issue                                     | automated triage                                                 |
+| Issue triage label   | `wolfstar-agent-ready-to-implement`, `wolfstar-agent-ready-to-spec`, `wolfstar-agent-needs-info`, or `wolfstar-agent-wait-to-implement` | GitHub                       | One per triaged issue Revision                                      | triage route                                                     |
+| Issue work           | `tasks.kind`                                                                                                                            | Scheduler                    | One authorized Task for one issue Revision                          | issue work                                                       |
+| Batch                | `batches`, `batch_units`, `batch_tasks`                                                                                                 | Scheduler                    | One per repository at a time, 1 to N Issue work Tasks, 1 to N units | Batch                                                            |
+| Pull request triage  | Pull request title, `pull_request_triage` Agent role, or `pull_request_triage_runs`                                                     | Controller, Runner           | One deterministic or low-cost decision per pull request head commit | pull request triage                                              |
+| Take Ownership       | `repositories.take_ownership`                                                                                                           | Controller                   | One policy per Repository mapping                                   | Take Ownership                                                   |
+| Publication command  | `publication_commands`                                                                                                                  | Controller                   | One to one Task                                                     | none                                                             |
+| Review run           | `review_runs`                                                                                                                           | Runner                       | N to 1 Revision, 1 to N Publications                                | review                                                           |
+| Agent feedback       | `agent_feedback`                                                                                                                        | Controller                   | One per Review run                                                  | Agent feedback                                                   |
+| Review usage         | `review_runs.usage`                                                                                                                     | Runner                       | One per Review run                                                  | Review usage                                                     |
+| Review gate          | `review_runs.gates`                                                                                                                     | Controller                   | Three per Review run                                                | gate                                                             |
+| Review outcome       | `review_runs.outcome_tag`                                                                                                               | Controller                   | One per Review run                                                  | READY, PENDING, or BLOCKED                                       |
+| Running label        | `wolfstar-agent-running` label                                                                                                          | GitHub                       | One per Item with a Running Task                                    | none                                                             |
+| Review finding       | `review_runs.findings`                                                                                                                  | Adversarial review           | N per Review run                                                    | issue                                                            |
+| Auto merge           | `wolfstar-agent-auto-merge` label                                                                                                       | GitHub                       | One per pull request                                                | auto-merge                                                       |
+| Publication          | `review_publications`                                                                                                                   | Journal                      | N to 1 Review run                                                   | automated review                                                 |
+| Approval             | `pull_request_approvals` or `tasks.kind = issue_work`                                                                                   | Controller                   | N to 1 Revision                                                     | approval                                                         |
+| Legacy issue cutoff  | `issue_cutoff`                                                                                                                          | Configuration                | One per service                                                     | none                                                             |
+| Action required      | `tasks.state_tag`                                                                                                                       | Scheduler                    | One Task state                                                      | action required                                                  |
+| Incident             | `incidents`                                                                                                                             | Controller                   | N to 1 Repository mapping, Task, or the service                     | incident                                                         |
+| Recovery             | `incidents.recovery`                                                                                                                    | Controller                   | One per Incident                                                    | Retrying, OnNextOperation, Retries exhausted, or Action required |
+| Process finding      | `process_findings`                                                                                                                      | Supervision                  | N per workflow                                                      | none                                                             |
 
 ### GitHub terms adopted unchanged
 
@@ -113,11 +120,43 @@ Collisions
 
 ## Terms
 
+### Agent session
+
+One saved conversation with an Agent provider in one Worktree on Desktop or Hogwild.
+
+An Agent session keeps the host selected when it starts. It never moves between hosts.
+
+An Agent session keeps its messages, Agent events, and native provider session ID.
+Stop requires confirmation from the selected host before another turn starts.
+
+Never: chat, thread. Use Agent session.
+
+### Host memory
+
+Physical memory and charged session memory on the selected host.
+Regular starts follow the root host policy. Waiting sessions retry in request order.
+Force requests bounded manual admission for the same session. The root host can refuse it.
+Host memory differs from provider Capacity and Reserve.
+
+### Initial prompt
+
+Optional text passed once through provider arguments when an Agent session starts.
+It stays with the saved session request while the session waits for Host memory.
+Use Initial prompt instead of Task for this text.
+
+### Project
+
+One repository checkout on Desktop or Hogwild within `~/pkg` or `~/sites`.
+
+Each host reports its own Projects. A Project has many Agent sessions. Each Agent session keeps its own Worktree.
+
+Never: workspace, folder. Use Project.
+
 ### Agent provider
 
 The one local agent runtime that answers every Agent turn: `claude`, `codex`, or `opencode`.
 
-The Agent provider owns its models, reasoning efforts, sessions, and Eject command. A saved session belongs to the provider that created it.
+The Agent provider owns its models, reasoning efforts, and sessions. A saved session belongs to the provider that created it.
 
 Use Agent provider. Do not use backend, engine, model provider, or vendor.
 
@@ -178,6 +217,18 @@ How hard a model reasons before it answers: `none`, `low`, `medium`, `high`, `xh
 `reasoning effort` is Codex's own name for this setting, so this service uses it for both providers.
 
 Use Reasoning effort. Do not use reasoning variant, thinking level, or effort level.
+
+### Reasoning effort band
+
+The Reasoning effort one Review run answers at, chosen from the changed paths and counts.
+
+A small, ordinary change reviews at `low`, a middling one at `medium`, and a wide, sensitive,
+or unreadable one at `high`. A file an agent reads as instructions is always `high`.
+
+The band only lowers the Agent default. A pinned Reasoning effort, or one the configuration
+names for `adversarial_review`, replaces the default, and the band then leaves it alone.
+
+Use Reasoning effort band. Do not use review depth, review tier, or effort level.
 
 ### Repository mapping
 
@@ -259,6 +310,30 @@ Stats derives facts from the Journal. It never replaces the records that support
 
 Use Stats for the page and route. Do not use analytics, insights, value score, or impact score.
 
+### Control API
+
+The authenticated HTTP interface for reading service state and requesting durable controls.
+
+The dashboard and `wolfstar-github-agent control` use the same routes. A Control API request never edits the Journal directly.
+
+Use Control API. Do not use dashboard API, admin API, management API, or runner API.
+
+### Agent slots
+
+How many Agents one host may run at once.
+
+Hogwild and the desktop hold their own count. Wolfstar sets each one from the
+System pane or the tray. A count is durable, and it survives a restart.
+
+`agent.maximum_active_agents` is the ceiling, not the count in force. Host
+memory decides the count on a host nobody has set, and after that it is advice:
+the System pane names the suggestion, and a count above it still runs.
+
+A new count applies to the next Agent turn. Running Agents finish.
+
+Use Agent slots. Do not use concurrency, parallelism, workers, or capacity.
+Capacity means the Agent provider window that the Reserve protects.
+
 ### Pause
 
 A durable service control that stops new agent Tasks from starting. Active agents and controller Publications finish.
@@ -276,6 +351,18 @@ A Restart request stops new agent Tasks from starting. Active agents and control
 Pause remains unchanged. A service that was Paused stays Paused after the restart.
 
 Use Restart request for the record and `Restart after current work` for the control. Do not use restart queue or drain mode.
+
+### Service update
+
+A newer service commit on `origin/main`, and the safe action that deploys it.
+
+The controller checks without changing the deployed checkout. It shows the deployed commit, the latest commit, and the last check time.
+
+`Update after current work` pins the latest commit in a Restart request. New Tasks stop. Active work finishes before the service prepares that commit.
+
+A Service update never starts automatically.
+
+Use `Update available` for the state and `Update after current work` for the control. Do not use upgrade, refresh, or sync.
 
 ### Selection mode
 
@@ -319,15 +406,9 @@ Restoring queues nothing by itself. The next observation replans the Item from i
 
 Use Dismissal for the record and `Dismiss` for the control. Do not use skip, ignore, delete, mute, or snooze.
 
-### Eject
-
-Stop one active automated Task, then open its saved agent session in Wolfstar's terminal for interactive control.
-
-Use Eject for this transfer. Do not use attach or take over.
-
 ### Watch logs
 
-Open one active Task's live agent event stream in Wolfstar's terminal. Automation continues unchanged.
+Open one active Task or Routine run's live Agent activity in Sessions. Automation continues unchanged.
 
 Use Watch logs for this view. Do not use Monitor or attach.
 
@@ -344,6 +425,16 @@ One local GitHub Actions runner that executes workflow jobs.
 A self-hosted runner is independent of Wolfstar GitHub Agent. Its availability never changes Wolfstar GitHub Agent status.
 
 Use self-hosted runner. Do not use Agent, worker, executor, box, or build agent.
+
+### Repair round
+
+One Repair in the chain of controller Repairs that produced the current pull request head.
+
+Round 1 is the first Repair after a contributor commit. If the fresh Review of a Repair commit still finds a defect, the next round starts. A later round reads every earlier round's commit, report, and target findings before it changes anything.
+
+A pull request gets 3 rounds per contributor commit. A contributor push ends the chain and starts a fresh count. When the rounds are spent, Repair stops with Action required, and the canonical comment lists every round.
+
+Use Repair round. Do not use attempt, retry, iteration, or loop.
 
 ### Conflict resolution
 
@@ -365,6 +456,16 @@ An issue with the Ready to implement route authorizes Issue work. An outside con
 
 The Issue triage Agent continues its own session for Issue work.
 
+### Batch
+
+One planned group of Ready issues in one repository, worked under one Agent permit.
+
+A Batch reserves its Issue work Tasks when it opens, so plain Issue work leaves them alone. One Batch planning turn then decides the units: which issues one pull request closes, and which pull request stacks on which. Each unit runs as its own Issue work Agent in its own worktree and publishes the moment it finishes. Nothing waits for the whole Batch.
+
+A Batch owns no Item, like a Routine, so it holds its own lease. Only Routine-filed issues join a Batch for now. `issue_batches: false` turns planning off.
+
+Use Batch. Do not use group, bundle, orchestration, or wave. The Agent that plans it is the Batch planning turn, never an orchestrator. A unit's Agent is an Agent, never a sub agent or worker.
+
 ### Issue triage
 
 One agent Task that assesses one exact issue state.
@@ -385,13 +486,21 @@ One self identified automated triage record on an issue. Re-runs update the cano
 
 ### Pull request triage
 
-One routing decision for one exact pull request head commit.
+One routing decision for one exact pull request head commit, made at observation time before any Task is queued.
 
-A conventional non-breaking `chore:` title skips Review without starting an Agent.
+The path rule decides first. One changed path outside the prose set requires Review without a model call. Agent instruction files and `.github/**` count as behaviour, not prose.
 
-Every other pull request uses a low-cost Agent decision. It requires or skips an adversarial Review. Any uncertainty requires Review.
+A prose-only pull request reuses the stored decision for the same head commit. Otherwise it asks the Classification service, which answers from the title and changed paths with a confidence. A skip needs confidence at or above its floor; any uncertainty or failure requires Review.
 
 `wolfstar-agent-review-required` records the automatic route to Review. `wolfstar-agent-review-skipped` records a skipped Review.
+
+### Classification
+
+A typed decision from the Jev model, reached through the Cloudflare AI endpoint. Answers carry probabilities and a confidence, never prose.
+
+One Classification call sends every question about one state in a single request. Pull request triage is the first caller; it decides skip versus Review for a prose-only pull request.
+
+Every caller keeps its deterministic floor, and a Classification failure takes the safe direction. A stored decision for the same input is reused instead of asked again.
 
 `wolfstar-agent-review` is the manual override. The service consumes it after it records Approval.
 
@@ -420,6 +529,16 @@ A Review run stores its Revision, Agent report, controller gate evidence, Review
 Store it before later GitHub reads or writes. A failed controller operation resumes from the Review run.
 
 Named after GitHub's `check run`, which has the same shape: one execution against one commit that reports a conclusion. Do not use attempt, pass, or session.
+
+### Review check run
+
+One GitHub check run, named `wolfstar-agent-kit / Review`, that mirrors one Review run's progress and outcome on the pull request.
+
+It concludes `success` only when the Review outcome is READY, and `neutral` for every other outcome. It never concludes `failure`, so branch protection reads no verdict from it. A trusted foreign review reports no check run. A stopped Review closes its check run as `neutral`, so a closed Review never reads as stalled. A user-token repository reports no check run, because the check run belongs to the App bot's identity.
+
+The CI Review gate skips every check run this service's own GitHub App wrote, so a Review never gates on itself.
+
+Do not use agent check, review status check, or status check. Do not require it in branch protection.
 
 ### Review usage
 
@@ -469,6 +588,14 @@ Use `Fixed` after repair. Use `Open` with the next action while unresolved.
 
 GitHub's `annotation` is anchored to a file and line on a check run. A Review finding is prose, so it is not an annotation. Never use annotation for it.
 
+### Pull request diagram
+
+One PR Lens picture of an Issue work change, drawn from a graph document the Agent authors.
+
+The Agent writes `.pr-lens/graph.json` in its worktree when the change touches three or more modules, crosses a boundary, or has a sequence a reviewer must follow. The controller validates and draws the top view, uploads it as a GitHub user attachment with Wolfstar's CLI login, and places it in the description above the AI disclosure. A document that does not validate is logged and the pull request opens without a picture.
+
+Use Pull request diagram. Do not use lens, graph, picture, image, or architecture diagram for the published result. The Agent's input is the graph document.
+
 ### Publication
 
 One immutable record of a GitHub write: an automated review comment or a pushed commit.
@@ -501,6 +628,8 @@ After a published `READY` Review outcome at or above the configured confidence, 
 
 Auto merge never changes whether a pull request is reviewed. Automated review runs either way.
 
+A repository block may widen the scope with `auto_merge.pull_requests: every` and its own `minimum_confidence`. Then every trusted-author pull request in that repository is a candidate, label or not. The default scope is `labelled`.
+
 Write GitHub's feature as "auto-merge", hyphenated. Do not use self merge, automatic approval, automerge, or merge tier.
 
 ### Legacy issue cutoff
@@ -509,7 +638,13 @@ One fixed date. Ignore issues created before this date. Do not derive it from th
 
 ### Action required
 
-An Item or Task that requires Wolfstar's decision or action.
+An Item or Task whose next action cannot start through the scheduler.
+
+The Dashboard separates these by who acts next.
+**Needs you** contains human decisions, permissions, information requests, and blockers whose owner is unclear.
+**Agent tasks** contains specs, evidence gathering, repairs, check investigations, and stopped Agent work.
+Agent tasks are not queued or running. Opening their instructions starts no Agent.
+Only Needs you contributes to the document count and browser notifications.
 
 `action_required` is GitHub's own check conclusion for the same situation, so this service reuses it.
 
@@ -531,7 +666,74 @@ Use instead of error, problem, outage, or alert in dashboard copy.
 
 What the controller will do about one Incident without being asked.
 
-One of `Retrying`, `Retries exhausted`, or `Action required`.
+Recovery names a scheduled retry deadline, the next Controller operation, exhausted retries, or a required action.
+A past deadline reads `Retry due`. It does not claim that a retry is running.
+
+### Merge risk
+
+What a wrong merge of one pull request would cost, if nobody read it first. One of `Contained`, `Reviewable`, or `Sensitive`.
+
+It routes the merge and never the Review. A Review runs on every tracked pull request whatever the Merge risk says, so it is not a review waiver and never an exemption.
+
+Two independent answers produce it. The controller computes a floor from the changed paths and their counts, and the Review Agent returns a claim from the diff. The more dangerous of the two wins, so `Contained` needs both to agree.
+
+Use Merge risk. Do not use risk level, merge tier, risk score, or risk rating.
+
+### Benchmark
+
+One named, repeatable measurement a repository declares in its Benchmark manifest, at `perf/benchmarks.json`.
+
+Use Benchmark. Do not use test, check, or metric for this.
+
+### Measurement
+
+One commit's Benchmark numbers, stored as a git note by the repository's own CI.
+
+Use Measurement. Never use baseline for a stored number: Baseline means default branch health, as in Baseline repair.
+
+### Regression
+
+One confirmed, persistent slowdown of one Benchmark, attributed to one commit.
+
+A Regression is not an Incident, because an Incident is a failure of the controller itself. It is not a Review finding either, because that belongs to adversarial Review.
+
+### Suspect
+
+A delta that cleared its Threshold but has not persisted yet: across three later Measurements for a Benchmark, or across a second consecutive Scan for a Lab series. A Suspect appears in the Routine report and files nothing.
+
+### Opportunity
+
+A Benchmark the stored series says is worth attacking, with no Regression behind it: one that drifted without any single commit clearing its Threshold, one whose count keeps climbing, or the one that costs the most.
+
+An Opportunity is proven by the pull request that answers it. Its automated performance comment reports the result, and a pull request whose comment shows no improvement is closed rather than merged.
+
+### Threshold
+
+What a delta must clear before it counts. For a Regression: a relative floor, and a multiple of the noise the same Measurement recorded. For a Lab drop: a fixed floor per metric, and a share of the reference Scans' median.
+
+Use Threshold. Do not use budget, which is a banned synonym for Reserve.
+
+### Vitals finding
+
+One row of NuxtSEO's `vitals findings`: a field Core Web Vital failing for real users on one route, attributed to one element selector.
+
+NuxtSEO names it a finding, so this keeps its word. Always qualify it: a bare finding is ambiguous with Review finding and Process finding.
+
+### Lab series
+
+The completed Lighthouse Scans of one page on one strategy, mobile or desktop, oldest first.
+
+Scan is NuxtSEO's word and stays. A Lab series never mixes strategies, because NuxtSEO scans each on its own day and a mixed list reads a schedule as a drop.
+
+### Poor series
+
+A Lab series whose last two Scans sit above the Poor line for one metric. It files an issue whether or not the page was ever better.
+
+### Lab drop
+
+A Lab series whose last two or more Scans each clear the Threshold against the median of the Scans before them, attributed to the commit range deployed in between.
+
+A Lab drop is not a Regression, because a Regression belongs to a Benchmark and one commit. When the Scans before the drop disagree with each other, the series is Unstable and files nothing.
 
 ### Process finding
 
@@ -539,38 +741,39 @@ Evidence that a skill, policy, or workflow should change.
 
 ## Banned
 
-| Never                                                                              | Use instead          | Why                                                                                              |
-| ---------------------------------------------------------------------------------- | -------------------- | ------------------------------------------------------------------------------------------------ |
-| subject, work item, entity                                                         | Item                 | One concept, and Item follows GitHub Projects                                                    |
-| worker, for the thing that answers a turn                                          | Agent                | Two words for the running agent. `worker_id` keeps the word, because there it means Lease holder |
-| attempt as a noun, pass                                                            | Review run           | Named after GitHub's check run                                                                   |
-| rating, vote, reaction                                                             | Agent feedback       | One explicit judgment about one Review run                                                       |
-| annotation                                                                         | Review finding       | GitHub anchors annotations to a line; findings are prose                                         |
-| needs attention, stuck, human required                                             | Action required      | GitHub's own check conclusion                                                                    |
-| waiting, in progress                                                               | PENDING              | GitHub's own check status and review state                                                       |
-| failed, as a Review outcome                                                        | BLOCKED              | GitHub's own mergeable state                                                                     |
-| job                                                                                | Task                 | `job` is a GitHub Actions unit and must keep that meaning                                        |
-| scheduled task, cron task                                                          | Routine              | A Task belongs to an Item. A Routine answers a clock.                                            |
-| bot                                                                                | Agent                | Reads as a GitHub App, which the agent is not                                                    |
-| ticket, card                                                                       | issue                | GitHub's word                                                                                    |
-| PR in prose                                                                        | pull request         | GitHub's word                                                                                    |
-| target branch, destination                                                         | base branch          | GitHub's word                                                                                    |
-| source branch, commit id                                                           | head ref, head SHA   | GitHub's word                                                                                    |
-| CI job, build, test run                                                            | check run            | GitHub's word                                                                                    |
-| merge status, conflict flag                                                        | mergeable state      | GitHub's word                                                                                    |
-| automerge, self merge, merge tier                                                  | auto-merge           | GitHub's spelling of its own feature                                                             |
-| error, problem, outage, alert                                                      | Incident             | One concept                                                                                      |
-| agent config, model config, model override                                         | Agent selection      | One concept                                                                                      |
-| opt-in, allowlist, gating, triage mode                                             | Selection mode       | One concept                                                                                      |
-| skip, ignore, mute, snooze, delete                                                 | Dismissal            | GitHub's own word for the same decision                                                          |
-| config default, unset, no override, clear                                          | Follow configuration | One Agent selection state, and one label                                                         |
-| auto provider, failover, load balancing, fallback mode                             | Automatic selection  | One Agent selection state                                                                        |
-| quota, headroom, budget, safety margin                                             | Reserve              | One concept                                                                                      |
-| reasoning variant, thinking level, effort level                                    | Reasoning effort     | Codex's own name for the setting                                                                 |
-| PR Owner, PR ownership, deployment ownership                                       | Take Ownership       | One workflow                                                                                     |
-| risk level, skip review, review waiver, review exemption                           | Auto merge           | Auto merge never affects whether review runs                                                     |
-| restart queue, drain mode                                                          | Restart request      | Queue and Pause already name different service concepts                                          |
-| journal, lease, fence, mutation, publication, revision, snapshot, item, agent role | rewrite the sentence | Internal machinery, never user-visible                                                           |
+| Never                                                                              | Use instead                                     | Why                                                                                              |
+| ---------------------------------------------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| subject, work item, entity                                                         | Item                                            | One concept, and Item follows GitHub Projects                                                    |
+| worker, for the thing that answers a turn                                          | Agent                                           | Two words for the running agent. `worker_id` keeps the word, because there it means Lease holder |
+| attempt as a noun, pass                                                            | Review run                                      | Named after GitHub's check run                                                                   |
+| rating, vote, reaction                                                             | Agent feedback                                  | One explicit judgment about one Review run                                                       |
+| annotation                                                                         | Review finding                                  | GitHub anchors annotations to a line; findings are prose                                         |
+| needs attention, stuck, human required                                             | Action required                                 | GitHub's own check conclusion                                                                    |
+| waiting, in progress                                                               | PENDING                                         | GitHub's own check status and review state                                                       |
+| failed, as a Review outcome                                                        | BLOCKED                                         | GitHub's own mergeable state                                                                     |
+| job                                                                                | Task                                            | `job` is a GitHub Actions unit and must keep that meaning                                        |
+| scheduled task, cron task                                                          | Routine                                         | A Task belongs to an Item. A Routine answers a clock.                                            |
+| bot                                                                                | Agent                                           | Reads as a GitHub App, which the agent is not                                                    |
+| ticket, card                                                                       | issue                                           | GitHub's word                                                                                    |
+| PR in prose                                                                        | pull request                                    | GitHub's word                                                                                    |
+| target branch, destination                                                         | base branch                                     | GitHub's word                                                                                    |
+| source branch, commit id                                                           | head ref, head SHA                              | GitHub's word                                                                                    |
+| CI job, build, test run                                                            | check run                                       | GitHub's word                                                                                    |
+| merge status, conflict flag                                                        | mergeable state                                 | GitHub's word                                                                                    |
+| automerge, self merge                                                              | auto-merge                                      | GitHub's spelling of its own feature                                                             |
+| error, problem, outage, alert                                                      | Incident                                        | One concept                                                                                      |
+| agent config, model config, model override                                         | Agent selection                                 | One concept                                                                                      |
+| opt-in, allowlist, gating, triage mode                                             | Selection mode                                  | One concept                                                                                      |
+| skip, ignore, mute, snooze, delete                                                 | Dismissal                                       | GitHub's own word for the same decision                                                          |
+| config default, unset, no override, clear                                          | Follow configuration                            | One Agent selection state, and one label                                                         |
+| auto provider, failover, load balancing, fallback mode                             | Automatic selection                             | One Agent selection state                                                                        |
+| quota, headroom, budget, safety margin                                             | Reserve                                         | One concept                                                                                      |
+| reasoning variant, thinking level, effort level                                    | Reasoning effort                                | Codex's own name for the setting                                                                 |
+| PR Owner, PR ownership, deployment ownership                                       | Take Ownership                                  | One workflow                                                                                     |
+| risk level, merge tier, skip review, review waiver, review exemption               | Auto merge, or Merge risk for the routing value | Auto merge never affects whether review runs                                                     |
+| restart queue, drain mode                                                          | Restart request                                 | Queue and Pause already name different service concepts                                          |
+| upgrade, refresh, sync                                                             | Service update                                  | These words name different package and data operations                                           |
+| journal, lease, fence, mutation, publication, revision, snapshot, item, agent role | rewrite the sentence                            | Internal machinery, never user-visible                                                           |
 
 ## Open questions
 

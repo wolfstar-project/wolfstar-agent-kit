@@ -275,6 +275,61 @@ describe('listQueuedReviewStatuses', () => {
     ])
   })
 
+  it('answers the Approval prompt per head commit, not per Revision', () => {
+    const store = createStore()
+    const contributorPullRequest = (headSha: string, title: string) =>
+      pullRequestItem({
+        number: 30,
+        author: 'contributor',
+        headRef: 'fix/from-contributor',
+        headSha,
+        mergeState: 'clean',
+        title,
+        url: 'https://github.com/wolfstar-project/example/pull/30',
+      })
+    const observed = store.recordObservation({
+      externalId: 'approval-prompt-head30',
+      observedAt: '2026-08-13T01:00:00.000Z',
+      source: 'poll',
+      subject: contributorPullRequest('head30', 'Bound a start tag'),
+    })
+    if (observed._tag !== 'Inserted') throw new Error('Expected a new pull request revision.')
+    expect(store.hasApprovalPromptComment('wolfstar-project/example', 30, observed.revisionId)).toBe(false)
+    expect(
+      store.recordApprovalPromptComment({
+        repository: 'wolfstar-project/example',
+        pullRequestNumber: 30,
+        revisionId: observed.revisionId,
+        commentId: 900,
+        body: '### 🤖 REVIEW PAUSED',
+        at: '2026-08-13T01:00:01.000Z',
+      }),
+    ).toBe(true)
+    expect(store.hasApprovalPromptComment('wolfstar-project/example', 30, observed.revisionId)).toBe(true)
+
+    // An edit that leaves the head commit alone keeps the prompt, so a later
+    // poll asks GitHub for nothing.
+    const edited = store.recordObservation({
+      externalId: 'approval-prompt-head30-edited',
+      observedAt: '2026-08-13T02:00:00.000Z',
+      source: 'poll',
+      subject: contributorPullRequest('head30', 'Bound a start tag by the bytes it retains'),
+    })
+    if (edited._tag !== 'Inserted') throw new Error('Expected the edit to create a new Revision.')
+    expect(store.hasApprovalPromptComment('wolfstar-project/example', 30, edited.revisionId)).toBe(true)
+
+    // A force push is a new head commit. No prompt answers it, so the prompt
+    // path clears the verdict label the old head left behind.
+    const forcePushed = store.recordObservation({
+      externalId: 'approval-prompt-head31',
+      observedAt: '2026-08-13T03:00:00.000Z',
+      source: 'poll',
+      subject: contributorPullRequest('head31', 'Bound a start tag by the bytes it retains'),
+    })
+    if (forcePushed._tag !== 'Inserted') throw new Error('Expected the force push to create a new Revision.')
+    expect(store.hasApprovalPromptComment('wolfstar-project/example', 30, forcePushed.revisionId)).toBe(false)
+  })
+
   it('reports the pause for a Task no agent can claim, so the comment stops claiming progress', () => {
     const store = createStore()
     queuedRepair(store, 24, '2026-08-13T01:00:00.000Z')
@@ -558,5 +613,124 @@ describe('listQueuedReviewStatuses across revisions', () => {
     if (pushed._tag !== 'Inserted') throw new Error('Expected the pushed head to be a new revision.')
 
     expect(store.listQueuedReviewStatuses()).toEqual([])
+  })
+})
+
+/**
+ * One pull request whose Review published a progress comment, then failed.
+ * The Task keeps the canonical comment, so the sweep is what tells the pull
+ * request the attempt stopped.
+ */
+function failingReview(store: ReturnType<typeof openJournalStore>, number: number, at: string) {
+  const observed = store.recordObservation({
+    externalId: `failing-review-${number}`,
+    observedAt: at,
+    source: 'poll',
+    subject: pullRequestItem({ number, headSha: `head${number}`, mergeState: 'clean' }),
+  })
+  if (observed._tag !== 'Inserted') throw new Error('Expected a new pull request revision.')
+  const review = store.claimNextAdversarialReviewTask(`review-agent-${number}`, at, 600_000)
+  if (review === null) throw new Error('Expected the review Task.')
+  const staged = store.stageReviewStatus({
+    taskKind: 'adversarial_review',
+    phase: 'review',
+    taskId: review.id,
+    workerId: review.state.workerId,
+    fence: review.state.fence,
+    at,
+    revisionId: observed.revisionId,
+    expectedHeadSha: review.pullRequest.headSha,
+    body: '### 🤖 REVIEWING · 35% · Git worktree ready',
+  })
+  if (staged._tag === 'Rejected') throw new Error(staged.reason)
+  const command = store.claimReviewStatus(staged.commandId, `status-worker-${number}`, at, 60_000)
+  if (command === null) throw new Error('Expected the review status command.')
+  store.completeReviewStatus({
+    commandId: command.id,
+    workerId: command.workerId,
+    fence: command.fence,
+    at,
+    commentId: 200 + number,
+    url: `https://github.com/wolfstar-project/example/pull/${number}#issuecomment-${200 + number}`,
+  })
+  return review
+}
+
+const providerFailure = 'The opencode session failed: Unexpected server error.'
+
+function failUntilFailed(
+  store: ReturnType<typeof openJournalStore>,
+  firstClaim: { id: string; state: { workerId: string; fence: number } },
+  at: string,
+) {
+  let task: { id: string; state: { workerId: string; fence: number } } | null = firstClaim
+  while (task !== null) {
+    const outcome = store.failWorkerTask({
+      taskId: task.id,
+      workerId: task.state.workerId,
+      fence: task.state.fence,
+      at,
+      reason: providerFailure,
+    })
+    task = outcome === 'Retrying' ? store.claimNextAdversarialReviewTask('retry-agent', at, 600_000) : null
+  }
+}
+
+describe('a Review whose attempt failed', () => {
+  // nuxtseo.com#1796: the comment held REVIEWING 35% during every backoff and
+  // a plain QUEUED after every requeue, for a day, and never named the failure.
+  it('names the failure and the restart time while the Task waits on a backoff', () => {
+    const store = createStore()
+    failUntilFailed(store, failingReview(store, 40, '2026-08-13T01:00:00.000Z'), '2026-08-13T01:00:00.000Z')
+
+    expect(store.listQueuedReviewStatuses()).toEqual([
+      expect.objectContaining({
+        pullRequestNumber: 40,
+        attempt: { _tag: 'Retrying', reason: providerFailure, retry: null, nextAttemptAt: '2026-08-13T01:00:00.000Z' },
+      }),
+    ])
+  })
+
+  it('keeps naming the failure once the retry is back in the Queue', () => {
+    const store = createStore()
+    failUntilFailed(store, failingReview(store, 41, '2026-08-13T01:00:00.000Z'), '2026-08-13T01:00:00.000Z')
+    expect(store.retryRecoverableWorkerFailures('2026-08-13T01:01:00.000Z')).toBe(1)
+
+    expect(store.listQueuedReviewStatuses()).toEqual([
+      expect.objectContaining({
+        pullRequestNumber: 41,
+        queue: { _tag: 'Waiting', position: 1, total: 1 },
+        attempt: { _tag: 'Retrying', reason: providerFailure, retry: { spent: 1, limit: 12 }, nextAttemptAt: null },
+      }),
+    ])
+  })
+
+  it('says the Review is stuck once its retries run out', () => {
+    const store = createStore()
+    let at = '2026-08-13T00:00:00.000Z'
+    let claim = failingReview(store, 42, at)
+    for (;;) {
+      failUntilFailed(store, claim, at)
+      // Past the longest backoff, so only the budget decides.
+      at = new Date(Date.parse(at) + 60 * 60_000).toISOString()
+      if (store.retryRecoverableWorkerFailures(at) === 0) break
+      const reclaimed = store.claimNextAdversarialReviewTask('retry-agent', at, 600_000)
+      if (reclaimed === null) throw new Error('Expected the requeued Review.')
+      claim = reclaimed
+    }
+
+    expect(store.listQueuedReviewStatuses()).toEqual([
+      expect.objectContaining({
+        pullRequestNumber: 42,
+        attempt: { _tag: 'Stuck', reason: providerFailure },
+      }),
+    ])
+  })
+
+  it('leaves a first attempt alone', () => {
+    const store = createStore()
+    queuedRepair(store, 43, '2026-08-13T01:00:00.000Z')
+
+    expect(store.listQueuedReviewStatuses()).toEqual([expect.objectContaining({ attempt: { _tag: 'FirstAttempt' } })])
   })
 })

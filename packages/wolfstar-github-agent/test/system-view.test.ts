@@ -1,15 +1,93 @@
 import type { ActiveAgent, AgentStartState, Incident, QueueEntry } from '../src/types.ts'
 import { describe, expect, it } from 'vitest'
+import { systemState } from '../dashboard/app/utils/dashboard.ts'
+import { hostTasks } from '../dashboard/app/utils/host-tasks.ts'
 import {
   capacityRow,
   circuitNotice,
+  desktopPresentation,
   documentTitle,
   faviconTone,
+  githubRateLimitRow,
   nextRoutineInstant,
   restartNotice,
+  retryDeadline,
+  serviceUpdatePresentation,
   systemChipState,
 } from '../dashboard/app/utils/system.ts'
 import { dashboardSnapshot } from './fixtures.ts'
+
+it('withholds desktop activity when its connected protocol cannot accept work', () => {
+  const desktop = {
+    connected: true,
+    current: false,
+    protocol: 11,
+    seenAt: 0,
+    report: { protocol: 10, memoryGiB: 16, reservedGiB: 0, agents: 0, actions: 0 },
+  }
+  expect(desktopPresentation(desktop, true)).toMatchObject({ label: 'Update required', tone: 'warning', report: null })
+  expect(desktopPresentation({ ...desktop, current: true }, false)).toMatchObject({
+    label: 'Unavailable',
+    report: null,
+  })
+  expect(desktopPresentation({ ...desktop, current: true }, true)).toMatchObject({
+    label: 'Idle',
+    report: desktop.report,
+  })
+})
+
+it('warns about an incompatible desktop while Hogwild can still start work', () => {
+  const snapshot = dashboardSnapshot({
+    agentStart: { _tag: 'Available' },
+    desktop: {
+      connected: true,
+      current: false,
+      protocol: 11,
+      seenAt: 0,
+      report: { protocol: 10, memoryGiB: 16, reservedGiB: 0, agents: 0, actions: 0 },
+    },
+  })
+  expect(systemChipState(snapshot, new Date(snapshot.generatedAt))).toMatchObject({ _tag: 'DesktopUpdateRequired' })
+})
+
+it('shows circuit recovery as due instead of promising a retry in the past', () => {
+  expect(retryDeadline('2026-10-08T00:00:00Z', new Date('2026-10-11T00:00:00Z'))).toBe('Retry due')
+})
+
+it('names the GitHub credential and counts down without claiming recovery', () => {
+  const hold = {
+    quota: { _tag: 'User' as const, login: 'wolfstar-project' },
+    kind: 'Secondary' as const,
+    retryAt: '2026-10-10T16:06:45.000Z',
+  }
+  expect(githubRateLimitRow(hold, new Date('2026-10-10T16:05:00Z'))).toMatchObject({
+    credential: 'GitHub account',
+    owner: 'wolfstar-project',
+    limit: 'Secondary rate limit',
+    retry: 'Retry in 1m 45s',
+  })
+  expect(githubRateLimitRow(hold, new Date('2026-10-10T16:07:00Z'))).toMatchObject({
+    retry: 'Retry due',
+    detail: 'The next GitHub request checks recovery.',
+  })
+})
+
+it('surfaces GitHub rate limits before generic Incidents and retains other Incident counts', () => {
+  const snapshot = dashboardSnapshot({
+    githubRateLimits: [
+      {
+        quota: { _tag: 'Installation', owner: 'wolfstar-project' },
+        kind: 'Primary',
+        retryAt: '2026-10-10T16:06:45.000Z',
+      },
+    ],
+    incidents: [incident(), incident({ id: 'rate-limit', operation: 'github_rate_limit' })],
+  })
+  expect(systemChipState(snapshot, new Date(snapshot.generatedAt))).toMatchObject({
+    _tag: 'GitHubRateLimited',
+    incidents: 1,
+  })
+})
 
 function activeAgent(overrides: Partial<ActiveAgent> = {}): ActiveAgent {
   return {
@@ -33,6 +111,21 @@ function activeAgent(overrides: Partial<ActiveAgent> = {}): ActiveAgent {
     ...overrides,
   }
 }
+
+it('shows only current host assignments with their Item and progress', () => {
+  const snapshot = dashboardSnapshot({
+    agents: [activeAgent(), activeAgent({ id: 'desktop-task', title: 'Desktop work' })],
+    hostTasks: [
+      { taskId: 'agent-1', host: 'hogwild' },
+      { taskId: 'desktop-task', host: 'desktop' },
+    ],
+  })
+  expect(hostTasks(snapshot, 'desktop')).toMatchObject([
+    { title: 'Desktop work', url: 'https://github.com/wolfstar-project/nuxt-seo/pull/412', progress: 'Working' },
+  ])
+  expect(hostTasks(snapshot, 'hogwild')).toMatchObject([{ title: 'A pull request' }])
+  expect(hostTasks({ ...snapshot, hostTasks: [] }, 'desktop')).toEqual([])
+})
 
 function incident(overrides: Partial<Incident> = {}): Incident {
   return {
@@ -78,18 +171,74 @@ describe('documentTitle', () => {
 })
 
 describe('systemChipState', () => {
-  it('reports nothing before the first snapshot, so placeholder state never reads as amber', () => {
-    expect(systemChipState(dashboardSnapshot({ generatedAt: '', agentStart: { _tag: 'WritesDisabled' } }))).toEqual({
-      _tag: 'Loading',
+  it('keeps operation-based recovery out of the Action required state', () => {
+    const snapshot = dashboardSnapshot({ incidents: [incident({ recovery: { _tag: 'OnNextOperation' } })] })
+    expect(systemState(snapshot)).toEqual({ label: 'Retrying', tone: 'warning' })
+  })
+  it('withholds live counts after the last confirmed update expires', () => {
+    const snapshot = dashboardSnapshot({ agentStart: { _tag: 'Available' }, agents: [activeAgent()] })
+    expect(systemChipState(snapshot, new Date('2026-08-13T01:01:31Z'))).toEqual({
+      _tag: 'Unavailable',
+      lastUpdatedAt: snapshot.generatedAt,
     })
   })
 
+  it('shows retained Repair recovery after its Incident has cleared', () => {
+    const snapshot = dashboardSnapshot({
+      agentStart: { _tag: 'Available' },
+      repairRecoveryCandidates: [
+        {
+          _tag: 'Plan',
+          taskId: `logged-finding:${'a'.repeat(64)}`,
+          commitSha: 'b'.repeat(40),
+          repository: 'wolfstar-project/example',
+          pullRequestNumber: 24,
+          reason: 'Recovery was interrupted.',
+        },
+      ],
+    })
+    expect(systemChipState(snapshot, new Date(snapshot.generatedAt))).toMatchObject({
+      _tag: 'RepairRecovery',
+      repairs: 1,
+    })
+    expect(systemState(snapshot)).toEqual({ label: 'Action required', tone: 'error' })
+  })
+  it('reports nothing before the first snapshot, so placeholder state never reads as amber', () => {
+    expect(
+      systemChipState(
+        dashboardSnapshot({ generatedAt: '', agentStart: { _tag: 'WritesDisabled' } }),
+        new Date('2026-08-13T01:00:00Z'),
+      ),
+    ).toEqual({ _tag: 'Loading' })
+  })
+
   it('reads grey with the running count and pulses only while an agent runs', () => {
-    const idle = systemChipState(dashboardSnapshot({ agentStart: { _tag: 'Available' } }))
+    const idle = systemChipState(
+      dashboardSnapshot({ agentStart: { _tag: 'Available' } }),
+      new Date('2026-08-13T01:00:00Z'),
+    )
     expect(idle).toEqual({ _tag: 'Normal', active: 0, maximum: 4, live: false })
 
-    const busy = systemChipState(dashboardSnapshot({ agentStart: { _tag: 'Available' }, agents: [activeAgent()] }))
+    const busy = systemChipState(
+      dashboardSnapshot({ agentStart: { _tag: 'Available' }, agents: [activeAgent()] }),
+      new Date('2026-08-13T01:00:00Z'),
+    )
     expect(busy).toMatchObject({ _tag: 'Normal', active: 1, live: true })
+  })
+
+  it('counts the Agent slots each host holds, so the chip follows the control', () => {
+    const capacity = { localActive: 1, localMaximum: 3, desktopActive: 0, desktopMaximum: 1, desktopAvailable: true }
+    const connected = systemChipState(
+      dashboardSnapshot({ agentStart: { _tag: 'Available' }, hostCapacity: capacity }),
+      new Date('2026-08-13T01:00:00Z'),
+    )
+    expect(connected).toMatchObject({ maximum: 4 })
+
+    const alone = systemChipState(
+      dashboardSnapshot({ agentStart: { _tag: 'Available' }, hostCapacity: { ...capacity, desktopAvailable: false } }),
+      new Date('2026-08-13T01:00:00Z'),
+    )
+    expect(alone).toMatchObject({ maximum: 3 })
   })
 
   it('names the one reason work cannot start', () => {
@@ -101,7 +250,10 @@ describe('systemChipState', () => {
       [{ _tag: 'RestartRequested' }, 'Restarting after current work'],
     ]
     reasons.forEach(([agentStart, reason]) => {
-      expect(systemChipState(dashboardSnapshot({ agentStart }))).toMatchObject({ _tag: 'CannotStart', reason })
+      expect(systemChipState(dashboardSnapshot({ agentStart }), new Date('2026-08-13T01:00:00Z'))).toMatchObject({
+        _tag: 'CannotStart',
+        reason,
+      })
     })
   })
 
@@ -111,7 +263,10 @@ describe('systemChipState', () => {
       selectionMode: 'manual',
       queue: [queueEntry({ _tag: 'AwaitingApproval', kind: 'review' })],
     })
-    expect(systemChipState(waiting)).toMatchObject({ _tag: 'CannotStart', reason: 'Manual' })
+    expect(systemChipState(waiting, new Date(waiting.generatedAt))).toMatchObject({
+      _tag: 'CannotStart',
+      reason: 'Manual',
+    })
 
     const flowing = dashboardSnapshot({
       agentStart: { _tag: 'Available' },
@@ -121,10 +276,10 @@ describe('systemChipState', () => {
         queueEntry({ _tag: 'Queued', work: 'review_fix' }, 2),
       ],
     })
-    expect(systemChipState(flowing)._tag).toBe('Normal')
+    expect(systemChipState(flowing, new Date(flowing.generatedAt))._tag).toBe('Normal')
 
     const empty = dashboardSnapshot({ agentStart: { _tag: 'Available' }, selectionMode: 'manual' })
-    expect(systemChipState(empty)._tag).toBe('Normal')
+    expect(systemChipState(empty, new Date(empty.generatedAt))._tag).toBe('Normal')
   })
 
   it('turns red with the count once an Incident is open, even while paused', () => {
@@ -133,7 +288,13 @@ describe('systemChipState', () => {
       incidents: [incident(), incident({ id: 'incident-2', severity: 'warning' })],
       agents: [activeAgent()],
     })
-    expect(systemChipState(snapshot)).toEqual({ _tag: 'Incident', incidents: 2, active: 1, maximum: 4, live: true })
+    expect(systemChipState(snapshot, new Date(snapshot.generatedAt))).toEqual({
+      _tag: 'Incident',
+      incidents: 2,
+      active: 1,
+      maximum: 4,
+      live: true,
+    })
   })
 })
 
@@ -211,7 +372,12 @@ describe('circuitNotice', () => {
 })
 
 describe('restartNotice', () => {
-  const base = { id: 'restart-1', source: 'dashboard' as const, requestedAt: '2026-08-14T11:00:00.000Z' }
+  const base = {
+    id: 'restart-1',
+    source: 'dashboard' as const,
+    operation: { _tag: 'Restart' as const },
+    requestedAt: '2026-08-14T11:00:00.000Z',
+  }
 
   it('renders nothing for no request or a finished one', () => {
     expect(restartNotice(null)).toBeUndefined()
@@ -238,6 +404,61 @@ describe('restartNotice', () => {
         reason: 'The new process never answered /health.',
       }),
     ).toEqual({ _tag: 'ActionRequired', text: 'Restart did not complete: The new process never answered /health.' })
+  })
+
+  it('names an Update separately from a plain restart', () => {
+    const request = {
+      ...base,
+      _tag: 'Requested' as const,
+      operation: { _tag: 'Update' as const, targetCommit: 'b'.repeat(40), preparation: 'Ready' as const },
+    }
+    expect(restartNotice(request)).toEqual({ _tag: 'Requested', text: 'Update requested. Active work finishes first.' })
+    expect(restartNotice({ ...request, source: 'schedule' })).toEqual({
+      _tag: 'Requested',
+      text: 'Scheduled update requested. Active work finishes first.',
+    })
+  })
+})
+
+describe('serviceUpdatePresentation', () => {
+  const deployedCommit = 'a'.repeat(40)
+  const latestCommit = 'b'.repeat(40)
+
+  it('makes an available Update the exception', () => {
+    expect(
+      serviceUpdatePresentation({
+        _tag: 'Available',
+        deployedCommit,
+        latestCommit,
+        checkedAt: '2026-09-02T03:00:00.000Z',
+      }),
+    ).toEqual({
+      label: 'Update available',
+      tone: 'warning',
+      deployedCommit: 'aaaaaaa',
+      latestCommit: 'bbbbbbb',
+      checkedAt: '2026-09-02T03:00:00.000Z',
+      detail: undefined,
+    })
+  })
+
+  it('keeps current and unavailable checks explicit', () => {
+    expect(
+      serviceUpdatePresentation({
+        _tag: 'Current',
+        deployedCommit,
+        latestCommit: deployedCommit,
+        checkedAt: '2026-09-02T03:00:00.000Z',
+      }).label,
+    ).toBe('Current')
+    const unavailable = serviceUpdatePresentation({
+      _tag: 'Unavailable',
+      deployedCommit,
+      checkedAt: '2026-09-02T03:00:00.000Z',
+      reason: 'The latest commit could not be checked. Retry later.',
+    })
+    expect(unavailable).toMatchObject({ label: 'Check failed', tone: 'warning' })
+    expect(unavailable.latestCommit).toBeUndefined()
   })
 })
 
