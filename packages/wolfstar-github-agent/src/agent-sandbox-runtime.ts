@@ -14,6 +14,10 @@ function relay(socket: Socket, target: { host: string; port: number } | { path: 
 }
 
 async function main(): Promise<void> {
+  const encodedEnvironment = process.env.WOLFSTAR_AGENT_SANDBOX_ENVIRONMENT
+  delete process.env.WOLFSTAR_AGENT_SANDBOX_ENVIRONMENT
+  if (encodedEnvironment === undefined) throw new Error('The Agent runtime needs its private environment.')
+  const workerEnvironment = JSON.parse(encodedEnvironment) as NodeJS.ProcessEnv
   const proxy = createServer((socket) => relay(socket, { path: '/run/agent/egress/proxy.sock' }))
   await new Promise<void>((resolve, reject) => {
     proxy.once('error', reject)
@@ -21,7 +25,7 @@ async function main(): Promise<void> {
   })
   const proxyPort = (proxy.address() as AddressInfo).port
   const environment = {
-    ...process.env,
+    ...workerEnvironment,
     HTTP_PROXY: `http://127.0.0.1:${proxyPort}`,
     HTTPS_PROXY: `http://127.0.0.1:${proxyPort}`,
     http_proxy: `http://127.0.0.1:${proxyPort}`,

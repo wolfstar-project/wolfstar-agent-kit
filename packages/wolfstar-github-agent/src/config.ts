@@ -15,6 +15,7 @@ import type {
   RepositoryOwnership,
   RoleReasoningEfforts,
   ServiceTrigger,
+  ServiceUpdateSchedule,
   TakeOwnershipConfig,
   ValidatedAgentConfig,
   WebhookConfig,
@@ -165,6 +166,28 @@ function autoMergePolicy(source: UnknownRecord, issues: ConfigIssue[]): AutoMerg
   return enabled
     ? { _tag: 'Enabled', minimumConfidence, method, ...(reviewerPolicy === undefined ? {} : { reviewerPolicy }) }
     : { _tag: 'Disabled' }
+}
+
+const TIME_ZONES = new Set(Intl.supportedValuesOf('timeZone'))
+
+/** A daily update time. Absent leaves every update to a person; undefined reports an issue. */
+function serviceUpdateSchedule(source: UnknownRecord, issues: ConfigIssue[]): ServiceUpdateSchedule | null | undefined {
+  const value = source.service_update
+  if (value === undefined) return null
+  if (!isRecord(value)) {
+    issues.push({ path: '$.service_update', message: 'Expected an object.' })
+    return undefined
+  }
+  const time = typeof value.at === 'string' ? /^([01]\d|2[0-3]):([0-5]\d)$/.exec(value.at) : null
+  if (time === null) issues.push({ path: '$.service_update.at', message: 'Expected a 24 hour HH:MM time.' })
+  const timeZone = typeof value.time_zone === 'string' && TIME_ZONES.has(value.time_zone) ? value.time_zone : undefined
+  if (timeZone === undefined)
+    issues.push({
+      path: '$.service_update.time_zone',
+      message: 'Expected an IANA time zone, such as Australia/Melbourne.',
+    })
+  if (time === null || timeZone === undefined) return undefined
+  return { minuteOfDay: Number(time[1]) * 60 + Number(time[2]), timeZone }
 }
 
 /** Defaults a repository inherits when it names a Merge risk limit it does not set. */
@@ -1079,6 +1102,7 @@ export function parseConfigText(text: string): Result<AgentConfig, ConfigIssue[]
   const issueBatchesValue = document.value.issue_batches ?? true
   const issueBatches = typeof issueBatchesValue === 'boolean' ? issueBatchesValue : undefined
   if (issueBatches === undefined) issues.push({ path: '$.issue_batches', message: 'Expected a boolean.' })
+  const serviceUpdate = serviceUpdateSchedule(document.value, issues)
 
   const externalRepositoriesValue = document.value.external_repositories
   const externalRepositories = Array.isArray(externalRepositoriesValue)
@@ -1298,6 +1322,7 @@ export function parseConfigText(text: string): Result<AgentConfig, ConfigIssue[]
     maxOpenPullRequests === undefined ||
     issueCutoff === undefined ||
     issueBatches === undefined ||
+    serviceUpdate === undefined ||
     externalRepositories === undefined ||
     repositories === undefined
   ) {
@@ -1330,6 +1355,7 @@ export function parseConfigText(text: string): Result<AgentConfig, ConfigIssue[]
     autoMerge,
     maxOpenPullRequests,
     issueBatches,
+    ...(serviceUpdate === null ? {} : { serviceUpdate }),
     pollIntervalSeconds,
     issueCutoff,
     externalRepositories,

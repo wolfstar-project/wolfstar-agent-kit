@@ -21,7 +21,7 @@ export interface RoutineScanWorkerOptions {
   serviceEvidence?: Pick<JournalStore, 'listIncidents' | 'listWorkflowEvents'>
   serviceUpdate?: () => ServiceUpdateStatus
   activityLog?: Pick<AgentActivityLog, 'record'>
-  githubEvidence?: RoutineGitHubEvidenceSource
+  githubEvidence?: Pick<RoutineGitHubEvidenceSource, 'collect'>
   writeCheckinEvidence?: typeof writeCheckinGitHubEvidence
   logger: { error: (message: string) => void; info: (message: string) => void }
   maximumChangedFiles?: number
@@ -124,6 +124,7 @@ export function createRoutineScanWorker(options: RoutineScanWorkerOptions): Rout
                 signal,
                 task.name === 'ci-review',
                 task.name === 'daily-checkin' ? task.repositoryMapping.defaultBranch : undefined,
+                task.name === 'seo-review' || task.name === 'vitals-review' ? 'ownership' : 'metadata',
               )
       if (task.name === 'daily-checkin') {
         await (options.writeCheckinEvidence ?? writeCheckinGitHubEvidence)({

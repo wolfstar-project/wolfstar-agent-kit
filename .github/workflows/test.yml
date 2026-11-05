@@ -207,6 +207,12 @@ jobs:
       - name: Service package
         run: pnpm --filter wolfstar-github-agent test:run
 
+      - name: Octorun consumer
+        run: pnpm --filter wolfstar-octorun test:run
+
+      - name: Octorun managed service
+        run: pnpm test:octorun-service
+
       - name: Native terminal bindings
         run: pnpm --filter ghostty-terminal-bindings test:run
 

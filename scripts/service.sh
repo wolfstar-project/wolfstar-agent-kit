@@ -135,10 +135,11 @@ check_config() {
 
 prepare_update() {
   require_checkout
-  local pnpm_bin node_bin ref before
+  local pnpm_bin node_bin ref before target_commit loaded_script
   pnpm_bin=$(resolve_pnpm)
   node_bin=$(resolve_node)
   ref="${1:-origin/main}"
+  loaded_script=$(git hash-object "${BASH_SOURCE[0]}")
   # The checkout is a deployment. Anything local in it is a mistake worth
   # seeing rather than silently overwriting.
   if [ -n "$(git -C "$SERVICE_CHECKOUT" status --porcelain)" ]; then
@@ -150,15 +151,25 @@ prepare_update() {
   git -C "$SERVICE_CHECKOUT" fetch --quiet origin
   before="$(git -C "$SERVICE_CHECKOUT" rev-parse HEAD)"
   git -C "$SERVICE_CHECKOUT" reset --hard --quiet "$ref"
-  if [ "$before" = "$(git -C "$SERVICE_CHECKOUT" rev-parse HEAD)" ]; then
+  target_commit="$(git -C "$SERVICE_CHECKOUT" rev-parse HEAD)"
+  if [ "$before" = "$target_commit" ]; then
     echo "Already on $(deployed)"
   else
     echo "Moved to $(deployed)"
+  fi
+  # Git replaced the file, but this shell still holds its previous functions.
+  # Load target preparation before installing anything. Keep restart ownership
+  # here so update restarts once and prepare-update never restarts.
+  if [ "$loaded_script" != "$(git hash-object "$SERVICE_CHECKOUT/scripts/service.sh")" ]; then
+    bash "$SERVICE_CHECKOUT/scripts/service.sh" prepare-update "$target_commit"
+    return
   fi
   echo "Installing dependencies"
   (cd "$SERVICE_CHECKOUT" && "$pnpm_bin" install --frozen-lockfile >/dev/null)
   echo "Restoring Brundlefly Skills"
   (cd "$SERVICE_CHECKOUT" && "$pnpm_bin" sync:skills)
+  echo "Refreshing Agent Skills"
+  "$node_bin" --experimental-strip-types "$SERVICE_CHECKOUT/scripts/worker-skills.ts"
   echo "Refreshing OpenCode worker configuration"
   "$node_bin" --experimental-strip-types "$SERVICE_CHECKOUT/scripts/opencode-v2-migrate.ts" --worker
   echo "Syncing Agent instructions"

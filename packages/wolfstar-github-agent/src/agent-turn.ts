@@ -6,6 +6,8 @@ import type { AgentMedia } from './github-media.ts'
 import type { Result } from './result.ts'
 import type { JournalStore } from './store.ts'
 import type { AgentRole } from './types.ts'
+import type { VitalsComparisonResult } from './vitals-comparison.ts'
+import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
 import { agentActivityFromEvent } from './agent-activity.ts'
 import { parseAgentJson } from './agent-json.ts'
@@ -50,6 +52,8 @@ export interface AgentTurnOptions {
 }
 
 export interface AgentTurnInput {
+  vitalsComparison?: AgentTurnRequest['vitalsComparison']
+  routineContext?: AgentTurnRequest['routineContext']
   toolPolicy?: AgentTurnRequest['toolPolicy']
   media?: AgentMedia[]
   /** Start without prior session context, while still saving the new session for later turns. */
@@ -80,6 +84,9 @@ export interface AgentTurnResult {
   response: string
   sessionId: string
   usage: AgentTokenUsage
+  vitalsComparison?: VitalsComparisonResult
+  vitalsEvidenceDirectory?: string | null
+  vitalsComparisonRequestId?: string
 }
 
 /**
@@ -146,6 +153,8 @@ export async function runAgentTurn(
   const runtime = options.runtime(input.repository)
   const profile = roleProfile(runtime.profile, input.role)
   const events = runtime.provider.runTurn({
+    ...(input.vitalsComparison === undefined ? {} : { vitalsComparison: input.vitalsComparison }),
+    ...(input.routineContext === undefined ? {} : { routineContext: input.routineContext }),
     ...(input.toolPolicy === undefined ? {} : { toolPolicy: input.toolPolicy }),
     ...(input.media === undefined ? {} : { media: input.media }),
     ...(input.instructionPaths === undefined ? {} : { instructionPaths: input.instructionPaths }),
@@ -160,6 +169,8 @@ export async function runAgentTurn(
   })
 
   let response: string | undefined
+  let vitalsComparison: VitalsComparisonResult | undefined
+  let vitalsEvidenceDirectory: string | null | undefined
   let currentSessionId = sessionId
   let failure: string | undefined
   let usage: AgentTokenUsage = { _tag: 'Unavailable' }
@@ -167,6 +178,10 @@ export async function runAgentTurn(
   let phaseSince = options.now().toISOString()
   let reportedAt = phaseSince
   for await (const event of events) {
+    if (event._tag === 'VitalsComparison') {
+      vitalsComparison = event.result
+      vitalsEvidenceDirectory = event.retainedDirectory
+    }
     if (event._tag === 'SessionStarted') {
       currentSessionId = event.sessionId
       options.store.saveWorkerSession(
@@ -216,7 +231,15 @@ export async function runAgentTurn(
 
   if (failure !== undefined) return err(failure)
   if (response === undefined || currentSessionId === null) return err('The agent finished without a result.')
-  return ok({ response, sessionId: currentSessionId, usage })
+  return ok({
+    response,
+    sessionId: currentSessionId,
+    usage,
+    ...(input.vitalsComparison === undefined ? {} : { vitalsComparisonRequestId: input.vitalsComparison.id }),
+    ...(vitalsComparison === undefined
+      ? {}
+      : { vitalsComparison, vitalsEvidenceDirectory: vitalsEvidenceDirectory ?? null }),
+  })
 }
 
 export interface ParsedAgentTurnOptions<Value> extends AgentTurnOptions {
@@ -239,8 +262,25 @@ function parseTurnResponse<Value>(
 
 /** A completed turn whose answer either fit the parser or, after one repair, still did not. */
 export type RepairedAgentTurn<Value> =
-  | { _tag: 'Parsed'; value: Value; sessionId: string; usage: AgentTokenUsage }
-  | { _tag: 'Unparsed'; reason: string; response: string; sessionId: string; usage: AgentTokenUsage }
+  | {
+      _tag: 'Parsed'
+      value: Value
+      sessionId: string
+      usage: AgentTokenUsage
+      vitalsComparison?: VitalsComparisonResult
+      vitalsEvidenceDirectory?: string | null
+      vitalsComparisonRequestId?: string
+    }
+  | {
+      _tag: 'Unparsed'
+      reason: string
+      response: string
+      sessionId: string
+      usage: AgentTokenUsage
+      vitalsComparison?: VitalsComparisonResult
+      vitalsEvidenceDirectory?: string | null
+      vitalsComparisonRequestId?: string
+    }
 
 /**
  * Runs one agent turn, buys one repair for a rejected answer, and names the
@@ -263,7 +303,19 @@ export async function runRepairedAgentTurn<Value>(
   if (turn._tag === 'Err') return turn
   const parsed = await parseTurnResponse(options, turn.value.response)
   if (parsed._tag === 'Ok')
-    return ok({ _tag: 'Parsed', value: parsed.value, sessionId: turn.value.sessionId, usage: turn.value.usage })
+    return ok({
+      _tag: 'Parsed',
+      value: parsed.value,
+      sessionId: turn.value.sessionId,
+      usage: turn.value.usage,
+      ...(turn.value.vitalsComparison === undefined
+        ? {}
+        : {
+            vitalsComparison: turn.value.vitalsComparison,
+            vitalsEvidenceDirectory: turn.value.vitalsEvidenceDirectory,
+            vitalsComparisonRequestId: turn.value.vitalsComparisonRequestId,
+          }),
+    })
 
   // The work is done, so this turn reports no progress of its own.
   const { progress: _reported, ...withoutProgress } = input
@@ -278,6 +330,9 @@ export async function runRepairedAgentTurn<Value>(
     correctionOptions,
     {
       ...withoutProgress,
+      ...(input.vitalsComparison === undefined
+        ? {}
+        : { vitalsComparison: { ...input.vitalsComparison, id: randomUUID(), issuedAt: options.now().toISOString() } }),
       freshSession: false,
       prompt: repairPrompt(
         input.schema,
@@ -299,14 +354,39 @@ export async function runRepairedAgentTurn<Value>(
   const reparsed = await parseTurnResponse(options, repaired.value.response)
   const usage = addAgentTokenUsage(turn.value.usage, repaired.value.usage)
   if (reparsed._tag === 'Ok')
-    return ok({ _tag: 'Parsed', value: reparsed.value, sessionId: repaired.value.sessionId, usage })
+    return ok({
+      _tag: 'Parsed',
+      value: reparsed.value,
+      sessionId: repaired.value.sessionId,
+      usage,
+      ...(repaired.value.vitalsComparison === undefined
+        ? {}
+        : {
+            vitalsComparison: repaired.value.vitalsComparison,
+            vitalsEvidenceDirectory: repaired.value.vitalsEvidenceDirectory,
+            vitalsComparisonRequestId: repaired.value.vitalsComparisonRequestId,
+          }),
+    })
   // The correction named the broken rule and the agent gave the same answer.
   // Another turn would too, so the reason stops recovery instead of retrying.
   const reason =
     reparsed.error === parsed.error && sameAnswer(turn.value.response, repaired.value.response)
       ? repeatedAgentResultReason(reparsed.error)
       : reparsed.error
-  return ok({ _tag: 'Unparsed', reason, response: repaired.value.response, sessionId: repaired.value.sessionId, usage })
+  return ok({
+    _tag: 'Unparsed',
+    reason,
+    response: repaired.value.response,
+    sessionId: repaired.value.sessionId,
+    usage,
+    ...(repaired.value.vitalsComparison === undefined
+      ? {}
+      : {
+          vitalsComparison: repaired.value.vitalsComparison,
+          vitalsEvidenceDirectory: repaired.value.vitalsEvidenceDirectory,
+          vitalsComparisonRequestId: repaired.value.vitalsComparisonRequestId,
+        }),
+  })
 }
 
 /**

@@ -3,13 +3,21 @@ import type { AgentEvent, AgentProvider, AgentTokenUsage, AgentTurnRequest } fro
 import type { AgentSandbox } from './agent-sandbox.ts'
 import type { ReviewProofAuthorityFactory } from './review-proof-authority.ts'
 import type { ReviewRuntime } from './review-runtime.ts'
+import { writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import process from 'node:process'
 import { Codex } from '@openai/codex-sdk'
 import { agentProviderFailureReason, agentTextEvent } from './agent-provider.ts'
 import { prepareAgentSandbox } from './agent-sandbox.ts'
+import { agentSkillCatalogPrompt } from './agent-skill-catalog.ts'
 import { materializeAgentMedia } from './github-media.ts'
 import { createReviewRuntime, REVIEW_CODEX_FEATURES } from './review-runtime.ts'
+import {
+  createVitalsEvidenceDirectory,
+  inspectVitalsComparison,
+  vitalsComparisonScript,
+  vitalsEvidenceInstructions,
+} from './vitals-comparison-runtime.ts'
 import { workspaceEnvironment } from './workspace-environment.ts'
 
 interface CodexThread {
@@ -128,7 +136,20 @@ export function createCodexProvider(options: CodexProviderOptions = {}): AgentPr
         const media = await materializeAgentMedia(request.media)
         let sandbox: AgentSandbox | undefined
         let review: ReviewRuntime | undefined
+        let vitalsEvidenceDirectory: string | undefined
         try {
+          if (request.vitalsComparison !== undefined) {
+            if (
+              request.routineContext?.routineName !== 'vitals-review' ||
+              request.taskId !== request.vitalsComparison.taskId ||
+              request.toolPolicy !== undefined
+            )
+              throw new Error('The performance evidence request has no trusted vitals Task.')
+            vitalsEvidenceDirectory = await createVitalsEvidenceDirectory(
+              process.env.HOME ?? '/home/wolfstar',
+              request.vitalsComparison,
+            )
+          }
           if (request.toolPolicy?._tag === 'Review') {
             if (options.reviewProofAuthority === undefined) {
               yield { _tag: 'Failed', reason: 'The Review requires its controller proof authority.' }
@@ -157,9 +178,18 @@ export function createCodexProvider(options: CodexProviderOptions = {}): AgentPr
               environment: process.env,
               provider: 'codex',
               ...(options.memoryPerAgentGiB === undefined ? {} : { memoryPerAgentGiB: options.memoryPerAgentGiB }),
-              readOnlyPaths: [...media.paths, ...(request.instructionPaths ?? []), ...(review?.readOnlyPaths ?? [])],
+              readOnlyPaths: [
+                ...media.paths,
+                ...(request.instructionPaths ?? []),
+                ...(review?.readOnlyPaths ?? []),
+                ...(request.vitalsComparison === undefined ? [] : [vitalsComparisonScript()]),
+              ],
+              ...(vitalsEvidenceDirectory === undefined ? {} : { vitalsEvidenceDirectory }),
               ...(review === undefined ? {} : { reviewHome: review.home, readOnly: true }),
               ...(request.taskId === undefined ? {} : { taskId: request.taskId }),
+              ...(request.routineContext === undefined || review !== undefined
+                ? {}
+                : { routineContext: request.routineContext }),
               ...(options.readOnly === undefined ? {} : { readOnly: options.readOnly }),
             })
               .then((value) => ({ _tag: 'Ok' as const, value }))
@@ -173,6 +203,12 @@ export function createCodexProvider(options: CodexProviderOptions = {}): AgentPr
               return
             }
             sandbox = prepared.value
+            // Only nonsecret command data belongs in this private launch file.
+            // The opaque guest environment stays on its existing environment channel.
+            const plan = JSON.stringify({ binary: sandbox.binary, args: [...sandbox.args, sandbox.providerBinary] })
+            if (Buffer.byteLength(plan) > 1024 * 1024)
+              throw new Error('The Codex Agent sandbox launch plan exceeds its size limit.')
+            await writeFile(`${sandbox.adapterPath}.json`, plan, { mode: 0o600, flag: 'wx' })
           }
           // Production uses the trusted adapter and its sanitized environment.
           // Injected clients exercise only the provider's event translation.
@@ -183,8 +219,6 @@ export function createCodexProvider(options: CodexProviderOptions = {}): AgentPr
                   codexPathOverride: sandbox.adapterPath,
                   env: {
                     PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
-                    WOLFSTAR_AGENT_SANDBOX_ARGS: JSON.stringify([...sandbox.args, sandbox.providerBinary]),
-                    WOLFSTAR_AGENT_SANDBOX_BINARY: sandbox.binary,
                     WOLFSTAR_AGENT_SANDBOX_ENV: JSON.stringify(sandbox.environment),
                   },
                 }),
@@ -207,13 +241,14 @@ export function createCodexProvider(options: CodexProviderOptions = {}): AgentPr
                   ...baseOptions,
                   modelReasoningEffort: request.reasoningEffort as NonNullable<ThreadOptions['modelReasoningEffort']>,
                 }
+          const prompt = agentSkillCatalogPrompt(
+            `${request.prompt}${request.vitalsComparison === undefined ? '' : `\n\n${vitalsEvidenceInstructions(request.vitalsComparison)}`}`,
+            review === undefined ? sandbox?.skillCatalogPath : undefined,
+          )
           const input: Input =
             media.paths.length === 0
-              ? request.prompt
-              : [
-                  { type: 'text', text: request.prompt },
-                  ...media.paths.map((path) => ({ type: 'local_image' as const, path })),
-                ]
+              ? prompt
+              : [{ type: 'text', text: prompt }, ...media.paths.map((path) => ({ type: 'local_image' as const, path }))]
           const run = (thread: CodexThread) =>
             thread.runStreamed(input, {
               outputSchema: request.outputSchema,
@@ -238,15 +273,31 @@ export function createCodexProvider(options: CodexProviderOptions = {}): AgentPr
           yield { _tag: 'Failed', reason: 'The Agent Task exceeded its memory budget.', cause: 'resource-limit' }
         } finally {
           let released: Awaited<ReturnType<ReviewRuntime['release']>> | undefined
+          let comparisonEvent: Extract<AgentEvent, { _tag: 'VitalsComparison' }> | undefined
           try {
-            await sandbox?.release()
+            if (request.vitalsComparison !== undefined) {
+              const result =
+                sandbox === undefined
+                  ? {
+                      _tag: 'Unavailable' as const,
+                      requestId: request.vitalsComparison.id,
+                      reason: 'The performance evidence reader requires an isolated Agent.',
+                    }
+                  : await inspectVitalsComparison(sandbox, request.vitalsComparison, request.signal)
+              comparisonEvent = { _tag: 'VitalsComparison', result, retainedDirectory: vitalsEvidenceDirectory ?? null }
+            }
           } finally {
             try {
-              released = await review?.release()
+              await sandbox?.release()
             } finally {
-              await media.release()
+              try {
+                released = await review?.release()
+              } finally {
+                await media.release()
+              }
             }
           }
+          if (comparisonEvent !== undefined) yield comparisonEvent
           for (const text of released?.warnings ?? []) yield { _tag: 'Reasoning', text: `Controller warning: ${text}` }
         }
       })(),

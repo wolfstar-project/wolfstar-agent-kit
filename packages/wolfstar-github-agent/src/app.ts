@@ -31,6 +31,7 @@ import { registerEmergencyRoutes } from './emergency-routes.ts'
 import { registerConfigurationRoutes } from './configuration-routes.ts'
 import { parseAgentSlots } from './host-capacity.ts'
 import { parseIncidentResolutionRequest } from './incident-resolution.ts'
+import { latestDelivery } from './latest-delivery.ts'
 import { parsePullRequestWatchTarget } from './pull-request-watch.ts'
 import { parseRepairRecoveryRequest } from './repair-recovery.ts'
 import { registerSessionRoutes } from './session-routes.ts'
@@ -1311,21 +1312,25 @@ export function createAgentApp(options: AgentAppOptions): H3 {
   app.get('/api/events', (event) => {
     const stream = createEventStream(event)
     const initial = dashboardEvent(options)
-    let previous = initial.observable
-    const update = (sample: ReturnType<typeof dashboardEvent>): void => {
-      if (!authorization.valid()) {
-        shutdown()
-        return
-      }
-      if (sample.observable === previous) {
-        void stream.push({ event: 'heartbeat', data: sample.heartbeat }).catch(stop)
-        return
-      }
-      previous = sample.observable
-      // Each subscriber owns its write. One slow or closed stream cannot block the others.
-      void stream.push({ event: 'state', data: sample.serialize() }).catch(stop)
-    }
+    let previous: string | undefined
+    const delivery = latestDelivery(
+      async (sample: ReturnType<typeof dashboardEvent>) => {
+        if (!authorization.valid()) {
+          shutdown()
+          return
+        }
+        await stream.push(
+          sample.observable === previous
+            ? { event: 'heartbeat', data: sample.heartbeat }
+            : { event: 'state', data: sample.serialize() },
+        )
+        previous = sample.observable
+      },
+      () => stop(),
+    )
+    const update = delivery.push
     const stop = (): void => {
+      delivery.close()
       authorization.close()
       dashboardSubscribers.delete(update)
       if (dashboardSubscribers.size === 0 && dashboardInterval !== undefined) {
@@ -1349,7 +1354,7 @@ export function createAgentApp(options: AgentAppOptions): H3 {
       // A subscriber may have fetched /api/state before this connection while
       // the service changed. Always resync on attach/reconnect before sending
       // lightweight freshness-only heartbeats.
-      void stream.push({ event: 'state', data: initial.serialize() }).catch(stop)
+      update(initial)
       if (dashboardInterval === undefined) {
         dashboardInterval = setInterval(() => {
           const sample = dashboardEvent(options)
@@ -1364,7 +1369,6 @@ export function createAgentApp(options: AgentAppOptions): H3 {
   app.get('/favicon.ico', () => new Response(null, { status: 204 }))
   app.get('/_payload.json', () => staticAsset(assets, dashboardRoot, '_payload.json'))
   app.get('/_nuxt/**', (event) => staticAsset(assets, dashboardRoot, new URL(event.req.url).pathname.slice(1)))
-  app.get('/_fonts/**', (event) => staticAsset(assets, dashboardRoot, new URL(event.req.url).pathname.slice(1)))
   app.get('/_nuxt-skew-sw.js', () => staticAsset(assets, dashboardRoot, '_nuxt-skew-sw.js'))
   app.get('/', (event) => dashboardHtml(assets, dashboardRoot, 'index.html', String(event.context.dashboardNonce)))
   DASHBOARD_PAGES.forEach((page) => {

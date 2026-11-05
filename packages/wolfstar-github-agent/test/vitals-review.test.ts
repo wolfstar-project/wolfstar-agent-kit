@@ -167,6 +167,142 @@ describe('lab series', () => {
     expect(verdictFor(judgeLabScans(scans(rows)), '/blog', 'desktop', 'lcp')?._tag).toBe('Drop')
   })
 
+  it.each(['lcp', 'fcp', 'tbt', 'cls'] as const)(
+    'requires the latest completed %s measurement before judging older Poor points',
+    (metric) => {
+      const poor = metric === 'cls' ? 0.4 : 5000
+      const rows = [1, 2, 3].map((day) => ({ ...scan(day, 5000), [metric]: poor }))
+      rows.push({ ...scan(4, 5000), [metric]: null })
+
+      expect(verdictFor(judgeLabScans(scans(rows)), '/blog', 'desktop', metric)).toEqual({
+        _tag: 'MissingMetric',
+        missingAt: ['2026-09-04T06:00:00.000Z'],
+      })
+    },
+  )
+
+  it('requires the previous completed metric even when the latest one is Poor', () => {
+    const rows = [scan(1, 5000), scan(2, 5000), { ...scan(3, 5000), lcp: null }, scan(4, 5000)]
+
+    expect(verdictFor(judgeLabScans(scans(rows)), '/blog', 'desktop', 'lcp')).toEqual({
+      _tag: 'MissingMetric',
+      missingAt: ['2026-09-03T06:00:00.000Z'],
+    })
+  })
+
+  it('reports the missing latest pair when no FCP details were read', () => {
+    expect(verdictFor(judgeLabScans(scans([scan(1, 5000), scan(2, 5000)])), '/blog', 'desktop', 'fcp')).toEqual({
+      _tag: 'MissingMetric',
+      missingAt: ['2026-09-01T06:00:00.000Z', '2026-09-02T06:00:00.000Z'],
+    })
+  })
+
+  it('reports missing latest metrics instead of keeping an older drop current', () => {
+    const rows = [scan(1, 1100), scan(2, 1150), scan(3, 2600), scan(4, 2700), { ...scan(5, 2700), lcp: null }]
+
+    expect(verdictFor(judgeLabScans(scans(rows)), '/blog', 'desktop', 'lcp')?._tag).toBe('MissingMetric')
+  })
+
+  it('keeps a measured Poor pair without dating its onset across an older missing metric', () => {
+    const rows = [scan(1, 5000), scan(2, 5000), { ...scan(3, 5000), lcp: null }, scan(4, 5000), scan(5, 5100)]
+
+    expect(verdictFor(judgeLabScans(scans(rows)), '/blog', 'desktop', 'lcp')).toEqual({
+      _tag: 'Poor',
+      latest: 5100,
+      since: '2026-09-04T06:00:00.000Z',
+      lastReferenceAt: null,
+      scans: 2,
+    })
+  })
+
+  it('excludes a failed latest Scan from a measured Poor pair', () => {
+    const rows = [scan(1, 5000), scan(2, 5100), { ...scan(3, 0), status: 'failed', lcp: null }]
+
+    expect(verdictFor(judgeLabScans(scans(rows)), '/blog', 'desktop', 'lcp')).toMatchObject({
+      _tag: 'Poor',
+      latest: 5100,
+      scans: 2,
+    })
+  })
+
+  it.each(['13.6.0', '13.5.1', null])('requires another comparable Scan after Lighthouse changes to %s', (version) => {
+    const rows = [
+      { ...scan(1, 5000), lighthouseVersion: '13.5.0' },
+      { ...scan(2, 5100), lighthouseVersion: version },
+    ]
+
+    expect(verdictFor(judgeLabScans(scans(rows)), '/blog', 'desktop', 'lcp')).toEqual({ _tag: 'ShortSeries', count: 1 })
+  })
+
+  it('dates Poor persistence only within the current Lighthouse release', () => {
+    const rows = [
+      { ...scan(1, 5000), lighthouseVersion: '13.4.1' },
+      { ...scan(2, 5100), lighthouseVersion: '13.5.0' },
+      { ...scan(3, 5200), lighthouseVersion: '13.5.0' },
+    ]
+
+    expect(verdictFor(judgeLabScans(scans(rows)), '/blog', 'desktop', 'lcp')).toEqual({
+      _tag: 'Poor',
+      latest: 5200,
+      since: '2026-09-02T06:00:00.000Z',
+      lastReferenceAt: null,
+      scans: 2,
+    })
+  })
+
+  it('does not date a drop against a different Lighthouse release', () => {
+    const rows = [
+      ...[scan(1, 1100), scan(2, 1150)].map((row) => ({ ...row, lighthouseVersion: '13.5.0' })),
+      ...[scan(3, 2600), scan(4, 2700)].map((row) => ({ ...row, lighthouseVersion: '13.6.0' })),
+    ]
+
+    expect(verdictFor(judgeLabScans(scans(rows)), '/blog', 'desktop', 'lcp')).toEqual({ _tag: 'Steady', latest: 2700 })
+  })
+
+  it('still dates a drop entirely within the current Lighthouse release', () => {
+    const rows = [
+      { ...scan(1, 5000), lighthouseVersion: '13.5.0' },
+      ...[scan(2, 1100), scan(3, 1150), scan(4, 2600), scan(5, 2700)].map((row) => ({
+        ...row,
+        lighthouseVersion: '13.6.0',
+      })),
+    ]
+
+    expect(verdictFor(judgeLabScans(scans(rows)), '/blog', 'desktop', 'lcp')).toMatchObject({
+      _tag: 'Drop',
+      since: '2026-09-04T06:00:00.000Z',
+      lastReferenceAt: '2026-09-03T06:00:00.000Z',
+      scans: 2,
+    })
+  })
+
+  it('does not join an older matching version across a different release', () => {
+    const rows = [
+      { ...scan(1, 5000), lighthouseVersion: '13.5.0' },
+      { ...scan(2, 5000), lighthouseVersion: '13.6.0' },
+      { ...scan(3, 5000), lighthouseVersion: '13.5.0' },
+    ]
+
+    expect(verdictFor(judgeLabScans(scans(rows)), '/blog', 'desktop', 'lcp')).toEqual({ _tag: 'ShortSeries', count: 1 })
+  })
+
+  it('keeps a missing current metric after a Lighthouse release boundary', () => {
+    const rows = [
+      { ...scan(1, 5000), lighthouseVersion: '13.5.0' },
+      { ...scan(2, 5000), lighthouseVersion: '13.6.0', lcp: null },
+      { ...scan(3, 5000), lighthouseVersion: '13.6.0' },
+    ]
+
+    expect(verdictFor(judgeLabScans(scans(rows)), '/blog', 'desktop', 'lcp')).toEqual({
+      _tag: 'MissingMetric',
+      missingAt: ['2026-09-02T06:00:00.000Z'],
+    })
+  })
+
+  it('rejects malformed Lighthouse provenance instead of treating it as an absent version', () => {
+    expect(parseScanRows([{ ...scan(1, 5000), lighthouseVersion: 13.5 }])._tag).toBe('Err')
+  })
+
   it('refuses a scan list that is not the CLI shape', () => {
     expect(
       parseScanRows([
@@ -280,6 +416,17 @@ describe('lab findings', () => {
     ])
   })
 
+  it('describes Poor persistence after a gap without claiming the entire retained history', () => {
+    const measured = [scan(1, 1100), { ...scan(2, 1200), lcp: null }, scan(3, 5000), scan(4, 5100)]
+    const parsed = createVitalsReview({ minimumViews: 200 }).parseResponse(
+      answer({ labFindings: [labFinding({ url: 'https://example.com/blog', strategy: 'desktop', scans: measured })] }),
+    )
+    const claims = parsed._tag === 'Ok' ? parsed.value.candidates.map((candidate) => candidate.claim) : []
+    expect(claims).toEqual([expect.stringContaining('last 2 measured Scans')])
+    expect(claims[0]).not.toContain('Poor in every retained Scan')
+    expect(claims[0]).toContain('no earlier measured reference')
+  })
+
   it('files nothing for a proposal the series does not support', () => {
     const parsed = createVitalsReview({ minimumViews: 200 }).parseResponse(
       answer({ labFindings: [labFinding({ strategy: 'desktop' })] }),
@@ -289,6 +436,20 @@ describe('lab findings', () => {
       expect(parsed.value.candidates).toEqual([])
       expect(parsed.value.report).toContain('Steady')
     }
+  })
+
+  it('refuses a Poor proposal whose latest pair crosses a Lighthouse release', () => {
+    const measured = [
+      { ...scan(1, 5000), lighthouseVersion: '13.5.0' },
+      { ...scan(2, 5100), lighthouseVersion: '13.6.0' },
+    ]
+    const parsed = createVitalsReview({ minimumViews: 200 }).parseResponse(
+      answer({
+        labFindings: [labFinding({ url: 'https://example.com/blog', strategy: 'desktop', scans: measured })],
+      }),
+    )
+
+    expect(parsed._tag === 'Ok' && parsed.value.candidates).toEqual([])
   })
 
   it('merges two proposals for one page, strategy, and metric', () => {

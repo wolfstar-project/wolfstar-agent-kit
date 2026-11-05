@@ -1017,6 +1017,75 @@ describe('journal store', () => {
     })
   })
 
+  it.each(['Verification requires a corrected test mock.', 'The controller cannot write this pull request branch.'])(
+    'preserves an Agent conflict blocker across unchanged polls: %s',
+    (reason) => {
+      const store = createStore()
+      store.syncRepositories([repositoryMapping()], '2026-10-29T00:00:00.000Z')
+      const subject = pullRequestItem()
+      store.recordObservation({
+        externalId: 'first-conflict',
+        observedAt: '2026-10-29T00:01:00.000Z',
+        source: 'poll',
+        subject,
+      })
+      const task = store.claimNextConflictTask('worker', '2026-10-29T00:01:01.000Z', 60_000)
+      if (task === null) throw new Error('Expected a running conflict Task.')
+      expect(
+        store.needsAttentionTask({
+          taskId: task.id,
+          workerId: task.state.workerId,
+          fence: task.state.fence,
+          at: '2026-10-29T00:01:02.000Z',
+          reason,
+          evidence: 'local fixture',
+        }),
+      ).toBe(true)
+
+      for (const second of ['03', '04', '05']) {
+        const at = `2026-10-29T00:01:${second}.000Z`
+        store.recordObservation({ externalId: 'unchanged-conflict', observedAt: at, source: 'poll', subject })
+        expect(store.getDashboardSnapshot(at).tasks.find((value) => value.id === task.id)?.state).toEqual({
+          _tag: 'ActionRequired',
+          reason,
+        })
+        expect(store.claimNextConflictTask('another-worker', at, 60_000)).toBeNull()
+      }
+    },
+  )
+
+  it.each([false, true])(
+    'resumes conflict work after branch authority returns, blocked at claim: %s',
+    (blockedAtClaim) => {
+      const store = createStore()
+      const mapping = repositoryMapping()
+      const restricted = { ...mapping, writablePullRequestHeadPrefixes: ['feat/'] }
+      store.syncRepositories([blockedAtClaim ? mapping : restricted], '2026-10-29T00:00:00.000Z')
+      const subject = pullRequestItem()
+      store.recordObservation({
+        externalId: 'conflict',
+        observedAt: '2026-10-29T00:01:00.000Z',
+        source: 'poll',
+        subject,
+      })
+      if (blockedAtClaim) store.syncRepositories([restricted], '2026-10-29T00:01:01.000Z')
+      expect(store.claimNextConflictTask('worker', '2026-10-29T00:01:02.000Z', 60_000)).toBeNull()
+      expect(store.getDashboardSnapshot('2026-10-29T00:01:03.000Z').tasks[0]?.state).toEqual({
+        _tag: 'ActionRequired',
+        reason: 'The controller cannot write this pull request branch.',
+      })
+
+      store.syncRepositories([mapping], '2026-10-29T00:01:04.000Z')
+      store.recordObservation({
+        externalId: 'conflict',
+        observedAt: '2026-10-29T00:01:05.000Z',
+        source: 'poll',
+        subject,
+      })
+      expect(store.claimNextConflictTask('worker', '2026-10-29T00:01:06.000Z', 60_000)).not.toBeNull()
+    },
+  )
+
   it('stops requeueing a conflict whose publication keeps losing the base branch race', () => {
     const store = createStore()
     store.syncRepositories([repositoryMapping()], '2026-08-13T00:00:00.000Z')
@@ -1786,6 +1855,49 @@ describe('journal store', () => {
         pullRequestTitle: 'Fix #12: Broken thing',
       }),
     )
+  })
+
+  it.each(['owned', 'maintained'] as const)('keeps every open %s issue visible for Approval', (ownership) => {
+    const store = createStore()
+    store.syncRepositories([repositoryMapping({ ownership })], '2026-08-13T00:00:00.000Z')
+    for (let number = 1; number <= 101; number += 1) {
+      const observedAt = new Date(Date.parse('2026-08-13T01:00:00.000Z') + number * 1_000).toISOString()
+      store.recordObservation({
+        externalId: `outside-issue-${number}`,
+        observedAt,
+        source: 'poll',
+        subject: issueItem({
+          number,
+          url: `https://github.com/wolfstar-project/example/issues/${number}`,
+          updatedAt: observedAt,
+        }),
+      })
+    }
+
+    const snapshot = store.getDashboardSnapshot('2026-08-13T02:00:00.000Z')
+    expect(snapshot.items).toContainEqual(expect.objectContaining({ kind: 'issue', number: 1 }))
+    expect(snapshot.queue).toContainEqual(
+      expect.objectContaining({
+        number: 1,
+        state: { _tag: 'AwaitingApproval', kind: 'issue_triage' },
+      }),
+    )
+    expect(store.claimNextIssueTriageTask('issue-worker', '2026-08-13T02:01:00.000Z', 60_000)).toBeNull()
+
+    const oldest = snapshot.items.find((item) => item.kind === 'issue' && item.number === 1)
+    if (oldest === undefined) throw new Error('Expected the oldest open issue.')
+    expect(
+      store.approveIssue({
+        repository: oldest.repository,
+        issueNumber: oldest.number,
+        revisionId: oldest.revisionId,
+        at: '2026-08-13T02:01:01.000Z',
+      }),
+    ).toEqual({ _tag: 'Approved', work: 'issue_triage', taskId: expect.any(String) })
+    expect(store.claimNextIssueTriageTask('issue-worker', '2026-08-13T02:01:02.000Z', 60_000)).toEqual(
+      expect.objectContaining({ kind: 'issue_triage', issueNumber: 1, revisionId: oldest.revisionId }),
+    )
+    expect(store.claimNextIssueTriageTask('another-worker', '2026-08-13T02:01:03.000Z', 60_000)).toBeNull()
   })
 
   it('records a triage comment GitHub accepted after the lease ran out', () => {
@@ -4473,7 +4585,7 @@ describe('journal store', () => {
       subject: pullRequestItem({ mergeState: 'clean', baseSha: 'old-base' }),
     })
     if (firstObservation._tag !== 'Inserted') throw new Error('Expected the first pull request revision.')
-    const first = store.claimNextAdversarialReviewTask('reviewer-1', '2026-08-13T01:01:00.000Z', 10_000)
+    const first = store.claimNextAdversarialReviewTask('reviewer-1', '2026-08-13T01:01:00.000Z', 600_000)
     if (first === null) throw new Error('Expected the first review.')
     store.recordReviewRun({
       id: 'old-base-attempt',
@@ -4506,6 +4618,17 @@ describe('journal store', () => {
       fence: first.state.fence,
       at: '2026-08-13T01:02:00.000Z',
       evidence: 'Reviewed old base.',
+    })
+    store.recordReviewPublication({
+      id: 'old-base-publication',
+      reviewRunId: 'old-base-attempt',
+      body: '### 🤖 READY',
+      at: '2026-08-13T01:02:01.000Z',
+      result: {
+        _tag: 'Published',
+        githubCommentId: 42,
+        url: 'https://github.com/wolfstar-project/example/pull/24#issuecomment-42',
+      },
     })
     const secondObservation = store.recordObservation({
       externalId: 'review-new-base',

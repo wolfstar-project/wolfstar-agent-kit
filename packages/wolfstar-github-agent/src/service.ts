@@ -124,6 +124,7 @@ import { createRoutineScanWorker } from './routine-worker.ts'
 import { resolveRecoveredRunnerIncidents } from './runner-lost-recovery.ts'
 import { clearAbandonedRunningLabels } from './running-label-sweep.ts'
 import { startAgentServer } from './server.ts'
+import { createServiceUpdateScheduler } from './service-update-schedule.ts'
 import { createSessionController } from './session-controller.ts'
 import { openJournalStore } from './store.ts'
 import { runCompletionTask } from './take-ownership-completion.ts'
@@ -865,6 +866,7 @@ export async function startAgentService(options: StartAgentServiceOptions): Prom
     ownAppId: config.github.appId,
     tokens,
   })
+  const workerGitHubEvidence = createRoutineGitHubEvidenceSource({ tokens: routedTokens, now, jobs: workerGithub })
   // Pull request triage classifies at observation time, before the planner
   // queues anything. Without the classification service it still runs: the
   // path rule decides, and a prose-only pull request falls back to a full
@@ -1019,6 +1021,7 @@ export async function startAgentService(options: StartAgentServiceOptions): Prom
       source: tokens,
       worker: createIssueWorkWorker({
         github: workerGithub,
+        githubEvidence: workerGitHubEvidence,
         activityLog,
         claudeHome: agentContext.value.claudeHome,
         ...(diagramReference === null ? {} : { diagramReference }),
@@ -1262,7 +1265,7 @@ export async function startAgentService(options: StartAgentServiceOptions): Prom
           serviceEvidence: store,
           serviceUpdate: options.serviceUpdate.read,
           activityLog,
-          githubEvidence: createRoutineGitHubEvidenceSource({ tokens: routedTokens, now, jobs: workerGithub }),
+          githubEvidence: workerGitHubEvidence,
           logger: {
             error: (message) => options.logger.error(message),
             info: (message) => options.logger.info(message),
@@ -1291,7 +1294,7 @@ export async function startAgentService(options: StartAgentServiceOptions): Prom
           worker: withGitHubWritePreflight({
             accesses: ['item_write'],
             source: tokens,
-            worker: createIssueTriageWorker(subjectWorkerOptions),
+            worker: createIssueTriageWorker({ ...subjectWorkerOptions, githubEvidence: workerGitHubEvidence }),
           }),
           workerId: randomUUID(),
         }),
@@ -2258,6 +2261,19 @@ export async function startAgentService(options: StartAgentServiceOptions): Prom
   }
   restartController.start()
   options.serviceUpdate.start()
+  // Absent leaves every Update to the dashboard, the tray, or the helper.
+  const updateScheduler =
+    config.serviceUpdate === undefined
+      ? undefined
+      : createServiceUpdateScheduler({
+          schedule: config.serviceUpdate,
+          now,
+          readStatus: options.serviceUpdate.read,
+          store,
+          onRequested: (request) =>
+            options.logger.info(`Queued the scheduled Update as Restart request ${request.id}.`),
+        })
+  updateScheduler?.start()
   capacity.start()
   // Webhooks refresh only their repository. Timers still recover missed deliveries.
   // Global maintenance and Routine reads keep their own timer.
@@ -2413,6 +2429,7 @@ export async function startAgentService(options: StartAgentServiceOptions): Prom
     waitForRestart: restartController.waitForRestart,
     stop: async () => {
       restartController.stop()
+      updateScheduler?.stop()
       await Promise.all([
         capacity.stop(),
         options.serviceUpdate.stop(),

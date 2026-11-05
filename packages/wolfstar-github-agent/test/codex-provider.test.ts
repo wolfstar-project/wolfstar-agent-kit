@@ -1,6 +1,6 @@
 import type { ThreadEvent, ThreadOptions } from '@openai/codex-sdk'
 import type { AgentEvent, AgentTurnRequest } from '../src/agent-provider.ts'
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
@@ -65,6 +65,47 @@ const messageEvents = [
     },
   },
 ] as ThreadEvent[]
+
+it('does not accept model-written comparison evidence without the isolated reader', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'codex-evidence-controller-'))
+  vi.stubEnv('HOME', home)
+  const comparison = {
+    id: '5b7a9978-6b09-4d3e-a978-bebef7e65091',
+    taskId: 'a'.repeat(64),
+    revisionId: 'b'.repeat(64),
+    baseSha: 'c'.repeat(40),
+    issuedAt: new Date().toISOString(),
+    targets: [{ path: '/', strategy: 'mobile' as const, metric: 'lcp' as const }],
+  }
+  try {
+    const client = { startThread: () => thread(messageEvents), resumeThread: () => thread(messageEvents) }
+    const events = await collect(
+      createCodexProvider({ createCodex: () => client }).runTurn(
+        request({
+          taskId: comparison.taskId,
+          routineContext: { repository: 'wolfstar-project/example', routineName: 'vitals-review' },
+          vitalsComparison: comparison,
+        }),
+      ),
+    )
+    const retained = join(home, 'scratch/vitals-review', comparison.taskId, comparison.id)
+    expect(events.filter((event) => event._tag === 'VitalsComparison')).toEqual([
+      {
+        _tag: 'VitalsComparison',
+        result: {
+          _tag: 'Unavailable',
+          requestId: comparison.id,
+          reason: 'The performance evidence reader requires an isolated Agent.',
+        },
+        retainedDirectory: retained,
+      },
+    ])
+    expect((await stat(retained)).mode & 0o777).toBe(0o700)
+  } finally {
+    vi.unstubAllEnvs()
+    await rm(home, { recursive: true, force: true })
+  }
+})
 
 describe('codexAgentEvent', () => {
   it('maps a finished command to its output and exit code', () => {

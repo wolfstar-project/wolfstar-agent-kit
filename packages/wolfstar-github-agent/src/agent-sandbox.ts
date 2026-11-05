@@ -1,6 +1,8 @@
+import type { AgentTurnRequest } from './agent-provider.ts'
+import type { WorkerPackage } from './worker-package.ts'
 import { Buffer } from 'node:buffer'
 import { execFile } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
 import {
   mkdir,
@@ -20,10 +22,14 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { createAgentEgress } from './agent-egress.ts'
+import { AGENT_SKILL_CATALOG_PATH, loadAgentSkillCatalog } from './agent-skill-catalog.ts'
 import { checkinEnvironment } from './checkin-environment.ts'
 import { opencodeTaskKey, prepareOpencodeTaskDirectory } from './opencode-storage.ts'
+import { resolveBrowserSetupRuntime } from './worker-browser-runtime.ts'
 import { resolveWorkerHostTools } from './worker-host-tools.ts'
 import { workerMemoryCommand } from './worker-memory.ts'
+import { resolveWorkerNuxtseo, workerNuxtseoEnvironment, workerNuxtseoRoutine } from './worker-nuxtseo.ts'
+import { resolveWorkerPackage } from './worker-package.ts'
 import { workspaceEnvironment } from './workspace-environment.ts'
 
 const execute = promisify(execFile)
@@ -162,6 +168,8 @@ export interface AgentSandbox {
   workerStateHome: string
   providerBinary: string
   adapterPath: string
+  /** Present only where this namespace serves ordinary model tools. */
+  skillCatalogPath?: string
   memoryExceeded: () => Promise<boolean>
   release: () => Promise<void>
 }
@@ -310,7 +318,10 @@ export async function prepareAgentSandbox(input: {
   memoryPerAgentGiB?: number
   readOnlyPaths?: readonly string[]
   writablePaths?: readonly string[]
+  /** Controller-owned retained reports for this trusted vitals comparison only. */
+  vitalsEvidenceDirectory?: string
   taskId?: string
+  routineContext?: AgentTurnRequest['routineContext']
   networkMode?: 'command' | 'opencode-server' | 'opencode-client'
   transportDirectory?: string
   readOnly?: boolean
@@ -401,9 +412,158 @@ export async function prepareAgentSandbox(input: {
           : await prepareOpencodeTaskDirectory(controllerHome, opencodeTaskKey(input.taskId ?? randomUUID()))
       args.push('--bind', databaseDirectory, '/run/agent/opencode-database')
     }
+    const skillRoots = []
+    const packageTools = []
+    if (
+      input.reviewHome === undefined &&
+      input.networkMode !== 'opencode-client' &&
+      workerNuxtseoRoutine(input) !== undefined
+    ) {
+      const cli = await resolveWorkerNuxtseo(controllerHome)
+      packageTools.push({ ...cli, command: 'nuxtseo' as const })
+      skillRoots.push({ path: cli.skills, agentPath: cli.skills })
+      if (workerNuxtseoRoutine(input)?.routineName === 'vitals-review') {
+        const lighthouse = await resolveWorkerPackage(controllerHome, {
+          name: 'lighthouse',
+          package: 'lighthouse',
+          label: 'Lighthouse',
+          maximumPackages: 256,
+        })
+        if (lighthouse !== undefined) {
+          packageTools.push({ ...lighthouse, command: 'lighthouse' })
+          const awk = await realpath('/usr/bin/awk')
+          if (!awk.startsWith('/usr/')) throw new Error('The Lighthouse awk command must stay inside system tools.')
+          args.push('--ro-bind', awk, '/run/agent/host-tools/awk')
+        }
+      }
+    }
+    if (input.reviewHome === undefined && input.networkMode !== 'opencode-client') {
+      const browser = await resolveWorkerPackage(controllerHome, {
+        name: 'dev-browser',
+        package: 'dev-browser',
+        label: 'browser',
+      })
+      if (browser !== undefined) packageTools.push({ ...browser, command: 'dev-browser' as const })
+      const npm = await resolveWorkerPackage(controllerHome, {
+        name: 'npm',
+        package: 'npm',
+        label: 'npm',
+        maximumPackages: 256,
+      })
+      if (npm !== undefined) packageTools.push({ ...npm, command: 'npm' as const })
+    }
+    const mountedPackages = new Set<string>()
+    const packageLinks = new Map<string, string>()
+    for (const cli of packageTools) {
+      for (const path of cli.packages) {
+        if (!mountedPackages.has(path)) {
+          args.push('--ro-bind', await permittedPath(path, controllerHome), path)
+          mountedPackages.add(path)
+        }
+      }
+      for (const link of cli.links) {
+        const previous = packageLinks.get(link.path)
+        if (previous !== undefined && previous !== link.target)
+          throw new Error('The Agent package alias changed while preparing its tools.')
+        if (previous === undefined) {
+          args.push('--dir', dirname(link.path), '--symlink', link.target, link.path)
+          packageLinks.set(link.path, link.target)
+        }
+      }
+      const launcher = join(scratch, cli.command)
+      if (cli.command === 'dev-browser') {
+        const setup = await resolveBrowserSetupRuntime(controllerHome)
+        const npm = packageTools.find(
+          (tool): tool is WorkerPackage & { command: 'npm' } => 'root' in tool && tool.command === 'npm',
+        )
+        const runtime =
+          npm === undefined
+            ? { _tag: 'Unavailable' as const, reason: 'Browser setup needs the installed npm command.' }
+            : setup
+        const bootstrap = fileURLToPath(
+          new URL(
+            import.meta.url.endsWith('.ts') ? './worker-browser-bootstrap.ts' : '../worker-browser-bootstrap.mjs',
+            import.meta.url,
+          ),
+        )
+        const configuration = join(scratch, 'browser-bootstrap.json')
+        const manifests = [
+          await readFile(join(cli.root, 'package.json'), 'utf8'),
+          npm === undefined ? null : await readFile(join(npm.root, 'package.json'), 'utf8'),
+        ]
+        const fingerprint = createHash('sha256')
+          .update(
+            JSON.stringify({
+              manifests,
+              runtime: setup._tag === 'Available' ? { version: setup.version, digest: setup.digest } : setup,
+            }),
+          )
+          .digest('hex')
+        await writeFile(
+          configuration,
+          JSON.stringify({
+            entry: cli.entry,
+            fingerprint,
+            runtime: runtime._tag === 'Available' ? { _tag: 'Available' } : runtime,
+          }),
+          { mode: 0o600 },
+        )
+        args.push(
+          '--ro-bind',
+          bootstrap,
+          '/run/agent/browser-bootstrap.ts',
+          '--ro-bind',
+          configuration,
+          '/run/agent/browser-bootstrap.json',
+        )
+        if (setup._tag === 'Available' && npm !== undefined) {
+          const node = await permittedPath(setup.path, controllerHome)
+          const npmLauncher = join(scratch, 'browser-setup-npm')
+          await writeFile(
+            npmLauncher,
+            `#!/bin/sh\nexec /run/agent/browser-node '${npm.entry.replaceAll("'", "'\\''")}' "$@"\n`,
+            { mode: 0o700 },
+          )
+          args.push(
+            '--ro-bind',
+            node,
+            '/run/agent/browser-node',
+            '--ro-bind',
+            node,
+            '/run/agent/browser-setup/node',
+            '--ro-bind',
+            npmLauncher,
+            '/run/agent/browser-setup/npm',
+          )
+        }
+        await writeFile(
+          launcher,
+          '#!/bin/sh\nexec /run/agent/node --experimental-strip-types /run/agent/browser-bootstrap.ts /run/agent/browser-bootstrap.json run "$@"\n',
+          { mode: 0o700 },
+        )
+      } else {
+        await writeFile(launcher, `#!/bin/sh\nexec /run/agent/node '${cli.entry.replaceAll("'", "'\\''")}' "$@"\n`, {
+          mode: 0o700,
+        })
+      }
+      args.push('--ro-bind', launcher, `/run/agent/host-tools/${cli.command}`)
+    }
     for (const path of [...profile.tools, ...profile.readOnlyPaths]) {
       const canonical = await permittedPath(path, controllerHome)
       args.push('--ro-bind', canonical, path)
+      if (profile.readOnlyPaths.includes(path))
+        skillRoots.push({ path: join(canonical, 'skills'), agentPath: join(path, 'skills') })
+    }
+    const skillCatalogPath =
+      input.reviewHome === undefined && input.networkMode !== 'opencode-client' ? AGENT_SKILL_CATALOG_PATH : undefined
+    if (skillCatalogPath !== undefined) {
+      const relativeRoots = ['.local/share/wolfstar-agent-kit/skilld/skills', '.agents/skills']
+      skillRoots.push(
+        ...relativeRoots.map((path) => ({ path: join(isolatedHome, path), agentPath: join(workerHome, path) })),
+      )
+      const catalog = join(scratch, 'SKILLS.md')
+      await writeFile(catalog, await loadAgentSkillCatalog(skillRoots), { mode: 0o600 })
+      args.push('--ro-bind', catalog, skillCatalogPath)
     }
     for (const [name, path] of Object.entries(hostTools)) {
       const canonical = await permittedPath(path, controllerHome)
@@ -434,6 +594,19 @@ export async function prepareAgentSandbox(input: {
       else args.push('--ro-bind', await permittedPath(path, controllerHome), path)
     }
     for (const path of input.writablePaths ?? []) args.push('--bind', await permittedPath(path, controllerHome), path)
+    if (input.vitalsEvidenceDirectory !== undefined) {
+      if (
+        input.routineContext?.routineName !== 'vitals-review' ||
+        input.reviewHome !== undefined ||
+        input.networkMode === 'opencode-client'
+      )
+        throw new Error('Only trusted vitals Issue work may write performance evidence.')
+      args.push(
+        '--bind',
+        await permittedPath(input.vitalsEvidenceDirectory, controllerHome),
+        '/run/agent/vitals-evidence',
+      )
+    }
     const workspace = await realpath(input.workspace)
     const repositoryBind = readOnly ? '--ro-bind' : '--bind'
     if (input.reviewHome === undefined) {
@@ -510,6 +683,15 @@ export async function prepareAgentSandbox(input: {
       input.reviewHome === undefined
         ? await checkinEnvironment({ controllerHome, repository: match?.[1], taskId: input.taskId })
         : {}
+    const nuxtseoValues =
+      input.reviewHome === undefined && input.networkMode !== 'opencode-client'
+        ? await workerNuxtseoEnvironment({
+            configurationPath: join(controllerHome, '.config/wolfstar-github-agent/nuxtseo-worker.json'),
+            repository: match?.[1],
+            taskId: input.taskId,
+            ...(input.routineContext === undefined ? {} : { routineContext: input.routineContext }),
+          })
+        : {}
     await writeFile(
       gitConfig,
       `[core]\n repositoryformatversion = 0\n bare = false\n hooksPath = /home/agent/.config/git/hooks\n${match ? `[remote "origin"]\n url = https://github.com/${match[1]}.git\n fetch = +refs/heads/*:refs/remotes/origin/*\n` : ''}`,
@@ -556,6 +738,7 @@ export async function prepareAgentSandbox(input: {
         ? workspaceEnvironment(baseEnvironment, workspace, input.taskId)
         : baseEnvironment),
       ...checkinValues,
+      ...nuxtseoValues,
       // Bind mounts prevent hardlinks to HOME. Keep pnpm's copy fallback outside the repository.
       PNPM_CONFIG_STORE_DIR: `${workerHome}/.local/share/pnpm/store`,
       // Nested workspace and test pools share the service's process cap.
@@ -566,14 +749,9 @@ export async function prepareAgentSandbox(input: {
         ? { OPENCODE_FILEWATCHER_DISABLE: 'true', OPENCODE_DB: '/run/agent/opencode-database/opencode.db' }
         : {}),
     }
-    // Repository variables belong inside the boundary. Loader variables must
-    // never affect host Bubblewrap before namespace creation.
-    args.splice(
-      args.indexOf('--'),
-      0,
-      '--clearenv',
-      ...Object.entries(environment).flatMap(([key, value]) => (value === undefined ? [] : ['--setenv', key, value])),
-    )
+    // Keep secrets out of launcher arguments and files. Decode the opaque
+    // environment only inside the guest, after host loaders have started.
+    const guestEnvironment = { PATH: '/usr/bin:/bin', WOLFSTAR_AGENT_SANDBOX_ENVIRONMENT: JSON.stringify(environment) }
     let released: Promise<void> | undefined
     const saveGit = async () => {
       const finalHead = await gitData(privateGit.directory, 'HEAD')
@@ -595,7 +773,7 @@ export async function prepareAgentSandbox(input: {
       const guest = [...exportArgs, ...safeGit]
       const newSha = (
         await execute('/usr/bin/bwrap', [...guest, 'rev-parse', '--verify', 'HEAD'], {
-          env: { PATH: '/usr/bin:/bin' },
+          env: guestEnvironment,
           timeout: 30_000,
         })
       ).stdout.trim()
@@ -603,7 +781,7 @@ export async function prepareAgentSandbox(input: {
         throw new Error('The Agent Git head must use a complete commit SHA.')
       if (newSha !== originalSha) {
         const exporting = execute('/usr/bin/bwrap', [...guest, 'pack-objects', '--stdout', '--revs', '--thin'], {
-          env: { PATH: '/usr/bin:/bin' },
+          env: guestEnvironment,
           encoding: 'buffer',
           maxBuffer: 128 * 1024 * 1024,
           timeout: 30_000,
@@ -636,7 +814,7 @@ export async function prepareAgentSandbox(input: {
             ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
           })
     const launchEnvironment = {
-      PATH: '/usr/bin:/bin',
+      ...guestEnvironment,
       ...(memory === undefined
         ? {}
         : {
@@ -650,6 +828,7 @@ export async function prepareAgentSandbox(input: {
       environment: launchEnvironment,
       workerStateHome,
       adapterPath,
+      ...(skillCatalogPath === undefined ? {} : { skillCatalogPath }),
       providerBinary:
         hostTools[input.provider] === undefined ? profile[input.provider] : `/run/agent/host-tools/${input.provider}`,
       memoryExceeded: memory?.memoryExceeded ?? (async () => false),

@@ -37,6 +37,16 @@ export interface GitHubReadError {
   status?: number
 }
 
+/** A listed Item whose complete detail is unavailable, never a closure. */
+export interface GitHubUnavailableItem {
+  kind: 'unavailable'
+  itemKind: 'pull_request'
+  number: number
+  error: GitHubReadError
+}
+
+export type GitHubOpenItemObservation = GitHubItem | GitHubUnavailableItem
+
 interface GitHubPullRequestComment {
   author: string
   commentId: number
@@ -69,7 +79,10 @@ export interface GitHubSource {
     number: number,
     signal?: AbortSignal,
   ) => Promise<Result<GitHubPullRequestItem, GitHubReadError>>
-  listOpenItems: (repository: RepositoryMapping, signal?: AbortSignal) => Promise<Result<GitHubItem[], GitHubReadError>>
+  listOpenItems: (
+    repository: RepositoryMapping,
+    signal?: AbortSignal,
+  ) => Promise<Result<GitHubOpenItemObservation[], GitHubReadError>>
   listReviewRerunRequests: (
     repository: RepositoryMapping,
     signal?: AbortSignal,
@@ -653,8 +666,8 @@ export function createGitHubSource(options: GitHubSourceOptions): GitHubSource {
             { kind: 'pull_request', allowedAuthors: repository.writablePullRequestAuthors },
           ),
         )
-        const pullRequests: GitHubItem[] = await mapConcurrent(eligiblePullRows, 4, async (pull) => {
-          const [detail, comments] = await Promise.all([
+        const pullRequests = await mapConcurrent(eligiblePullRows, 4, (pull): Promise<GitHubOpenItemObservation> =>
+          Promise.allSettled([
             octokit.value.rest.pulls
               .get({ owner, repo, pull_number: pull.number, ...requestOptions })
               .then((response) => response.data),
@@ -666,35 +679,62 @@ export function createGitHubSource(options: GitHubSourceOptions): GitHubSource {
               ...requestOptions,
             }),
           ])
-          const baseSha = await baseShaFor(detail.base.ref)
-          return {
-            ...pullRequestItem(repository, detail, baseSha, options.actorLogin(repository)),
-            priorAutomatedReview: priorAutomatedReviewForHead(
-              comments.flatMap((comment) =>
-                comment.body === undefined || comment.body === null || comment.user?.login === undefined
-                  ? []
-                  : [
-                      {
-                        authorAssociation: comment.author_association,
-                        authorLogin: comment.user.login,
-                        body: comment.body,
-                        url: comment.html_url,
-                      },
-                    ],
-              ),
-              detail.head.sha,
-              options.actorLogin(repository),
-              baseSha,
-            ),
-          }
-        })
+            .then(async ([detailRead, commentsRead]): Promise<GitHubItem> => {
+              // A faster 404 must not hide a concurrent authorization or server
+              // failure. Both parallel reads must settle before quarantine.
+              const failedRead = [detailRead, commentsRead].find(
+                (read) => read.status === 'rejected' && errorStatus(read.reason) !== 404,
+              )
+              if (failedRead?.status === 'rejected') throw failedRead.reason
+              if (detailRead.status === 'rejected') throw detailRead.reason
+              if (commentsRead.status === 'rejected') throw commentsRead.reason
+              const detail = detailRead.value
+              const comments = commentsRead.value
+              const baseSha = await baseShaFor(detail.base.ref)
+              return {
+                ...pullRequestItem(repository, detail, baseSha, options.actorLogin(repository)),
+                priorAutomatedReview: priorAutomatedReviewForHead(
+                  comments.flatMap((comment) =>
+                    comment.body === undefined || comment.body === null || comment.user?.login === undefined
+                      ? []
+                      : [
+                          {
+                            authorAssociation: comment.author_association,
+                            authorLogin: comment.user.login,
+                            body: comment.body,
+                            url: comment.html_url,
+                          },
+                        ],
+                  ),
+                  detail.head.sha,
+                  options.actorLogin(repository),
+                  baseSha,
+                ),
+              }
+            })
+            .catch((error: unknown): GitHubUnavailableItem => {
+              // GitHub can list an open pull request while its exact read is
+              // unavailable. Retain that identity without trusting partial data.
+              if (signal?.aborted === true || errorStatus(error) !== 404) throw error
+              return {
+                kind: 'unavailable',
+                itemKind: 'pull_request',
+                number: pull.number,
+                error: {
+                  repository: repository.github,
+                  status: 404,
+                  message: error instanceof Error ? error.message : 'GitHub request failed.',
+                },
+              }
+            }),
+        )
 
         return [...issues, ...pullRequests]
       })
 
       return request
-        .then((subjects): Result<GitHubItem[], GitHubReadError> => ok(subjects))
-        .catch((error: unknown): Result<GitHubItem[], GitHubReadError> => {
+        .then((subjects): Result<GitHubOpenItemObservation[], GitHubReadError> => ok(subjects))
+        .catch((error: unknown): Result<GitHubOpenItemObservation[], GitHubReadError> => {
           const status = errorStatus(error)
           return err({
             repository: repository.github,
@@ -1050,6 +1090,12 @@ export function createGitHubPullRequestPublisher(
             await applyLabels(existing.number)
             return ok({ number: existing.number, url: existing.html_url, diagram: { _tag: 'None' } })
           }
+          if (response.data.length > 0) {
+            return err({
+              repository: input.repository.github,
+              message: 'The pull request head changed before publication.',
+            })
+          }
           const attached = await attachDiagram()
           return octokit.rest.pulls
             .create({
@@ -1062,7 +1108,13 @@ export function createGitHubPullRequestPublisher(
               draft: false,
               ...request,
             })
-            .then(async (created) => {
+            .then(async (created): Promise<Result<PublishedPullRequest, GitHubReadError>> => {
+              if (created.data.head.sha !== input.expectedHeadSha) {
+                return err({
+                  repository: input.repository.github,
+                  message: 'The pull request head changed before publication.',
+                })
+              }
               await applyLabels(created.data.number)
               return ok({ number: created.data.number, url: created.data.html_url, diagram: attached.diagram })
             })

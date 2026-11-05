@@ -189,6 +189,8 @@ describe('filing the issues Candidates propose', () => {
       expect(store.getRoutineIssueSource('wolfstar-project/example', 101)).toEqual({
         routineName: 'pr-triage',
         target: 'src/store.ts',
+        fingerprint: candidate.fingerprint,
+        claim: candidate.claim,
       })
     } finally {
       store.close()

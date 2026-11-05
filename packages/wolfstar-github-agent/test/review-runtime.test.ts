@@ -54,6 +54,7 @@ it('runs the proof in a readonly namespace and retains the first failure across 
   const baseSha = (await execute('git', ['-C', workspace, 'rev-parse', 'HEAD'])).stdout.trim()
   await rm(join(workspace, 'old.ts'))
   await writeFile(join(workspace, 'large.ts'), `${'x'.repeat(64_000)}after`)
+  await writeFile(join(workspace, 'screenshot.png'), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 0]))
   await execute('git', ['-C', workspace, 'add', '.'])
   await execute('git', [
     '-C',
@@ -118,6 +119,10 @@ it('runs the proof in a readonly namespace and retains the first failure across 
     expect(await staticTools.call('review_read', { revision: 'head', path: 'large.ts', offset: 64_000 })).toMatchObject(
       { _tag: 'Read', text: 'after', truncated: false },
     )
+    expect(await staticTools.call('review_read', { revision: 'head', path: 'screenshot.png' })).toMatchObject({
+      _tag: 'Unavailable',
+      content: { _tag: 'Binary', bytes: 9 },
+    })
     const diff = await staticTools.call('review_read', { revision: 'diff', path: '', offset: 128_000 })
     expect(JSON.stringify(diff)).toContain('deleted')
     expect(reserved).toBe(false)

@@ -17,7 +17,12 @@ it('pages late workspace code and immutable deleted base evidence without spendi
         headSha: 'b'.repeat(40),
         mergeBaseSha: 'a'.repeat(40),
         diff: 'deleted old.ts',
-        files: { 'old.ts': { base: 'deleted exported API', head: null } },
+        files: {
+          'old.ts': {
+            base: { _tag: 'Text', oid: 'c'.repeat(40), bytes: 20, text: 'deleted exported API' },
+            head: { _tag: 'Missing' },
+          },
+        },
       }),
     )
     let attempts = 0

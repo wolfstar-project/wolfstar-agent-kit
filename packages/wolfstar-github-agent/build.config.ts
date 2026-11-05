@@ -4,6 +4,7 @@ export default defineBuildConfig({
   entries: [
     {
       type: 'bundle',
+      dts: { eager: true },
       input: [
         './src/index.ts',
         './src/terminal.ts',
@@ -17,11 +18,16 @@ export default defineBuildConfig({
         './src/terminal-lock.ts',
         './src/agent-sandbox-cli.ts',
         './src/agent-sandbox-runtime.ts',
+        './src/worker-browser-bootstrap.ts',
         './src/github-media-render.ts',
         './src/repair-regression-reporter.ts',
         './src/review-mcp.ts',
         './src/review-evidence-cli.ts',
       ],
+    },
+    {
+      type: 'bundle',
+      input: ['./src/vitals-comparison.ts'],
     },
   ],
 })

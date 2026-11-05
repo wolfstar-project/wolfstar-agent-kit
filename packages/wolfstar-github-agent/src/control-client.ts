@@ -332,7 +332,10 @@ function parseRestartRequest(value: unknown): Parsed<RestartRequest> {
     input === undefined ||
     !['Requested', 'Restarting', 'Completed', 'ActionRequired'].includes(String(input._tag)) ||
     typeof input.id !== 'string' ||
-    (input.source !== 'dashboard' && input.source !== 'tray' && input.source !== 'helper') ||
+    (input.source !== 'dashboard' &&
+      input.source !== 'tray' &&
+      input.source !== 'helper' &&
+      input.source !== 'schedule') ||
     !validOperation ||
     typeof input.requestedAt !== 'string'
   ) {

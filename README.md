@@ -6,7 +6,7 @@
 
 <h1>wolfstar-agent-kit</h1>
 
-> 🤖 Wolfstar Project's agent kit for Nuxt and TypeScript work. 38 Skills, 8 hooks, and a service that works on [GitHub](https://github.com) repositories autonomously.
+> 🤖 Wolfstar Project's agent kit for Nuxt and TypeScript work. 40 Skills, 8 hooks, and a service that works on [GitHub](https://github.com) repositories autonomously.
 
 It installs as a [Claude Code](https://claude.com/code) plugin. Codex reads the
 same directory and picks up the Skills.
@@ -101,6 +101,7 @@ Start a new Codex thread after a reinstall, otherwise the new Skills stay unload
 ## Skills
 
 Personal Skills live in [`wolfstar-agent-kit/skills/`](./wolfstar-agent-kit/skills).
+`pr-evidence`, `review-findings`, `review-replies`, and the merge cleanup in `take-ownership` adapt Aref Mozafari's MIT-licensed [pr-evidence](https://github.com/ArefMozafari/pr-evidence), [review-findings](https://github.com/ArefMozafari/review-findings), [review-replies](https://github.com/ArefMozafari/review-replies), and [post-merge-cleanup](https://github.com/ArefMozafari/post-merge-cleanup).
 Portable Skills come from [Brundlefly](https://github.com/harlan-zw/brundlefly) and [Ripast](https://github.com/wolfstar-project/ripast).
 The [Ripast skill](https://github.com/wolfstar-project/ripast/blob/main/packages/cli/skills/ripast/SKILL.md) lives in Ripast's repository.
 The declaration pins its source commit.
@@ -153,14 +154,16 @@ The personal kit does not bundle this Skill in its marketplace package. Run `pnp
 | [`pkg-conform`](./wolfstar-agent-kit/skills/pkg-conform/SKILL.md)                                               | Conform or scaffold a TypeScript package or Nuxt module                                                        |
 | [`plan-ceo`](./wolfstar-agent-kit/skills/plan-ceo/SKILL.md)                                                     | Challenge scope and strategy before anyone writes code                                                         |
 | [`pr`](./wolfstar-agent-kit/skills/pr/SKILL.md)                                                                 | Create or update a pull request from current work                                                              |
+| [`pr-evidence`](./wolfstar-agent-kit/skills/pr-evidence/SKILL.md)                                               | Show before and after screenshots or a focused snippet, with optional manual testing instructions              |
 | [`pr-lens`](./wolfstar-agent-kit/skills/pr-lens/SKILL.md)                                                       | Draw a change as animated architecture and data-flow diagrams with [PR Lens](https://prlens.dev)               |
 | [`pr-triage`](./wolfstar-agent-kit/skills/pr-triage/SKILL.md)                                                   | Repair, rank, and order the owned PR backlog                                                                   |
 | [`close-off`](./wolfstar-agent-kit/skills/close-off/SKILL.md)                                                   | Finish loose ends, verify delivery, clean task-owned Git state                                                 |
-| [`social-presence`](./wolfstar-agent-kit/skills/social-presence/SKILL.md)                                       | Plan social content and launch posts                                                                           |
 | [`wolfstar-announcements`](./wolfstar-agent-kit/skills/wolfstar-announcements/SKILL.md)                         | Write release, stage, and hotfix announcements for Discord and the website                                     |
 | [`daily-checkin`](./wolfstar-agent-kit/skills/daily-checkin/SKILL.md)                                           | Run nuxt-checkin and interpret site prompt items                                                               |
 | [`dependency-updates`](./wolfstar-agent-kit/skills/dependency-updates/SKILL.md)                                 | Attempt weekly dependency updates, including majors, in one pull request                                       |
 | [`ci-review`](./wolfstar-agent-kit/skills/ci-review/SKILL.md)                                                   | Review CI warnings and errors, then propose verified repairs                                                   |
+| [`review-findings`](./wolfstar-agent-kit/skills/review-findings/SKILL.md)                                       | Review a diff inline and report findings with comments ready to paste                                          |
+| [`review-replies`](./wolfstar-agent-kit/skills/review-replies/SKILL.md)                                         | Answer human review threads on your own PR one at a time                                                       |
 | [`seo-review`](./wolfstar-agent-kit/skills/seo-review/SKILL.md)                                                 | Triage a Site's NuxtSEO actions and repair the ones the code owns                                              |
 | [`vitals-review`](./wolfstar-agent-kit/skills/vitals-review/SKILL.md)                                           | File a Site's poor field vitals and persistent lab drops from NuxtSEO, then repair them                        |
 | [`sentry-checkin`](./wolfstar-agent-kit/skills/sentry-checkin/SKILL.md)                                         | Triage open Sentry issues and repair them with verified PRs                                                    |
@@ -214,6 +217,10 @@ the reviewer's own word.
 pnpm service:status    # Show the service state
 pnpm service:update    # Rebuild and restart
 ```
+
+[`packages/octorun`](./packages/octorun/README.md) consumes the standalone [Octorun](https://github.com/wolfstar-project/octorun) runtime for this repository.
+It runs automatic change summaries and explicit `@octorun review` commands with the existing App and Claude subscription.
+Run `pnpm octorun doctor`, then `pnpm octorun serve` for continuous processing.
 
 ## Reference
 

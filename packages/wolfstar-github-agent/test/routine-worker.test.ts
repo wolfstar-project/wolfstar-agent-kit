@@ -6,12 +6,15 @@ import type { RoutineScanInput } from '../src/routines/contract.ts'
 import type { ClaimedRoutineRun } from '../src/types.ts'
 import { describe, expect, it } from 'vitest'
 import { createAgentActivityLog } from '../src/agent-activity.ts'
+import { createAgentPermitPool } from '../src/agent-permit-pool.ts'
 import { CODEX_AGENT_PROFILE, createAgentRuntimeSource } from '../src/agent-profile.ts'
 import { ok } from '../src/result.ts'
 import { createRoutineReportController } from '../src/routine-report-controller.ts'
 import { createRoutineScanWorker } from '../src/routine-worker.ts'
 import { getRoutine } from '../src/routines/index.ts'
 import { openJournalStore } from '../src/store.ts'
+import { collectRoutineGitHubEvidence } from '../src/worker-github-evidence.ts'
+import { createWorkerTaskScheduler } from '../src/worker-task-scheduler.ts'
 import { repositoryMapping } from './fixtures.ts'
 
 const routineScanPrompt = (input: RoutineScanInput) => getRoutine(input.name).scanPrompt(input)
@@ -76,6 +79,7 @@ function workerFor(
         deployments: { _tag: 'Available', entries: [], truncated: false },
         deploymentStatuses: [],
         jobLogs: { _tag: 'NotRequested' },
+        ownership: { _tag: 'NotRequested' },
       }),
     },
     ...(activityLog === undefined ? {} : { activityLog }),
@@ -118,6 +122,54 @@ const candidate = {
 }
 
 describe('building the scan prompt', () => {
+  it.each(['seo-review', 'vitals-review', 'ci-review'] as const)(
+    'requests the appropriate private evidence for %s',
+    async (name) => {
+      const store = openJournalStore(':memory:')
+      try {
+        seed(store, name)
+        const capture = { prompts: [] as string[] }
+        const scopes: Array<string | undefined> = []
+        const provider = scanning(
+          name === 'vitals-review'
+            ? { report: 'No findings.', fieldFindings: [], labFindings: [] }
+            : { report: 'No findings.', candidates: [] },
+          capture,
+        )
+        const worker = createRoutineScanWorker({
+          now,
+          store,
+          logger: { error: () => undefined, info: () => undefined },
+          runtime: () => ({ profile: CODEX_AGENT_PROFILE, provider }),
+          workspaces: {
+            prepareRoutine: async () =>
+              ok({ path: '/tmp/routine', baseSha: 'abc123', headSha: 'abc123', defaultBranchSha: 'abc123' }),
+          },
+          githubEvidence: {
+            collect: async (_mapping, _signal, _jobs, _branch, evidenceScope) => {
+              scopes.push(evidenceScope)
+              return collectRoutineGitHubEvidence({
+                repository: 'wolfstar-project/example',
+                now,
+                ...(evidenceScope === undefined ? {} : { evidenceScope }),
+                read: async (path) =>
+                  path.includes('/issues?')
+                    ? ok([{ number: 13, body: 'The shared stylesheet already has an owner.' }])
+                    : ok([]),
+              })
+            },
+          },
+        })
+        const result = await worker.run(claimStoredRun(store), new AbortController().signal)
+        expect(result._tag).toBe('Ok')
+        expect(scopes).toEqual([name === 'ci-review' ? 'metadata' : 'ownership'])
+        expect(capture.prompts[0]?.includes('The shared stylesheet already has an owner.')).toBe(name !== 'ci-review')
+      } finally {
+        store.close()
+      }
+    },
+  )
+
   it('executes only the selected scan on Codex while the Service stays on OpenCode', async () => {
     const store = openJournalStore(':memory:')
     try {
@@ -411,6 +463,63 @@ describe('building the scan prompt', () => {
 })
 
 describe('running one scan', () => {
+  it.each([
+    {
+      outcome: 'existing_work',
+      report: 'PR https://github.com/wolfstar-project/example/pull/25 needs a rebase. Wolfstar owns it.',
+      state: 'Completed',
+      attempts: 1,
+    },
+    { outcome: 'blocked', report: 'Registry authentication failed.', state: 'Failed', attempts: 3 },
+  ])(
+    'settles dependency $outcome after $attempts attempts and publishes its reason',
+    async ({ outcome, report, state, attempts }) => {
+      const store = openJournalStore(':memory:')
+      try {
+        seed(store, 'dependency-updates')
+        store.setRepositoryWritesEnabled('wolfstar-project/example', true)
+        const capture = { prompts: [] as string[], requests: [] as AgentTurnRequest[] }
+        const scheduler = createWorkerTaskScheduler({
+          claim: store.claimNextRoutineRun,
+          complete: store.completeRoutineRun,
+          fail: store.failRoutineRun,
+          heartbeat: store.heartbeatRoutineRun,
+          intervalMilliseconds: 60_000,
+          leaseMilliseconds: 60_000,
+          now,
+          onError: (error) => {
+            throw error
+          },
+          permits: createAgentPermitPool(1),
+          worker: workerFor(store, scanning({ outcome, report, updates: [] }, capture)),
+          workerId: 'worker-1',
+        })
+
+        for (let attempt = 0; attempt < 4; attempt++) await scheduler.runNow()
+
+        expect(store.listRoutineRuns('wolfstar-project/example:dependency-updates')[0]).toMatchObject({
+          state: { _tag: state },
+          attempts,
+        })
+        expect(capture.requests).toHaveLength(attempts)
+        expect(store.listCandidates('wolfstar-project/example:dependency-updates')).toEqual([])
+        expect(store.claimNextCandidateIssue('controller-1', now().toISOString(), 60_000)).toBeNull()
+        const published = store.claimNextRoutineReport('controller-1', now().toISOString(), 60_000)
+        expect(published?.body).toContain(report)
+        if (outcome === 'existing_work') {
+          expect(published?.body).toContain('Dependency scan skipped because dependency work is open.')
+          expect(published?.body).toContain('Registry coverage is not established by this result.')
+        } else {
+          expect(published?.body).toContain('Failed. Dependency scan blocked: Registry authentication failed.')
+        }
+        expect(store.claimNextRoutineReport('controller-2', now().toISOString(), 60_000)).toBeNull()
+        await scheduler.stop()
+      } finally {
+        store.close()
+      }
+    },
+  )
+
   it.each(['pr-triage', 'sentry-checkin', 'ci-review', 'perf-review', 'seo-review'] as const)(
     'completes %s without a check-in verdict',
     async (name) => {
@@ -1127,7 +1236,41 @@ describe('claiming a Routine run', () => {
     }
   })
 
-  it('retries a failed run until its attempts run out', () => {
+  it.each([
+    'Variant unavailable for zai-coding-plan/glm-5.3-flash: medium',
+    'The opencode session failed: Variant unavailable for zai-coding-plan/glm-5.3-flash: medium',
+  ])('fails a rejected provider configuration after one Routine attempt: %s', (reason) => {
+    const store = openJournalStore(':memory:')
+    try {
+      seed(store)
+      store.setRepositoryWritesEnabled('wolfstar-project/example', true)
+      const claimed = claimStoredRun(store)
+      const outcome = store.failRoutineRun({
+        taskId: claimed.id,
+        workerId: claimed.state.workerId,
+        fence: claimed.state.fence,
+        at: '2026-08-27T07:06:00.000Z',
+        reason,
+      })
+
+      expect(outcome).toBe('Failed')
+      expect(
+        store.getDashboardSnapshot('2026-08-27T07:06:00.000Z').routineRuns.find((run) => run.id === claimed.id),
+      ).toMatchObject({ state: { _tag: 'Failed', reason }, attempts: 1 })
+      expect(store.claimNextRoutineRun('worker-2', '2026-08-27T07:06:00.000Z', 60_000)).toBeNull()
+      expect(store.claimNextRoutineRun('worker-2', '2026-08-28T07:06:00.000Z', 60_000)).toBeNull()
+      expect(store.claimNextRoutineReport('reporter', '2026-08-28T07:06:00.000Z', 60_000)?.body).toContain(reason)
+      expect(store.claimNextRoutineReport('reporter-2', '2026-08-28T07:06:01.000Z', 60_000)).toBeNull()
+    } finally {
+      store.close()
+    }
+  })
+
+  it.each([
+    'The scan agent failed.',
+    'Registry authentication failed.',
+    'The opencode session failed: Unexpected server error. Check server logs for details.',
+  ])('retries other Routine failures until their attempts run out: %s', (reason) => {
     const store = openJournalStore(':memory:')
     try {
       seed(store)
@@ -1141,7 +1284,7 @@ describe('claiming a Routine run', () => {
             workerId: 'worker-1',
             fence: claimed.state.fence,
             at: `2026-08-27T0${7 + attempt}:06:00.000Z`,
-            reason: 'The scan agent failed.',
+            reason,
           }),
         )
       }

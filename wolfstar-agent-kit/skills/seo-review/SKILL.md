@@ -25,7 +25,8 @@ Follow its protocol, its exit codes, and its dataset rules.
 This skill narrows its guardrails. Where the two differ, this skill wins.
 
 If `nuxtseo` is missing, or exits `3`, that is a blocker. Report it, and never report a clean Site.
-The token comes from `NUXTSEO_TOKEN` in the worktree `.env`. Never print it, and never write it to a file.
+Use the controller-provided `NUXTSEO_TOKEN`, from repository credentials or private host configuration.
+Never print the token or copy its value into a file.
 
 ## Find the Site
 
@@ -84,6 +85,12 @@ If it does not, or `vitals-review` only reports, judge them here like any other 
 
 Verify a Repository fix against the current default branch before you propose it.
 A live check of the URL is cheap and allowed: `curl -sI <url>`.
+
+Use controller ownership bodies for private issue and pull request checks. Never obtain worker credentials or bypass the public wrapper.
+Read each body's coverage tag. A truncated list or body does not establish complete duplicate checks.
+Missing closed history blocks checks for matching prior fixes or regressions.
+It does not block a verified new cause after duplicate checks against open work pass.
+Report those coverage gaps separately for each action.
 
 Group actions with one cause into one Candidate. Twenty 404s behind one missing redirect rule are one Candidate.
 Use a fingerprint of the file or route that changes and the defect, for example `app/middleware/redirects.ts#legacy-docs-404`.

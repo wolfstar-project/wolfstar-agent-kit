@@ -43,6 +43,8 @@ export type PermanentKind =
   | 'context_budget'
   /** The agent repeated a rejected result after the controller named the broken rule. */
   | 'agent_result'
+  /** The provider rejected the model configuration the role pinned. */
+  | 'provider_config'
   | 'unknown'
 
 export interface FailureSignal {
@@ -224,6 +226,17 @@ const agentProviderPatterns: RegExp[] = [
 const ownedAgentProviderPatterns: RegExp[] = [/\b(?:claude|codex|opencode) session failed:/i]
 
 /**
+ * The provider rejected the model configuration the Task pinned, not the world
+ * the Task works on.
+ *
+ * A variant the provider does not offer fails identically on every attempt, and
+ * the owned-agent kind below recovers without an attempt cap, so this must be
+ * matched before it. One role pinned a missing variant and requeued its Failed
+ * Task for hours: twelve agent turns of sixteen seconds each.
+ */
+const providerConfigPatterns: RegExp[] = [/\bvariant unavailable\b/i]
+
+/**
  * The controller lost a race with itself. The next pass starts from a clean state.
  *
  * A race is the only thing that belongs here. "Could not be claimed" used to
@@ -285,6 +298,10 @@ export function classifyFailure(signal: FailureSignal): FailureClass {
   if (permanentMessages.has(message.trim()) || matches(permanentPatterns, message))
     return { _tag: 'Permanent', kind: 'policy' }
 
+  // Matched before the owned-agent wrapper, whose kind recovers without an
+  // attempt cap. A rejected model variant survives every one of those retries.
+  if (matches(providerConfigPatterns, message)) return { _tag: 'Permanent', kind: 'provider_config' }
+
   // Provider errors carry their owner in the persisted reason. Match that
   // before generic service and rate-limit text that any provider may return.
   if (matches(ownedAgentProviderPatterns, message)) return { _tag: 'Transient', kind: 'agent_provider' }
@@ -345,14 +362,26 @@ export function mayRetryFailure(signal: FailureSignal): boolean {
   return failure._tag !== 'Permanent' || failure.kind === 'unknown'
 }
 
-/** Recovery limit for failures a person can affect. Provider outages keep capped backoff. */
+/** Recovery limit for failures a person can affect. */
 export const MAXIMUM_RECOVERY_ATTEMPTS = 5
+
+/**
+ * Recovery limit for Agent provider failures, about three and a half hours of
+ * capped backoff.
+ *
+ * A provider outage opens the provider circuit, and a circuit pause spends no
+ * Task budget, so this limit only meets a failure that keeps coming back for
+ * one Task. An unlimited budget let one Review restart every thirty minutes for
+ * a day while its pull request showed only QUEUED and REVIEWING 35%, and the
+ * real reason sat in the journal (nuxtseo.com#1796, 2026-10-20).
+ */
+export const MAXIMUM_PROVIDER_RECOVERY_ATTEMPTS = 12
 
 /** Shared by recovery, observation, and status reporting. */
 export function canRecoverFailure(signal: FailureSignal, recoveryAttempts: number): boolean {
   const failure = classifyFailure(signal)
   if (failure._tag !== 'Transient') return false
-  if (failure.kind === 'agent_provider') return true
+  if (failure.kind === 'agent_provider') return recoveryAttempts < MAXIMUM_PROVIDER_RECOVERY_ATTEMPTS
   return recoveryAttempts < (failure.kind === 'resource_limit' ? 1 : MAXIMUM_RECOVERY_ATTEMPTS)
 }
 

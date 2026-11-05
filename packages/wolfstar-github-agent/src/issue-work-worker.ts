@@ -14,7 +14,11 @@ import type {
   RepositoryMapping,
   RoutineIssueSource,
 } from './types.ts'
+import type { VitalsComparisonResult } from './vitals-comparison.ts'
+import type { RoutineGitHubEvidenceSource } from './worker-github-evidence.ts'
 import type { IssueWorktreeManager } from './worktree.ts'
+import { createHash, randomUUID } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import { redactSecrets, truncateOutput } from './agent-activity.ts'
 import {
   CHECK_SCOPES,
@@ -37,6 +41,8 @@ import { err, ok } from './result.ts'
 import { getRoutine } from './routines/index.ts'
 import { chooseStackBase } from './stack.ts'
 import { cleanLine } from './text.ts'
+import { vitalsIssueEvidence } from './vitals-issue-evidence.ts'
+import { issueGitHubOwnershipLines } from './worker-github-evidence.ts'
 
 interface ImplementedAgentResponse {
   outcome: 'implemented'
@@ -102,6 +108,7 @@ export interface IssueWorkWorkerOptions {
   /** The pr-lens authoring reference. Absent means the Agent is not asked to draw. */
   diagramReference?: PullRequestDiagramReference
   github: Pick<GitHubAgentSource, 'getIssueTriageSnapshot' | 'getPullRequestTemplate' | 'listPullRequestFiles'>
+  githubEvidence: Pick<RoutineGitHubEvidenceSource, 'collectOwnership'>
   now: () => Date
   runtime: AgentRuntimeSource
   activityLog?: Pick<AgentActivityLog, 'record'>
@@ -429,7 +436,7 @@ This worktree was prepared fresh for this turn. No work from an earlier turn of 
 ${instructionFilesLine(input.instructionFiles)}
 ${memoryBlock}Select every installed code-domain skill whose trigger matches the affected implementation. Do not load workflow skills such as pr, unit-tests, or im-part-human. Their rules are inlined below.
 ${UNIT_TEST_LINES}
-${checkBudgetLines(CHECK_SCOPES.changedFiles)}
+${checkBudgetLines(routineSource?.routineName === 'vitals-review' ? CHECK_SCOPES.focusedPerformance : CHECK_SCOPES.changedFiles)}
 ${TOOLCHAIN_LINES}
 If browser checks are required, use dev-browser --browser <task-name> --headless.
 Its scripts use QuickJS. Use browser.getPage and page.evaluate; Node imports and require are unavailable.
@@ -505,6 +512,24 @@ export function createIssueWorkWorker(options: IssueWorkWorkerOptions): IssueWor
 
       const candidates = options.store.listOpenAgentPullRequests(task.repository)
       const routineSource = options.store.getRoutineIssueSource?.(task.repository, task.issueNumber) ?? null
+      const performanceEvidence = vitalsIssueEvidence([
+        routineSource,
+        ...combinedIssues.map((issue) => options.store.getRoutineIssueSource?.(task.repository, issue.number) ?? null),
+      ])
+      if (performanceEvidence._tag === 'Unavailable')
+        return ok({
+          _tag: 'ActionRequired',
+          reason: performanceEvidence.reason,
+          evidence: JSON.stringify(performanceEvidence),
+          usage: { _tag: 'Unavailable' },
+        })
+      if (performanceEvidence._tag === 'Required' && routineSource?.routineName !== 'vitals-review')
+        return ok({
+          _tag: 'ActionRequired',
+          reason: 'Keep measured vitals repairs in a vitals Issue work unit.',
+          evidence: JSON.stringify(performanceEvidence),
+          usage: { _tag: 'Unavailable' },
+        })
       // A Batch plan names the exact head this unit stacks on. Without one, an
       // open Baseline repair decides, as for plain Issue work.
       const preparedBase = unit?.base ?? chooseStackBase({ defaultBranch: validated.value.defaultBranch, candidates })
@@ -528,7 +553,19 @@ export function createIssueWorkWorker(options: IssueWorkWorkerOptions): IssueWor
       const scopeDigest = issueSnapshotDigest(snapshot.value)
       const sessionId = options.store.getWorkerSession(task.repository, task.issueNumber, 'issue_triage', scopeDigest)
       if (sessionId === null) return err('The issue changed before work started.')
+      const githubEvidence = await options.githubEvidence.collectOwnership(validated.value, signal)
       const templateBody = pullRequestTemplateBody(template.value)
+      const vitalsComparison =
+        performanceEvidence._tag === 'Required'
+          ? {
+              id: randomUUID(),
+              taskId: task.id,
+              revisionId: task.revisionId,
+              baseSha: prepared.value.baseSha,
+              issuedAt: options.now().toISOString(),
+              targets: performanceEvidence.targets,
+            }
+          : undefined
       // A repair can lose a valid title while correcting the body. Keep the
       // first descriptive title before either response is rejected.
       let agentTitle: string | undefined
@@ -545,11 +582,12 @@ export function createIssueWorkWorker(options: IssueWorkWorkerOptions): IssueWor
               : null,
         },
         {
+          ...(vitalsComparison === undefined ? {} : { vitalsComparison }),
           freshSession: task.state.fence > 1,
           ...(memory === null ? {} : { instructionPaths: [memory.indexPath] }),
           number: task.issueNumber,
           progress: { current: agentPhase('WorktreeReady', 'Git worktree ready'), report: reportProgress, work: 'fix' },
-          prompt: issueWorkPrompt({
+          prompt: `${issueWorkPrompt({
             task,
             body: snapshot.value.body,
             comments: snapshot.value.comments,
@@ -560,7 +598,7 @@ export function createIssueWorkWorker(options: IssueWorkWorkerOptions): IssueWor
             combinedIssues,
             memory,
             diagramReference: options.diagramReference ?? null,
-          }),
+          })}\n\n${issueGitHubOwnershipLines(githubEvidence)}`,
           repository: task.repository,
           role: 'issue_work',
           schema: outputSchema,
@@ -569,6 +607,9 @@ export function createIssueWorkWorker(options: IssueWorkWorkerOptions): IssueWor
           sessionRole: 'issue_triage',
           taskId: task.id,
           workspace: prepared.value.path,
+          ...(routineSource?.routineName === 'seo-review' || routineSource?.routineName === 'vitals-review'
+            ? { routineContext: { repository: task.repository, routineName: routineSource.routineName } }
+            : {}),
         },
         signal,
       )
@@ -576,6 +617,7 @@ export function createIssueWorkWorker(options: IssueWorkWorkerOptions): IssueWor
       // Recover a usable title from either turn before substituting the body.
       // If neither turn names the change, publication needs human attention.
       let response: ImplementedAgentResponse
+      let acceptedVitals: Extract<VitalsComparisonResult, { _tag: 'Accepted' }> | undefined
       if (turn.value._tag === 'Unparsed') {
         options.activityLog?.record(task.id, {
           _tag: 'Reasoning',
@@ -598,11 +640,54 @@ export function createIssueWorkWorker(options: IssueWorkWorkerOptions): IssueWor
           return ok({
             _tag: 'ActionRequired',
             reason: cleanLine(turn.value.value.summary),
-            evidence: JSON.stringify(turn.value.value),
+            evidence: JSON.stringify(
+              vitalsComparison === undefined
+                ? turn.value.value
+                : {
+                    ...turn.value.value,
+                    performanceEvidence: turn.value.vitalsComparison ?? null,
+                    retainedDirectory: turn.value.vitalsEvidenceDirectory ?? null,
+                  },
+            ),
             usage: turn.value.usage,
           })
         }
         response = turn.value.value
+      }
+
+      if (vitalsComparison !== undefined) {
+        const comparison = turn.value.vitalsComparison
+        const matched =
+          comparison?._tag === 'Accepted' &&
+          comparison.requestId === turn.value.vitalsComparisonRequestId &&
+          typeof turn.value.vitalsEvidenceDirectory === 'string' &&
+          isDeepStrictEqual(
+            comparison.comparisons.map((value) => value.target),
+            vitalsComparison.targets,
+          )
+        if (!matched) {
+          const reason =
+            comparison === undefined
+              ? 'The performance evidence is missing. Check strings cannot verify a vitals repair.'
+              : comparison.requestId !== turn.value.vitalsComparisonRequestId
+                ? 'The performance evidence belongs to another turn.'
+                : comparison._tag === 'Accepted'
+                  ? typeof turn.value.vitalsEvidenceDirectory !== 'string'
+                    ? 'The performance evidence did not retain its raw reports.'
+                    : 'The performance evidence targets do not match the Published vitals proposals.'
+                  : `The performance evidence did not accept this repair. ${comparison.reason}`
+          return ok({
+            _tag: 'ActionRequired',
+            reason,
+            evidence: JSON.stringify({
+              response,
+              performanceEvidence: comparison ?? null,
+              retainedDirectory: turn.value.vitalsEvidenceDirectory ?? null,
+            }),
+            usage: turn.value.usage,
+          })
+        }
+        acceptedVitals = comparison
       }
 
       const verified = await options.worktrees.verify(task, prepared.value, signal)
@@ -637,6 +722,51 @@ export function createIssueWorkWorker(options: IssueWorkWorkerOptions): IssueWor
         signal,
       )
       if (committed._tag === 'Err') return committed
+      if (acceptedVitals !== undefined && vitalsComparison !== undefined) {
+        const metrics = acceptedVitals.comparisons.map((value) => {
+          const metric = value.target.metric
+          const unit = metric === 'cls' ? '' : ' ms'
+          return `Local ${value.target.strategy} ${metric.toUpperCase()} on \`${value.target.path}\`: ${value.before.median[metric].toFixed(2)}${unit} before; ${value.after.median[metric].toFixed(2)}${unit} after.
+FCP: ${value.before.median.fcp.toFixed(2)} ms before; ${value.after.median.fcp.toFixed(2)} ms after. TBT: ${value.before.median.tbt.toFixed(2)} ms before; ${value.after.median.tbt.toFixed(2)} ms after.
+HTML: ${value.before.document.bytes} bytes before; ${value.after.document.bytes} bytes after. Transfer: ${value.before.transferBytes.median} bytes before; ${value.after.transferBytes.median} bytes after.`
+        })
+        const evidence = {
+          requestId: acceptedVitals.requestId,
+          taskId: task.id,
+          revisionId: task.revisionId,
+          baseSha: committed.value.baseSha,
+          headSha: committed.value.commitSha,
+          comparisons: acceptedVitals.comparisons.map((value) => ({
+            target: value.target,
+            before: {
+              median: value.before.median,
+              range: value.before.range,
+              document: value.before.document,
+              transferBytes: value.before.transferBytes,
+              reports: value.before.reports,
+              dataResources: {
+                count: value.before.dataResources.length,
+                sha256: createHash('sha256').update(JSON.stringify(value.before.dataResources)).digest('hex'),
+              },
+            },
+            after: {
+              median: value.after.median,
+              range: value.after.range,
+              document: value.after.document,
+              transferBytes: value.after.transferBytes,
+              reports: value.after.reports,
+              dataResources: {
+                count: value.after.dataResources.length,
+                sha256: createHash('sha256').update(JSON.stringify(value.after.dataResources)).digest('hex'),
+              },
+            },
+            runner: { lighthouseVersion: value.runner.lighthouseVersion, settingsSha256: value.runner.settingsSha256 },
+          })),
+        }
+        response.pullRequestBody = withAiDisclosure(
+          `${response.pullRequestBody}\n\n${metrics.join('\n')}\n\n<!-- wolfstar-agent-kit:vitals-evidence ${JSON.stringify(evidence)} -->`,
+        )
+      }
       // The picture is optional. A document that does not validate is the
       // Agent's mistake to read about, never a reason to hold a finished change.
       const drawn = await readPullRequestDiagram(prepared.value.path, {

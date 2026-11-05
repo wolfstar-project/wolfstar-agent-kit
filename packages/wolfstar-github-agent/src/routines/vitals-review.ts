@@ -55,6 +55,7 @@ export interface LabScan {
   path: string
   strategy: Strategy
   completedAt: string
+  lighthouseVersion: string | null
   values: Record<LabMetric, number | null>
 }
 
@@ -68,6 +69,7 @@ export interface VitalsFinding {
 }
 
 export type LabVerdict =
+  | { _tag: 'MissingMetric'; missingAt: string[] }
   | { _tag: 'ShortSeries'; count: number }
   | { _tag: 'Steady'; latest: number }
   | { _tag: 'Suspect'; latest: number; reference: number }
@@ -140,11 +142,17 @@ export function parseScanRows(input: unknown): Result<LabScan[], string> {
     if (row.status !== 'complete') continue
     if (typeof row.completedAt !== 'string' || Number.isNaN(Date.parse(row.completedAt)))
       return err(`Complete Scan of ${row.url} has no completedAt time.`)
+    if (
+      row.lighthouseVersion != null &&
+      (typeof row.lighthouseVersion !== 'string' || row.lighthouseVersion.trim() === '')
+    )
+      return err(`Complete Scan of ${row.url} needs a Lighthouse version string or null.`)
     const value = (metric: LabMetric): number | null => (isNumber(row[metric]) ? row[metric] : null)
     scans.push({
       path: pagePath(row.url),
       strategy,
       completedAt: row.completedAt,
+      lighthouseVersion: row.lighthouseVersion ?? null,
       values: { lcp: value('lcp'), fcp: value('fcp'), tbt: value('tbt'), cls: value('cls') },
     })
   }
@@ -218,11 +226,28 @@ export function judgeLabScans(scans: readonly LabScan[]): LabJudgement[] {
   for (const group of series.values()) {
     const ordered = [...group].sort((a, b) => Date.parse(a.completedAt) - Date.parse(b.completedAt))
     const first = ordered[0]!
+    // A Lighthouse release can change the measurement. Keep only the current
+    // contiguous release, including an unknown release when neither reports it.
+    const latestVersion = ordered.at(-1)!.lighthouseVersion
+    const lastDifferentVersion = ordered.findLastIndex((scan) => scan.lighthouseVersion !== latestVersion)
+    const comparable = ordered.slice(lastDifferentVersion + 1)
     for (const metric of LAB_METRICS) {
-      const points = ordered.flatMap((scan) =>
-        scan.values[metric] === null ? [] : [{ completedAt: scan.completedAt, value: scan.values[metric] }],
-      )
-      if (points.length === 0) continue
+      const lastMissing = comparable.findLastIndex((scan) => scan.values[metric] === null)
+      const measuredTail = comparable.slice(lastMissing + 1)
+      if (lastMissing >= 0 && measuredTail.length < PERSISTENT_SCANS) {
+        const missingAt = comparable
+          .slice(-PERSISTENT_SCANS)
+          .filter((scan) => scan.values[metric] === null)
+          .map((scan) => scan.completedAt)
+        judged.push({
+          path: first.path,
+          strategy: first.strategy,
+          metric,
+          verdict: { _tag: 'MissingMetric', missingAt },
+        })
+        continue
+      }
+      const points = measuredTail.map((scan) => ({ completedAt: scan.completedAt, value: scan.values[metric]! }))
       judged.push({ path: first.path, strategy: first.strategy, metric, verdict: judgeLabSeries(metric, points) })
     }
   }
@@ -351,7 +376,7 @@ function parseLabProposal(input: unknown): Result<LabProposal, string> {
   const scans = parseScanRows(input.scans)
   if (scans._tag === 'Err') return scans
   if (typeof input.suspectCommits !== 'string')
-    return err(`Lab finding on ${input.url} needs suspectCommits, empty when the page was Poor from its first Scan.`)
+    return err(`Lab finding on ${input.url} needs suspectCommits, empty when no earlier measured reference exists.`)
   return ok({
     ...proposal.value,
     path: pagePath(input.url),
@@ -368,6 +393,8 @@ function formatValue(metric: FieldMetric | LabMetric, value: number): string {
 
 function describeVerdict(metric: LabMetric, verdict: LabVerdict): string {
   switch (verdict._tag) {
+    case 'MissingMetric':
+      return `MissingMetric: ${verdict.missingAt.length} latest completed Scans lack ${metric.toUpperCase()}`
     case 'ShortSeries':
       return `ShortSeries: ${verdict.count} usable Scans`
     case 'Steady':
@@ -377,7 +404,7 @@ function describeVerdict(metric: LabMetric, verdict: LabVerdict): string {
     case 'Unstable':
       return `Unstable: the reference Scans disagree around ${formatValue(metric, verdict.reference)}`
     case 'Poor':
-      return `Poor for the last ${verdict.scans} Scans, since ${verdict.since}, now ${formatValue(metric, verdict.latest)}${verdict.lastReferenceAt === null ? ', Poor in every retained Scan' : `, last better Scan ${verdict.lastReferenceAt}`}`
+      return `Poor for the last ${verdict.scans} measured Scans since ${verdict.since}. Latest ${formatValue(metric, verdict.latest)}. ${verdict.lastReferenceAt === null ? 'There is no earlier measured reference' : `Last better Scan: ${verdict.lastReferenceAt}`}`
     case 'Drop':
       return `Drop from ${formatValue(metric, verdict.reference)} to ${formatValue(metric, verdict.latest)} for ${verdict.scans} Scans, since ${verdict.since}, last reference Scan ${verdict.lastReferenceAt}`
   }
@@ -489,13 +516,17 @@ const NULLABLE_NUMBER = { type: ['number', 'null'] } as const
 const SCAN_ROW_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['url', 'strategy', 'status', 'completedAt', 'lcp', 'fcp', 'tbt', 'cls'],
+  required: ['url', 'strategy', 'status', 'completedAt', 'lighthouseVersion', 'lcp', 'fcp', 'tbt', 'cls'],
   description: 'One row copied from `nuxtseo scans list --json`. fcp comes from `scans show`; null when not read.',
   properties: {
     url: { type: 'string' },
     strategy: { type: 'string', enum: ['mobile', 'desktop'] },
     status: { type: 'string' },
     completedAt: { type: ['string', 'null'] },
+    lighthouseVersion: {
+      type: ['string', 'null'],
+      description: 'Copy the reported Lighthouse version. Use null only when absent.',
+    },
     lcp: NULLABLE_NUMBER,
     fcp: NULLABLE_NUMBER,
     tbt: NULLABLE_NUMBER,
@@ -562,7 +593,7 @@ const VITALS_SCHEMA = {
           suspectCommits: {
             type: 'string',
             description:
-              'The commit range deployed between the last reference Scan and the first worse Scan. Empty only when the page was Poor in every retained Scan.',
+              'The commit range deployed between the last measured reference Scan and the first worse Scan. Empty when no earlier measured reference exists.',
           },
           ...PROPOSAL_PROPERTIES,
         },

@@ -6,6 +6,7 @@ export type { TerminalHelperConfig, TerminalManager } from './terminal-manager.t
 export { createTerminalOwner } from './terminal-owner.ts'
 export type { TerminalEmulator } from './terminal-owner.ts'
 export {
+  normalizeTerminalExit,
   parseTerminalClientMessage,
   parseTerminalJson,
   parseTerminalLaunch,
@@ -14,6 +15,7 @@ export {
 export type {
   TerminalCapabilities,
   TerminalClientMessage,
+  TerminalExit,
   TerminalProject,
   TerminalProvider,
   TerminalResult,

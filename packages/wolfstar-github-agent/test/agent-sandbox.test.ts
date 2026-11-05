@@ -9,11 +9,592 @@ import { expect, it } from 'vitest'
 import { checkAgentWorker, prepareAgentSandbox, runAgentSandboxCommand } from '../src/agent-sandbox.ts'
 import { createCodexProvider } from '../src/codex-provider.ts'
 import { createOpencodeProvider } from '../src/opencode-provider.ts'
+import { createWorkerMemoryLimiter } from '../src/worker-memory.ts'
 
 const execute = promisify(execFile)
 
+it('runs the installed NuxtSEO package with its dependency and bundled Skill inside a Routine', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-node-tool-'))
+  const home = join(root, 'controller')
+  const worker = join(root, 'worker')
+  const primary = join(root, 'primary')
+  const tools = join(home, '.local/bin')
+  const packageRoot = join(home, '.local/share/pnpm/global/node_modules/.pnpm/@nuxtseo+cli@1/node_modules/@nuxtseo/cli')
+  const lighthouseRoot = join(home, 'installed-lighthouse')
+  const lighthouseDependencies = Array.from({ length: 128 }, (_, index) => `lighthouse-fixture-${index}`)
+  const dependency = join(
+    home,
+    '.local/share/pnpm/global/node_modules/.pnpm/fixture-dependency@1/node_modules/fixture-dependency',
+  )
+  const profile = join(root, 'worker.json')
+  await Promise.all([
+    mkdir(primary),
+    mkdir(worker),
+    mkdir(tools, { recursive: true }),
+    mkdir(join(packageRoot, 'dist'), { recursive: true }),
+    mkdir(join(packageRoot, 'skills/nuxtseo-cli/references'), { recursive: true }),
+    mkdir(dependency, { recursive: true }),
+    mkdir(join(lighthouseRoot, 'node_modules'), { recursive: true }),
+  ])
+  await Promise.all([
+    writeFile(
+      join(packageRoot, 'package.json'),
+      JSON.stringify({
+        name: '@nuxtseo/cli',
+        type: 'module',
+        bin: { nuxtseo: './dist/cli-entry.js' },
+        dependencies: { 'fixture-dependency': '1' },
+      }),
+    ),
+    writeFile(
+      join(packageRoot, 'dist/cli-entry.js'),
+      'import { version } from "fixture-dependency"; console.log(JSON.stringify(process.argv.includes("whoami") ? { authenticated: Boolean(process.env.NUXTSEO_TOKEN), unrelatedCredential: Boolean(process.env.CLOUDFLARE_API_TOKEN) } : { version }))',
+    ),
+    writeFile(join(packageRoot, 'skills/nuxtseo-cli/SKILL.md'), 'Required CLI Skill.'),
+    writeFile(join(packageRoot, 'skills/nuxtseo-cli/references/protocol.md'), 'CLI protocol.'),
+    writeFile(
+      join(dependency, 'package.json'),
+      JSON.stringify({ name: 'fixture-dependency', type: 'module', exports: './index.js' }),
+    ),
+    writeFile(join(dependency, 'index.js'), 'export const version = "fixture-1"'),
+    writeFile(join(home, 'secret'), 'Controller secret.'),
+    writeFile(
+      join(tools, 'nuxtseo'),
+      `#!/bin/sh\n# cmd-shim-target=${packageRoot}/dist/cli-entry.js\nexec node ${JSON.stringify(join(packageRoot, 'dist/cli-entry.js'))} "$@"\n`,
+      { mode: 0o755 },
+    ),
+    writeFile(
+      join(lighthouseRoot, 'package.json'),
+      JSON.stringify({
+        name: 'lighthouse',
+        type: 'module',
+        bin: { lighthouse: './cli.js' },
+        dependencies: {
+          'fixture-dependency': '1',
+          ...Object.fromEntries(lighthouseDependencies.map((name) => [name, '1'])),
+        },
+      }),
+    ),
+    writeFile(
+      join(lighthouseRoot, 'cli.js'),
+      'import { version } from "fixture-dependency"; console.log(JSON.stringify({ runner: "Lighthouse", version }))',
+    ),
+    writeFile(
+      join(tools, 'lighthouse'),
+      `#!/bin/sh\n# cmd-shim-target=${lighthouseRoot}/cli.js\nexec node ${JSON.stringify(join(lighthouseRoot, 'cli.js'))} "$@"\n`,
+      { mode: 0o755 },
+    ),
+  ])
+  await Promise.all(
+    lighthouseDependencies.map(async (name) => {
+      const dependency = join(lighthouseRoot, 'node_modules', name)
+      await mkdir(dependency)
+      await writeFile(join(dependency, 'package.json'), JSON.stringify({ name, version: '1.0.0' }))
+    }),
+  )
+  await symlink(dependency, join(packageRoot, '../../fixture-dependency'))
+  await symlink(dependency, join(lighthouseRoot, 'node_modules/fixture-dependency'))
+  await execute('git', ['init', primary])
+  await execute('git', [
+    '-C',
+    primary,
+    '-c',
+    'user.name=Agent',
+    '-c',
+    'user.email=agent@example.com',
+    'commit',
+    '--allow-empty',
+    '-m',
+    'test: seed fixture',
+  ])
+  await execute('git', ['-C', primary, 'remote', 'add', 'origin', 'https://github.com/wolfstar-project/example.git'])
+  const wtConfig = join(root, 'wt.toml')
+  await writeFile(wtConfig, '[list]\njson-schema = 2\n')
+  await execute('wt', [
+    '--config',
+    wtConfig,
+    '-C',
+    primary,
+    'switch',
+    '--create',
+    'node-tool',
+    '--base',
+    'HEAD',
+    '--yes',
+  ])
+  const worktrees = JSON.parse(
+    (await execute('wt', ['--config', wtConfig, '-C', primary, 'list', '--format=json'])).stdout,
+  )
+  const workspace = worktrees.items.find((item: { branch: string }) => item.branch === 'node-tool').worktree
+    .path as string
+  await mkdir(join(home, '.config/wolfstar-github-agent'), { recursive: true })
+  await writeFile(join(home, 'seo.env'), 'NUXTSEO_TOKEN=fixture-viewer\nCLOUDFLARE_API_TOKEN=unrelated-secret\n', {
+    mode: 0o600,
+  })
+  await writeFile(
+    join(home, '.config/wolfstar-github-agent/nuxtseo-worker.json'),
+    JSON.stringify({ environmentFile: join(home, 'seo.env'), repositories: ['wolfstar-project/example'] }),
+    { mode: 0o600 },
+  )
+  await writeFile(
+    profile,
+    JSON.stringify({
+      home: worker,
+      codex: '/usr/bin/true',
+      opencode: '/usr/bin/true',
+      tools: [tools],
+      readOnlyPaths: [],
+    }),
+  )
+  const sandbox = await prepareAgentSandbox({
+    workspace,
+    environment: { HOME: home },
+    provider: 'codex',
+    profilePath: profile,
+    readOnly: true,
+    taskId: 'wolfstar-project/example:vitals-review:2026-10-28T00:00:00.000Z',
+  })
+  try {
+    expect(sandbox.args.some((value) => value.includes('fixture-viewer'))).toBe(false)
+    const limiter = createWorkerMemoryLimiter({
+      execute: async () => ({ stdout: '/user.slice/fixture.slice\n' }),
+      readEvents: async () => 'oom_kill 0\n',
+      newId: () => 'fixture',
+    })
+    const bounded = await limiter({ binary: sandbox.binary, args: sandbox.args, memoryGiB: 1 })
+    try {
+      expect(bounded.args.some((value) => value.includes('fixture-viewer'))).toBe(false)
+    } finally {
+      await bounded.release()
+    }
+    const probe = execute(
+      sandbox.binary,
+      [
+        ...sandbox.args,
+        '/run/agent/node',
+        '-e',
+        `
+      process.stdin.resume();
+      process.stdin.on('end', () => process.exit(0));
+      console.log(Boolean(process.env.NUXTSEO_TOKEN));
+    `,
+      ],
+      { env: sandbox.environment, timeout: 10_000 },
+    )
+    try {
+      const ready = await new Promise<string>((resolve, reject) => {
+        probe.child.stdout!.once('data', (data) => resolve(String(data).trim()))
+        probe.catch(reject)
+      })
+      expect(ready).toBe('true')
+      const processes = await execute('/bin/ps', ['-e', '-o', 'args='])
+      expect(processes.stdout.includes('fixture-viewer')).toBe(false)
+    } finally {
+      probe.child.stdin!.end()
+      await probe
+    }
+    const result = await execute(sandbox.binary, [...sandbox.args, '/bin/sh', '-c', 'nuxtseo --version --json'], {
+      env: sandbox.environment,
+    })
+    expect(JSON.parse(result.stdout)).toEqual({ version: 'fixture-1' })
+    const lighthouse = await execute(sandbox.binary, [...sandbox.args, '/bin/sh', '-c', 'lighthouse --version'], {
+      env: sandbox.environment,
+    })
+    expect(JSON.parse(lighthouse.stdout)).toEqual({ runner: 'Lighthouse', version: 'fixture-1' })
+    const chromeFinder = await execute(
+      sandbox.binary,
+      [...sandbox.args, '/bin/sh', '-c', 'printf "worker\\n" | awk \'{print toupper($0)}\''],
+      { env: sandbox.environment },
+    )
+    expect(chromeFinder.stdout.trim()).toBe('WORKER')
+    const identity = await execute(sandbox.binary, [...sandbox.args, '/bin/sh', '-c', 'nuxtseo whoami --json'], {
+      env: sandbox.environment,
+    })
+    expect(JSON.parse(identity.stdout)).toEqual({ authenticated: true, unrelatedCredential: false })
+    const proof = await execute(
+      sandbox.binary,
+      [
+        ...sandbox.args,
+        '/run/agent/node',
+        '--input-type=module-typescript',
+        '-e',
+        `
+      import { existsSync, readFileSync } from 'node:fs'
+      const catalog = readFileSync('/run/agent/SKILLS.md', 'utf8')
+      const path = JSON.parse(catalog.split('\\n').find(line => line.startsWith('- nuxtseo-cli: ')).slice('- nuxtseo-cli: '.length))
+      console.log(JSON.stringify({ skill: readFileSync(path, 'utf8'), reference: readFileSync(path.replace('SKILL.md', 'references/protocol.md'), 'utf8'), secret: existsSync(${JSON.stringify(join(home, 'secret'))}) }))
+    `,
+      ],
+      { env: sandbox.environment },
+    )
+    expect(JSON.parse(proof.stdout)).toEqual({
+      skill: 'Required CLI Skill.',
+      reference: 'CLI protocol.',
+      secret: false,
+    })
+    for (const provider of ['codex', 'opencode'] as const) {
+      for (const routineName of ['seo-review', 'vitals-review'] as const) {
+        const implementation = await prepareAgentSandbox({
+          workspace,
+          environment: { HOME: home },
+          provider,
+          profilePath: profile,
+          taskId: 'opaque-issue-work-task',
+          routineContext: { repository: 'wolfstar-project/example', routineName },
+        })
+        try {
+          const identity = await execute(
+            implementation.binary,
+            [...implementation.args, '/bin/sh', '-c', 'nuxtseo whoami --json'],
+            { env: implementation.environment },
+          )
+          expect(JSON.parse(identity.stdout)).toEqual({ authenticated: true, unrelatedCredential: false })
+          if (routineName === 'vitals-review') {
+            const lighthouse = await execute(
+              implementation.binary,
+              [...implementation.args, '/bin/sh', '-c', 'lighthouse --version'],
+              { env: implementation.environment },
+            )
+            expect(JSON.parse(lighthouse.stdout)).toEqual({ runner: 'Lighthouse', version: 'fixture-1' })
+          } else {
+            const visibility = await execute(
+              implementation.binary,
+              [
+                ...implementation.args,
+                '/run/agent/node',
+                '--input-type=module',
+                '-e',
+                `import { existsSync } from 'node:fs'; console.log(existsSync(${JSON.stringify(lighthouseRoot)}))`,
+              ],
+              { env: implementation.environment },
+            )
+            expect(visibility.stdout.trim()).toBe('false')
+          }
+          expect(implementation.args.some((value) => value.includes('fixture-viewer'))).toBe(false)
+        } finally {
+          await implementation.release()
+        }
+      }
+    }
+    await expect(
+      prepareAgentSandbox({
+        workspace,
+        environment: { HOME: home },
+        provider: 'codex',
+        profilePath: profile,
+        taskId: 'opaque-issue-work-task',
+        routineContext: { repository: 'wolfstar-project/other', routineName: 'seo-review' },
+      }),
+    ).rejects.toThrow('repository')
+    const unrelated = await prepareAgentSandbox({
+      workspace,
+      environment: { HOME: home },
+      provider: 'codex',
+      profilePath: profile,
+      readOnly: true,
+      taskId: 'wolfstar-project/example:dependency-updates:2026-10-28T00:00:00.000Z',
+    })
+    try {
+      const excluded = await execute(
+        unrelated.binary,
+        [
+          ...unrelated.args,
+          '/run/agent/node',
+          '--input-type=module-typescript',
+          '-e',
+          `import { existsSync } from 'node:fs'; console.log(JSON.stringify({ cli: existsSync(${JSON.stringify(packageRoot)}), launcher: existsSync('/run/agent/host-tools/nuxtseo') }))`,
+        ],
+        { env: unrelated.environment },
+      )
+      expect(JSON.parse(excluded.stdout)).toEqual({ cli: false, launcher: false })
+      const lighthouse = await execute(
+        unrelated.binary,
+        [
+          ...unrelated.args,
+          '/run/agent/node',
+          '--input-type=module',
+          '-e',
+          `import { existsSync } from 'node:fs'; console.log(existsSync(${JSON.stringify(lighthouseRoot)}))`,
+        ],
+        { env: unrelated.environment },
+      )
+      expect(lighthouse.stdout.trim()).toBe('false')
+      const credentials = await execute(
+        unrelated.binary,
+        [
+          ...unrelated.args,
+          '/run/agent/node',
+          '--input-type=module-typescript',
+          '-e',
+          'console.log(Boolean(process.env.NUXTSEO_TOKEN))',
+        ],
+        { env: unrelated.environment },
+      )
+      expect(credentials.stdout.trim()).toBe('false')
+    } finally {
+      await unrelated.release()
+    }
+    const reviewHome = join(root, 'review')
+    await mkdir(reviewHome)
+    const review = await prepareAgentSandbox({
+      workspace,
+      environment: { HOME: home },
+      provider: 'codex',
+      profilePath: profile,
+      reviewHome,
+      taskId: 'opaque-issue-work-task',
+      routineContext: { repository: 'wolfstar-project/example', routineName: 'vitals-review' },
+    })
+    try {
+      const excluded = await execute(
+        review.binary,
+        [
+          ...review.args,
+          '/run/agent/node',
+          '--input-type=module-typescript',
+          '-e',
+          `import { existsSync } from 'node:fs'; console.log(JSON.stringify({ cli: existsSync(${JSON.stringify(packageRoot)}), launcher: existsSync('/run/agent/host-tools/nuxtseo') }))`,
+        ],
+        { env: review.environment },
+      )
+      expect(JSON.parse(excluded.stdout)).toEqual({ cli: false, launcher: false })
+      const lighthouse = await execute(
+        review.binary,
+        [
+          ...review.args,
+          '/run/agent/node',
+          '--input-type=module',
+          '-e',
+          `import { existsSync } from 'node:fs'; console.log(existsSync(${JSON.stringify(lighthouseRoot)}))`,
+        ],
+        { env: review.environment },
+      )
+      expect(lighthouse.stdout.trim()).toBe('false')
+      const credentials = await execute(
+        review.binary,
+        [
+          ...review.args,
+          '/run/agent/node',
+          '--input-type=module-typescript',
+          '-e',
+          'console.log(Boolean(process.env.NUXTSEO_TOKEN))',
+        ],
+        { env: review.environment },
+      )
+      expect(credentials.stdout.trim()).toBe('false')
+    } finally {
+      await review.release()
+    }
+    const client = await prepareAgentSandbox({
+      workspace,
+      environment: { HOME: home },
+      provider: 'opencode',
+      profilePath: profile,
+      networkMode: 'opencode-client',
+      taskId: 'opaque-issue-work-task',
+      routineContext: { repository: 'wolfstar-project/example', routineName: 'vitals-review' },
+    })
+    try {
+      const excluded = await execute(
+        client.binary,
+        [
+          ...client.args,
+          '/run/agent/node',
+          '--input-type=module-typescript',
+          '-e',
+          'import { existsSync } from "node:fs"; console.log(JSON.stringify({ cli: existsSync("/run/agent/host-tools/nuxtseo"), authenticated: Boolean(process.env.NUXTSEO_TOKEN) }))',
+          '--',
+          '--server',
+          'http://127.0.0.1:4097',
+        ],
+        { env: client.environment },
+      )
+      expect(JSON.parse(excluded.stdout)).toEqual({ cli: false, authenticated: false })
+      const lighthouse = await execute(
+        client.binary,
+        [
+          ...client.args,
+          '/run/agent/node',
+          '--input-type=module',
+          '-e',
+          `import { existsSync } from 'node:fs'; console.log(existsSync(${JSON.stringify(lighthouseRoot)}))`,
+          '--',
+          '--server',
+          'http://127.0.0.1:4097',
+        ],
+        { env: client.environment },
+      )
+      expect(lighthouse.stdout.trim()).toBe('false')
+    } finally {
+      await client.release()
+    }
+    const forbidden = join(home, '.config/credential-package')
+    await mkdir(forbidden, { recursive: true })
+    await writeFile(join(forbidden, 'package.json'), '{}')
+    await rm(join(packageRoot, '../../fixture-dependency'))
+    await symlink(forbidden, join(packageRoot, '../../fixture-dependency'))
+    await expect(
+      prepareAgentSandbox({
+        workspace,
+        environment: { HOME: home },
+        provider: 'codex',
+        profilePath: profile,
+        readOnly: true,
+        taskId: 'wolfstar-project/example:vitals-review:2026-10-28T00:00:00.000Z',
+      }),
+    ).rejects.toThrow('exposes controller credentials')
+  } finally {
+    await sandbox.release()
+    await rm(root, { recursive: true })
+  }
+})
+
+it('advertises readable mounted Skills and References without granting write access or leaking Review context', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-skills-'))
+  const home = join(root, 'controller')
+  const worker = join(root, 'worker')
+  const primary = join(root, 'primary')
+  const plugin = join(root, 'plugin')
+  const builtIn = join(plugin, 'skills/dependency-updates')
+  const portable = join(worker, '.local/share/wolfstar-agent-kit/skilld/skills/im-part-human')
+  const profile = join(root, 'worker.json')
+  await Promise.all([
+    mkdir(home),
+    mkdir(primary),
+    mkdir(join(builtIn, 'references'), { recursive: true }),
+    mkdir(join(portable, 'references'), { recursive: true }),
+  ])
+  await Promise.all([
+    writeFile(join(builtIn, 'SKILL.md'), 'Built-in scan instructions.'),
+    writeFile(join(builtIn, 'references/scan.md'), 'Built-in reference.'),
+    writeFile(join(portable, 'SKILL.md'), 'Portable writing instructions.'),
+    writeFile(join(portable, 'references/writing.md'), 'Portable reference.'),
+    writeFile(join(home, 'secret'), 'Controller secret.'),
+  ])
+  await mkdir(join(worker, '.agents/skills/missing'), { recursive: true })
+  await mkdir(join(worker, '.agents/skills/im-part-human'), { recursive: true })
+  await writeFile(join(worker, '.agents/skills/im-part-human/SKILL.md'), 'Stale portable instructions.')
+  await mkdir(join(worker, '.agents/skills/dependency-updates'))
+  await writeFile(join(worker, '.agents/skills/dependency-updates/SKILL.md'), 'Stale copied instructions.')
+  await symlink(builtIn, join(worker, '.agents/skills/absolute-alias'))
+  await symlink(portable, join(worker, '.agents/skills/internal-alias'))
+  await symlink(home, join(worker, '.agents/skills/escape'))
+  await symlink(join(root, 'absent'), join(worker, '.agents/skills/dangling'))
+  await mkdir(join(worker, '.agents/skills/file-alias'))
+  await symlink(join(home, 'secret'), join(worker, '.agents/skills/file-alias/SKILL.md'))
+  await mkdir(join(worker, '.agents/skills/bad\nname'))
+  await writeFile(join(worker, '.agents/skills/bad\nname/SKILL.md'), 'Untrusted catalog row.')
+  await execute('git', ['init', primary])
+  await execute('git', [
+    '-C',
+    primary,
+    '-c',
+    'user.name=Agent',
+    '-c',
+    'user.email=agent@example.com',
+    'commit',
+    '--allow-empty',
+    '-m',
+    'test: seed fixture',
+  ])
+  const wtConfig = join(root, 'wt.toml')
+  await writeFile(wtConfig, '[list]\njson-schema = 2\n')
+  await execute('wt', ['--config', wtConfig, '-C', primary, 'switch', '--create', 'skills', '--base', 'HEAD', '--yes'])
+  const worktrees = JSON.parse(
+    (await execute('wt', ['--config', wtConfig, '-C', primary, 'list', '--format=json'])).stdout,
+  )
+  const workspace = worktrees.items.find((item: { branch: string }) => item.branch === 'skills').worktree.path as string
+  await writeFile(
+    profile,
+    JSON.stringify({
+      home: worker,
+      codex: '/usr/bin/true',
+      opencode: '/usr/bin/true',
+      tools: [],
+      readOnlyPaths: [plugin],
+    }),
+  )
+  const sandbox = await prepareAgentSandbox({
+    workspace,
+    environment: { HOME: home },
+    provider: 'codex',
+    profilePath: profile,
+    readOnly: true,
+  })
+  try {
+    const proof = await execute(
+      sandbox.binary,
+      [
+        ...sandbox.args,
+        '/run/agent/node',
+        '--input-type=module-typescript',
+        '-e',
+        `
+      import { readFileSync, writeFileSync, existsSync } from 'node:fs'
+      const catalog: string = readFileSync('/run/agent/SKILLS.md', 'utf8')
+      const skills = Object.fromEntries(catalog.split('\\n').filter(line => line.startsWith('- ')).map(line => {
+        const [, name, quoted] = /^- ([a-z0-9-]+): (.+)$/.exec(line)
+        return [name, JSON.parse(quoted)]
+      }))
+      const contents = Object.fromEntries(Object.entries(skills).map(([name, path]) => [name, readFileSync(path, 'utf8')]))
+      const reference = readFileSync(skills['im-part-human'].replace('SKILL.md', 'references/writing.md'), 'utf8')
+      const builtInReference = readFileSync(skills['dependency-updates'].replace('SKILL.md', 'references/scan.md'), 'utf8')
+      let writeError: string | null = null
+      try { writeFileSync('/run/agent/SKILLS.md', 'tampered') } catch (cause) { writeError = (cause as NodeJS.ErrnoException).code ?? 'unknown' }
+      console.log(JSON.stringify({ contents, reference, builtInReference, writeError, controllerVisible: existsSync(${JSON.stringify(join(home, 'secret'))}) }))
+    `,
+      ],
+      { env: sandbox.environment },
+    )
+    expect(JSON.parse(proof.stdout)).toEqual({
+      contents: {
+        'dependency-updates': 'Built-in scan instructions.',
+        'im-part-human': 'Portable writing instructions.',
+      },
+      reference: 'Portable reference.',
+      builtInReference: 'Built-in reference.',
+      writeError: 'EROFS',
+      controllerVisible: false,
+    })
+  } finally {
+    await sandbox.release()
+  }
+  const reviewHome = join(root, 'review')
+  await mkdir(reviewHome)
+  const review = await prepareAgentSandbox({
+    workspace,
+    environment: { HOME: home },
+    provider: 'codex',
+    profilePath: profile,
+    reviewHome,
+  })
+  try {
+    const proof = await execute(
+      review.binary,
+      [
+        ...review.args,
+        '/run/agent/node',
+        '--input-type=module-typescript',
+        '-e',
+        "import { existsSync } from 'node:fs'; console.log(JSON.stringify({ catalog: existsSync('/run/agent/SKILLS.md'), portable: existsSync('/home/agent/.agents/skills') }))",
+      ],
+      { env: review.environment },
+    )
+    expect(JSON.parse(proof.stdout)).toEqual({ catalog: false, portable: false })
+  } finally {
+    await review.release()
+    await rm(root, { recursive: true })
+  }
+})
+
 it('blocks controller credentials, Git helpers, and parent process reads while preserving worker tools', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-boundary-'))
+  // Large trusted tool closures exceed Linux's per-environment-entry limit.
+  // Each individual mount path remains small enough for a normal argv entry.
+  const instructionPaths = Array.from({ length: 900 }, (_, index) =>
+    join(root, `instruction-${String(index).padStart(4, '0')}-${'a'.repeat(48)}.md`),
+  )
+  await Promise.all(instructionPaths.map((path) => writeFile(path, 'Fixture instruction.')))
   const home = join(root, 'controller')
   const worker = join(root, 'worker')
   const primary = join(root, 'primary')
@@ -80,6 +661,7 @@ import process from 'node:process'
 if (existsSync(${JSON.stringify(secret)}) || process.env.GH_TOKEN || process.env.CONTROLLER_TOKEN) process.exit(30)
 if (['serve', 'run'].includes(process.argv[2]) && process.env.OPENCODE_FILEWATCHER_DISABLE !== 'true') process.exit(34)
 if (process.argv[2] === 'serve') {
+  if (!readFileSync('/run/agent/SKILLS.md', 'utf8').includes('# Installed Wolfstar Agent Kit Skills')) process.exit(37)
   const server = createServer((request, response) => {
     const expected = 'Basic ' + Buffer.from('opencode:' + process.env.OPENCODE_SERVER_PASSWORD).toString('base64')
     if (request.headers.authorization !== expected) { response.writeHead(401); response.end(); return }
@@ -104,7 +686,7 @@ if (process.argv[2] === 'serve') {
   async function run() {
     let prompt = ''
     for await (const chunk of process.stdin) prompt += chunk.toString()
-    if (!prompt.startsWith('Return protected.'.repeat(16_000))) process.exit(35)
+    if (!prompt.includes('Return protected.'.repeat(16_000)) || !prompt.startsWith('Read /run/agent/SKILLS.md for exact installed Skill paths.')) process.exit(35)
     const target = process.argv[process.argv.indexOf('--server') + 1]
     const response = await fetch(target + '/fixture', { headers: { authorization: 'Basic ' + Buffer.from('opencode:' + process.env.OPENCODE_SERVER_PASSWORD).toString('base64') } })
     if (!response.ok || !(await response.json()).protected) process.exit(31)
@@ -113,12 +695,18 @@ if (process.argv[2] === 'serve') {
   }
   run().catch(error => { console.error(error.message); process.exit(32) })
 } else {
+  if (readFileSync(${JSON.stringify(instructionPaths[0])}, 'utf8') !== 'Fixture instruction.' || readFileSync(${JSON.stringify(instructionPaths.at(-1))}, 'utf8') !== 'Fixture instruction.') process.exit(41)
   if (process.argv[process.argv.indexOf('--sandbox') + 1] !== 'danger-full-access') process.exit(36)
   writeFileSync(${JSON.stringify(join(workspace, 'codex-mutation.txt'))}, 'isolated mutation')
   const schemaIndex = process.argv.indexOf('--output-schema')
   if (schemaIndex === -1 || !JSON.parse(readFileSync(process.argv[schemaIndex + 1], 'utf8'))) process.exit(33)
-  process.stdin.resume()
+  if (!process.argv.includes('--image')) process.exit(38)
+  let prompt = ''
+  process.stdin.setEncoding('utf8')
+  process.stdin.on('data', chunk => { prompt += chunk })
   process.stdin.once('end', () => {
+    if (!prompt.startsWith('Read /run/agent/SKILLS.md for exact installed Skill paths.') || !prompt.includes('Return protected.'.repeat(16_000))) process.exit(39)
+    if (!readFileSync('/run/agent/SKILLS.md', 'utf8').includes('# Installed Wolfstar Agent Kit Skills')) process.exit(40)
     console.log(JSON.stringify({ type: 'thread.started', thread_id: 'fixture-thread' }))
     console.log(JSON.stringify({ type: 'item.completed', item: { id: 'answer', type: 'agent_message', text: '{"protected":true}' } }))
     console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1 } }))
@@ -168,7 +756,13 @@ if (process.argv[2] === 'serve') {
     profilePath: profile,
     readOnly: true,
   })
+  const launchPlan = `${toolSandbox.adapterPath}.json`
+  await writeFile(launchPlan, '{', { mode: 0o600 })
   try {
+    // A rejected adapter launch still leaves cleanup with the sandbox owner.
+    await expect(
+      execute(process.execPath, [toolSandbox.adapterPath], { env: { WOLFSTAR_AGENT_SANDBOX_ENV: '{}' } }),
+    ).rejects.toMatchObject({ code: 1 })
     const commandHost = await execute(
       toolSandbox.binary,
       [...toolSandbox.args, '/run/agent/host-tools/codex-code-mode-host', '--version'],
@@ -208,6 +802,7 @@ if (process.argv[2] === 'serve') {
     await toolSandbox.release()
     await rm(managedTools, { recursive: true })
   }
+  await expect(readFile(launchPlan)).rejects.toMatchObject({ code: 'ENOENT' })
   const unsafeProfile = join(root, 'unsafe-worker.json')
   await writeFile(
     unsafeProfile,
@@ -227,7 +822,15 @@ if (process.argv[2] === 'serve') {
     profilePath: profile,
     provider: 'opencode',
   })
-  expect(sandbox.environment).toEqual({ PATH: '/usr/bin:/bin' })
+  const hostEnvironment = await execute(
+    process.execPath,
+    [
+      '-e',
+      'console.log(JSON.stringify({ token: process.env.TOOLING_TOKEN ?? null, controller: process.env.CONTROLLER_TOKEN ?? null, nodeOptions: process.env.NODE_OPTIONS ?? null }))',
+    ],
+    { env: sandbox.environment },
+  )
+  expect(JSON.parse(hostEnvironment.stdout)).toEqual({ token: null, controller: null, nodeOptions: null })
   const host = createServer((_request, response) => response.end('fake-host-session-secret'))
   await new Promise<void>((resolve) => {
     host.listen(0, '127.0.0.1', resolve)
@@ -452,6 +1055,7 @@ if (process.argv[2] === 'serve') {
       }),
     ).rejects.toThrow('repository')
     const request = {
+      instructionPaths,
       taskId: 'owner/site:daily-checkin:2026-10-08T00:00:00.000Z',
       model: 'fixture',
       outputSchema: {},
@@ -459,6 +1063,14 @@ if (process.argv[2] === 'serve') {
       sessionId: null,
       signal: new AbortController().signal,
       workspace,
+      media: [
+        {
+          mime: 'image/png' as const,
+          data: 'iVBORw0KGgoAAAANSUhEUgAAABQAAAAKCAYAAAC0VX7mAAAAF0lEQVR4nGNkoDIYNZByMGog5YDqBgIAFJEAC2Vie2MAAAAASUVORK5CYII=',
+          label: 'Fixture image',
+          source: 'https://github.com/user-attachments/assets/a',
+        },
+      ],
     }
     const originalHome = process.env.HOME
     process.env.HOME = home

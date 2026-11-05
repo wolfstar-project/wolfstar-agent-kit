@@ -147,6 +147,7 @@ import { createBatchStore } from './batch-store.ts'
 import {
   canRecoverFailure,
   classifyFailure,
+  MAXIMUM_PROVIDER_RECOVERY_ATTEMPTS,
   MAXIMUM_RECOVERY_ATTEMPTS,
   mayRetryFailure,
   nextRecoveryAt,
@@ -685,6 +686,10 @@ interface QueuedReviewStatusRow {
   prior_outcome: string | null
   prior_findings: number | null
   head_from_repair: number
+  state_tag: 'Queued' | 'Failed'
+  failure_reason: string | null
+  recovery_attempts: number
+  updated_at: string
 }
 
 /**
@@ -720,6 +725,28 @@ export type ReviewVerdictState = { _tag: 'Answered' } | { _tag: 'Unanswered' }
  * a bare QUEUED comment, no defect count, no sign that anything had run. A
  * reader could not tell whether the Queue was making progress at all.
  */
+/**
+ * How the last attempt at this Task ended, for a Task that has not finished.
+ *
+ * A failed attempt used to leave no mark on the pull request. Its comment held
+ * the last progress line until the retry requeued it, then read a plain QUEUED,
+ * so one Review restarted every thirty minutes for a day while the reason sat
+ * in the journal (nuxtseo.com#1796, 2026-10-20).
+ */
+export type ReviewAttemptState =
+  | { _tag: 'FirstAttempt' }
+  /** The last attempt failed and the controller will run it again. */
+  | {
+      _tag: 'Retrying'
+      reason: string
+      /** Recoveries already spent, and the budget for this kind of failure. */
+      retry: { spent: number; limit: number } | null
+      /** When a backoff holds the Task, the earliest restart. Null once requeued. */
+      nextAttemptAt: string | null
+    }
+  /** The controller will not run it again. A person has to act. */
+  | { _tag: 'Stuck'; reason: string }
+
 export type QueuedReviewHistory =
   | { _tag: 'FirstReview' }
   | {
@@ -740,6 +767,8 @@ export interface QueuedReviewStatus {
   verdict: ReviewVerdictState
   /** The Review that answered the previous head, and how this head arrived. */
   history: QueuedReviewHistory
+  /** Whether an earlier attempt at this Task failed, and what happens next. */
+  attempt: ReviewAttemptState
   commentId: number
   /** What the canonical comment holds now, so an unchanged position writes nothing. */
   publishedBody: string
@@ -1277,8 +1306,17 @@ export interface JournalStore
     at: string
     leaseMilliseconds: number
   }) => ProviderStartReservation
+  /** Extends only the current, unexpired canary reservation. */
+  renewProviderStart: (input: {
+    circuitId: string
+    workerId: string
+    fence: number
+    at: string
+    leaseMilliseconds: number
+  }) => boolean
   /** Releases a host-interrupted canary without claiming provider health evidence. */
   releaseProviderStart: (input: { circuitId: string; workerId: string; fence: number; at: string }) => boolean
+  /** Ill-health opens and counts. A provider_config rejection claims no health evidence and releases only the canary it holds. */
   recordProviderFailure: (input: {
     provider: AgentProviderName
     credential: string
@@ -1289,7 +1327,7 @@ export interface JournalStore
     canaryCircuitId?: string
     canaryFence?: number
     at: string
-  }) => ProviderCircuit
+  }) => ProviderCircuit | null
   recordProviderSuccess: (input: {
     provider: AgentProviderName
     credential: string
@@ -3472,9 +3510,33 @@ function queuePriority(entry: UnpositionedQueueEntry): number {
   }
 }
 
+function reviewAttemptState(
+  row: Pick<QueuedReviewStatusRow, 'state_tag' | 'failure_reason' | 'recovery_attempts' | 'updated_at'>,
+): ReviewAttemptState {
+  if (row.failure_reason === null) return { _tag: 'FirstAttempt' }
+  const signal = { message: row.failure_reason }
+  const failure = classifyFailure(signal)
+  if (row.state_tag === 'Failed' && !canRecoverFailure(signal, row.recovery_attempts))
+    return { _tag: 'Stuck', reason: row.failure_reason }
+  const limit =
+    failure._tag !== 'Transient'
+      ? null
+      : failure.kind === 'agent_provider'
+        ? MAXIMUM_PROVIDER_RECOVERY_ATTEMPTS
+        : failure.kind === 'resource_limit'
+          ? 1
+          : MAXIMUM_RECOVERY_ATTEMPTS
+  return {
+    _tag: 'Retrying',
+    reason: row.failure_reason,
+    retry: limit === null || row.recovery_attempts === 0 ? null : { spent: row.recovery_attempts, limit },
+    nextAttemptAt: row.state_tag === 'Failed' ? nextRecoveryAt(row.updated_at, row.recovery_attempts, signal) : null,
+  }
+}
+
 function failedQueueState(reason: string, recoveryAttempts?: number): QueueState {
-  // A Task the controller can still requeue is Pending. An exhausted non-provider
-  // failure is never requeued, so it needs a person and reads ActionRequired.
+  // A Task the controller can still requeue is Pending. An exhausted failure is
+  // never requeued, so it needs a person and reads ActionRequired.
   const recoverable = canRecoverFailure({ message: reason }, recoveryAttempts ?? 0)
   return recoverable
     ? { _tag: 'Pending', reason: `${reason} The controller will retry.` }
@@ -4500,6 +4562,18 @@ function supersededAfterStarting(database: DatabaseSync, taskId: string): boolea
   return row?.from_tag === 'Running' || row?.from_tag === 'Publishing'
 }
 
+/** Branch authority blocks creation or claiming. Agent blockers stop a running Task. */
+function conflictTaskWaitsForAuthority(database: DatabaseSync, taskId: string): boolean {
+  const row = database
+    .prepare(`
+    SELECT from_tag FROM task_transitions
+    WHERE task_id = ? AND to_tag = 'ActionRequired'
+    ORDER BY id DESC LIMIT 1
+  `)
+    .get(taskId) as { from_tag: TaskRow['state_tag'] | null } | undefined
+  return row?.from_tag === null || row?.from_tag === 'Queued'
+}
+
 /** Wait for quiet base inputs, but never delay a burst beyond five minutes. */
 const CONFLICT_BASE_QUIET_MS = 120_000
 const CONFLICT_BASE_MAX_WAIT_MS = 300_000
@@ -4658,12 +4732,14 @@ function planConflictResolution(
     return
   }
 
+  // Approval can unblock branch authority, but cannot clear an Agent verification blocker.
   // An exhausted budget waits for a person. A new head commit makes a new task.
   if (
     existing?.state_tag === 'ActionRequired' &&
     existing.cancelled === 0 &&
     ready &&
-    existing.recovery_attempts < MAXIMUM_RECOVERY_ATTEMPTS
+    existing.recovery_attempts < MAXIMUM_RECOVERY_ATTEMPTS &&
+    conflictTaskWaitsForAuthority(database, existing.id)
   ) {
     database
       .prepare(`
@@ -5003,6 +5079,8 @@ function currentSameHeadRevision(database: DatabaseSync, revisionId: string): st
   return row?.current_id ?? revisionId
 }
 
+const REVIEW_ALREADY_RECORDED_REASON = 'The current head commit already has an automated review.'
+
 /**
  * Moves Review work to the Revision that now carries the same head commit.
  *
@@ -5036,11 +5114,31 @@ function followHeadCommit(database: DatabaseSync, subjectId: number, revisionId:
   database
     .prepare(`
     UPDATE worker_tasks SET revision_id = ?
-    WHERE subject_id = ? AND kind = 'adversarial_review' AND state_tag != 'Superseded'
+    WHERE subject_id = ? AND kind = 'adversarial_review'
+      AND (
+        state_tag != 'Superseded'
+        OR (
+          reason = ? AND fence > 0
+          AND NOT EXISTS (SELECT 1 FROM task_cancellations WHERE task_id = worker_tasks.id)
+          AND NOT EXISTS (
+            SELECT 1 FROM review_status_commands AS terminal
+            WHERE terminal.task_id = worker_tasks.id AND terminal.phase = 'terminal'
+              AND terminal.state_tag IN ('Pending', 'Running', 'Published')
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM review_publications
+            WHERE review_run_id = (
+              SELECT id FROM review_runs
+              WHERE subject_id = worker_tasks.subject_id AND revision_id = ?
+              ORDER BY completed_at DESC, id DESC LIMIT 1
+            ) AND result_tag = 'Published'
+          )
+        )
+      )
       AND revision_id IN (${sameHead})
       AND revision_id NOT IN (${waitsOnBaseline})
   `)
-    .run(revisionId, subjectId, ...sameHeadArgs, subjectId)
+    .run(revisionId, subjectId, REVIEW_ALREADY_RECORDED_REASON, revisionId, ...sameHeadArgs, subjectId)
   database
     .prepare(`
     UPDATE tasks SET revision_id = ?
@@ -5540,13 +5638,37 @@ function planAdversarialReview(
     localAttempt.head_review_run_id !== null &&
     !rerunRequested &&
     !(manualReviewRequested && localAttempt.revision_attempt === 0)
+  // Recording the Agent's answer does not finish its controller Publication.
+  // A retry resumes this stored run instead of paying for another Agent turn.
+  const hasPublicationRetry =
+    database
+      .prepare(`
+    SELECT 1 FROM worker_tasks
+    WHERE subject_id = ? AND revision_id = ? AND kind = 'adversarial_review' AND fence > 0
+    LIMIT 1
+  `)
+      .get(subjectId, revisionId) !== undefined
+  const needsReviewPublication =
+    alreadyReviewed &&
+    hasPublicationRetry &&
+    database
+      .prepare(`
+    SELECT 1 FROM review_publications
+    WHERE review_run_id = ? AND result_tag = 'Published'
+    UNION ALL
+    SELECT 1 FROM review_status_commands
+    WHERE review_run_id = ? AND phase = 'terminal'
+      AND state_tag IN ('Pending', 'Running', 'Published')
+    LIMIT 1
+  `)
+      .get(localAttempt.head_review_run_id, localAttempt.head_review_run_id) === undefined
   const reviewable =
     subject.kind === 'pull_request' &&
     subject.state === 'open' &&
     !subject.draft &&
     mapping.enabled &&
     mapping.pullRequestReview &&
-    !alreadyReviewed &&
+    (!alreadyReviewed || needsReviewPublication) &&
     (!approvalRequired || reviewApproved)
 
   // GitHub computes mergeability lazily, so a poll seconds after a push reads
@@ -5626,9 +5748,7 @@ function planAdversarialReview(
       subjectId,
       'adversarial_review',
       observedAt,
-      alreadyReviewed
-        ? 'The current head commit already has an automated review.'
-        : 'The pull request is not ready for review.',
+      alreadyReviewed ? REVIEW_ALREADY_RECORDED_REASON : 'The pull request is not ready for review.',
       undefined,
       ownRunLanded ? revisionId : undefined,
     )
@@ -5660,7 +5780,7 @@ function planAdversarialReview(
   // the decision instead of paying for the classification again. The manual
   // Review label still wins over any skip, an explicit rerun wins too, and
   // the supersede above already retired any Task this revision queued.
-  if (triage !== undefined && subject.kind === 'pull_request') {
+  if (triage !== undefined && subject.kind === 'pull_request' && !needsReviewPublication) {
     if (triage._tag === 'Skipped' && !manualReviewRequested && !rerunRequested) {
       // A Task queued before this decision landed (a failure row recovered,
       // or a poll that computed no verdict) is retired here: a live-leased
@@ -5735,6 +5855,29 @@ function planAdversarialReview(
     (classifyFailure({ message: existing.reason }).kind !== 'resource_limit' ||
       Date.parse(observedAt) >=
         Date.parse(nextRecoveryAt(existing.updated_at, existing.recovery_attempts, { message: existing.reason })))
+  // Older deployments retired a publication retry as a duplicate Review.
+  // Only that automatic decision can resume; explicit stops still win above.
+  const prematureDeduplication =
+    needsReviewPublication && existing?.state_tag === 'Superseded' && existing.reason === REVIEW_ALREADY_RECORDED_REASON
+  if (prematureDeduplication) {
+    database
+      .prepare(`
+      UPDATE worker_tasks
+      SET state_tag = 'Queued', reason = NULL, attempts = 0, worker_id = NULL,
+        lease_expires_at = NULL, updated_at = ?
+      WHERE id = ? AND state_tag = 'Superseded'
+    `)
+      .run(observedAt, existing.id)
+    recordWorkerTransition(database, {
+      taskId: existing.id,
+      from: 'Superseded',
+      to: 'Queued',
+      reason: 'The stored Review still needs its terminal Publication.',
+      fence: existing.fence,
+      at: observedAt,
+    })
+    return
+  }
   if (recoverableFailure) {
     database
       .prepare(`
@@ -8252,7 +8395,29 @@ function installSchema(database: DatabaseSync): void {
     applyMigration(database, `${findingThreadSyncSchema} PRAGMA user_version = 92;`)
     version = 92
   }
-  if (version === 92) return
+  if (version === 92) {
+    // A scheduled Update records its own source. SQLite cannot widen a CHECK in
+    // place, so the table is rebuilt from its stored definition.
+    const schema = database.prepare("SELECT sql FROM sqlite_master WHERE name = 'restart_requests'").get() as {
+      sql: string
+    }
+    const expanded = schema.sql
+      .replace(/^CREATE TABLE[^(]+/, 'CREATE TABLE restart_requests_v93 ')
+      .replace("'tray', 'helper')", "'tray', 'helper', 'schedule')")
+    if (!expanded.includes("'schedule'"))
+      throw new Error('The restart_requests source constraint could not be widened.')
+    applyForeignKeyMigration(
+      database,
+      `${expanded};
+      INSERT INTO restart_requests_v93 SELECT * FROM restart_requests;
+      DROP TABLE restart_requests;
+      ALTER TABLE restart_requests_v93 RENAME TO restart_requests;
+      CREATE UNIQUE INDEX restart_requests_active ON restart_requests ((1)) WHERE state_tag IN ('Requested', 'Restarting');
+      PRAGMA user_version = 93;`,
+    )
+    version = 93
+  }
+  if (version === 93) return
   throw new Error(`Unsupported database schema version: ${version}.`)
 }
 
@@ -13865,7 +14030,21 @@ export function openJournalStore(
             fence: number
           }
         | undefined
-      if (existing !== undefined && (existing.state_tag === 'Pending' || existing.state_tag === 'Running')) {
+      // Gate evidence digests change with every CI read while the comment body
+      // stays the same. Requeueing that identical Published body republished
+      // the same comment every sweep pass. It stays on GitHub until another
+      // body replaces it or a drift reconciliation sees it lost or changed.
+      const latest = database
+        .prepare('SELECT command_id FROM review_gate_projections WHERE review_run_id = ?')
+        .get(input.reviewRunId) as { command_id: string | null } | undefined
+      const settled =
+        existing !== undefined &&
+        (existing.state_tag === 'Pending' ||
+          existing.state_tag === 'Running' ||
+          (existing.state_tag === 'Published' &&
+            input.reconciliationId === undefined &&
+            latest?.command_id === existing.id))
+      if (settled) {
         database
           .prepare('UPDATE review_gate_projections SET command_id = ? WHERE review_run_id = ?')
           .run(existing.id, input.reviewRunId)
@@ -13873,8 +14052,8 @@ export function openJournalStore(
         return { _tag: 'Duplicate', commandId: existing.id }
       }
       if (existing !== undefined) {
-        // The identical body already went through Publication, so this restage
-        // means GitHub lost the comment. Requeue the same command, keeping its
+        // A drift reconciliation saw GitHub lose or change the comment, or a
+        // superseded status is due again. Requeue the same command, keeping its
         // comment id, so the publisher repairs the existing comment.
         const reason =
           existing.state_tag === 'Published'
@@ -16187,6 +16366,20 @@ export function openJournalStore(
     }
   }
 
+  const renewProviderStart: JournalStore['renewProviderStart'] = (input) => {
+    const leaseExpiresAt = new Date(Date.parse(input.at) + input.leaseMilliseconds).toISOString()
+    return (
+      database
+        .prepare(`
+      UPDATE provider_circuits
+      SET canary_lease_expires_at = ?, updated_at = ?
+      WHERE id = ? AND state_tag = 'HalfOpen' AND canary_worker_id = ? AND canary_fence = ?
+        AND canary_lease_expires_at > ?
+    `)
+        .run(leaseExpiresAt, input.at, input.circuitId, input.workerId, input.fence, input.at).changes === 1
+    )
+  }
+
   const releaseProviderStart: JournalStore['releaseProviderStart'] = (input) => {
     database.exec('BEGIN IMMEDIATE')
     try {
@@ -16222,6 +16415,46 @@ export function openJournalStore(
   }
 
   const recordProviderFailure: JournalStore['recordProviderFailure'] = (input) => {
+    // A rejected model variant fails identically on every attempt, so it says
+    // nothing about provider health. It must not open a circuit, count a
+    // failure, or keep the half-open canary it won: the release moves the
+    // circuit back to an immediately claimable Open, so the probe stays
+    // recoverable instead of pausing provider starts for another cooldown.
+    if (input.failureClass === 'provider_config') {
+      if (input.canaryCircuitId === undefined) return null
+      database.exec('BEGIN IMMEDIATE')
+      try {
+        const released =
+          database
+            .prepare(`
+          UPDATE provider_circuits
+          SET state_tag = 'Open', retry_at = ?, canary_worker_id = NULL,
+            canary_lease_expires_at = NULL, last_detail = ?, updated_at = ?
+          WHERE id = ? AND state_tag = 'HalfOpen' AND canary_worker_id = ? AND canary_fence = ?
+        `)
+            .run(
+              input.at,
+              input.detail,
+              input.at,
+              input.canaryCircuitId,
+              input.workerId ?? null,
+              input.canaryFence ?? null,
+            ).changes === 1
+        if (!released) {
+          database.exec('COMMIT')
+          return null
+        }
+        const row = database
+          .prepare('SELECT * FROM provider_circuits WHERE id = ?')
+          .get(input.canaryCircuitId) as unknown as ProviderCircuitRow
+        recordProviderCircuitEvent(database, row, 'CanaryReleased', 'HalfOpen', 'Open', input.at, input.detail)
+        database.exec('COMMIT')
+        return providerCircuitFromRow(row)
+      } catch (error) {
+        database.exec('ROLLBACK')
+        throw error
+      }
+    }
     const id =
       input.canaryCircuitId ?? digest(`${input.provider}:${input.credential}:${input.model}:${input.failureClass}`)
     const usageLimit = input.failureClass === 'usage_limit'
@@ -16642,7 +16875,6 @@ export function openJournalStore(
       JOIN revisions ON revisions.id = subjects.current_revision_id
       WHERE repositories.enabled = 1 AND json_extract(revisions.payload, '$.state') = 'open'
       ORDER BY revisions.observed_at DESC
-      LIMIT 100
     `)
       .all() as unknown as DashboardSubjectRow[]
     const repositories: RepositoryStatus[] = repositoryRows.map((row) => ({
@@ -17186,11 +17418,23 @@ export function openJournalStore(
         worker_tasks.subject_id,
         worker_tasks.revision_id,
         worker_tasks.updated_at,
-        repositories.paused
+        repositories.paused,
+        worker_tasks.state_tag,
+        worker_tasks.reason,
+        worker_tasks.recovery_attempts,
+        -- How the last run ended. A requeue from Failed comes later and says
+        -- nothing about the run, so only exits from Running count.
+        (
+          SELECT transition.reason FROM worker_task_transitions AS transition
+          WHERE transition.task_id = worker_tasks.id AND transition.from_tag = 'Running'
+          ORDER BY transition.id DESC LIMIT 1
+        ) AS last_run_reason
       FROM worker_tasks
       JOIN subjects ON subjects.id = worker_tasks.subject_id
       JOIN repositories ON repositories.id = subjects.repository_id
-      WHERE worker_tasks.kind = 'adversarial_review' AND worker_tasks.state_tag = 'Queued'
+      -- A Failed Task still owns the comment: it waits on a backoff, or on a
+      -- person, and either way the comment has to say which.
+      WHERE worker_tasks.kind = 'adversarial_review' AND worker_tasks.state_tag IN ('Queued', 'Failed')
         AND worker_tasks.revision_id = subjects.current_revision_id
         AND repositories.enabled = 1
         ${repositoryWriteAuthoritySql}
@@ -17202,11 +17446,21 @@ export function openJournalStore(
         tasks.subject_id,
         tasks.revision_id,
         tasks.updated_at,
-        repositories.paused
+        repositories.paused,
+        tasks.state_tag,
+        tasks.reason,
+        tasks.recovery_attempts,
+        -- How the last run ended. A requeue from Failed comes later and says
+        -- nothing about the run, so only exits from Running count.
+        (
+          SELECT transition.reason FROM task_transitions AS transition
+          WHERE transition.task_id = tasks.id AND transition.from_tag = 'Running'
+          ORDER BY transition.id DESC LIMIT 1
+        ) AS last_run_reason
       FROM tasks
       JOIN subjects ON subjects.id = tasks.subject_id
       JOIN repositories ON repositories.id = subjects.repository_id
-      WHERE tasks.kind = 'review_fix' AND tasks.state_tag = 'Queued'
+      WHERE tasks.kind = 'review_fix' AND tasks.state_tag IN ('Queued', 'Failed')
         AND tasks.revision_id = subjects.current_revision_id
         AND repositories.enabled = 1
         ${repositoryWriteAuthoritySql}
@@ -17220,7 +17474,7 @@ export function openJournalStore(
     ),
     -- The Queue an agent actually draws from. A paused Task waits outside it,
     -- so it takes no position and moves nobody else along.
-    claimable AS (SELECT * FROM candidates WHERE paused = 0)
+    claimable AS (SELECT * FROM candidates WHERE paused = 0 AND state_tag = 'Queued')
     SELECT
       candidates.task_id,
       candidates.task_kind,
@@ -17229,6 +17483,15 @@ export function openJournalStore(
       candidates.revision_id,
       json_extract(revisions.payload, '$.headSha') AS head_sha,
       candidates.paused,
+      candidates.state_tag,
+      candidates.recovery_attempts,
+      candidates.updated_at,
+      -- A Failed Task carries its reason. A Task requeued after a failed run
+      -- keeps no reason of its own, so its last exit from Running does.
+      CASE
+        WHEN candidates.state_tag = 'Failed' THEN candidates.reason
+        ELSE candidates.last_run_reason
+      END AS failure_reason,
       -- A Repair queues behind the Review that found its work, on the same
       -- Revision, so that Review's verdict still describes this head.
       EXISTS (
@@ -17238,7 +17501,7 @@ export function openJournalStore(
       ) AS answered,
       (
         SELECT COUNT(*) + 1 FROM claimable AS ahead
-        WHERE candidates.paused = 0
+        WHERE candidates.paused = 0 AND candidates.state_tag = 'Queued'
           AND ahead.task_kind = candidates.task_kind
           AND (
             ahead.updated_at < candidates.updated_at
@@ -17349,6 +17612,7 @@ export function openJournalStore(
               priorOutcome: row.prior_outcome,
               findings: row.prior_findings ?? 0,
             },
+      attempt: reviewAttemptState(row),
       commentId: row.github_comment_id,
       publishedBody: row.published_body,
     }))
@@ -17364,7 +17628,7 @@ export function openJournalStore(
         FROM ${taskTable}
         JOIN subjects ON subjects.id = ${taskTable}.subject_id
         WHERE ${taskTable}.id = ? AND ${taskTable}.kind = ?
-          AND ${taskTable}.state_tag = 'Queued'
+          AND ${taskTable}.state_tag IN ('Queued', 'Failed')
           AND ${taskTable}.revision_id = ? AND subjects.current_revision_id = ?
       `)
         .get(input.taskId, input.taskKind, input.revisionId, input.revisionId) as { fence: number } | undefined
@@ -17759,7 +18023,7 @@ export function openJournalStore(
       database
         .prepare(`
       SELECT 1 FROM ${taskTable}
-      WHERE id = ? AND kind = ? AND state_tag = 'Queued'
+      WHERE id = ? AND kind = ? AND state_tag IN ('Queued', 'Failed')
     `)
         .get(input.taskId, input.taskKind) !== undefined
     )
@@ -18522,7 +18786,7 @@ export function openJournalStore(
   const getRoutineIssueSource: JournalStore['getRoutineIssueSource'] = (repository, issueNumber) => {
     const row = database
       .prepare(`
-      SELECT candidate_issue_commands.routine_name, candidates.target
+      SELECT candidate_issue_commands.routine_name, candidates.target, candidates.fingerprint, candidates.claim
       FROM candidate_issue_commands
       JOIN candidates ON candidates.id = candidate_issue_commands.candidate_id
       WHERE candidate_issue_commands.repository = ?
@@ -18530,8 +18794,12 @@ export function openJournalStore(
         AND candidate_issue_commands.state_tag = 'Published'
       LIMIT 1
     `)
-      .get(repository, issueNumber) as { routine_name: RoutineIssueSource['routineName']; target: string } | undefined
-    return row === undefined ? null : { routineName: row.routine_name, target: row.target }
+      .get(repository, issueNumber) as
+      | { routine_name: RoutineIssueSource['routineName']; target: string; fingerprint: string; claim: string }
+      | undefined
+    return row === undefined
+      ? null
+      : { routineName: row.routine_name, target: row.target, fingerprint: row.fingerprint, claim: row.claim }
   }
 
   /** Rebuild outcomes from controller publication provenance and current GitHub Observations. */
@@ -18845,7 +19113,7 @@ export function openJournalStore(
   }
 
   /**
-   * Records one failed Routine run, retrying it until its attempts run out.
+   * Records one failed Routine run. Invalid provider configuration never retries.
    *
    * A retry returns the run to the queue at the same instant. The unique
    * constraint on that instant still holds, so retrying can never fan one
@@ -18861,7 +19129,9 @@ export function openJournalStore(
         database.exec('COMMIT')
         return 'Rejected'
       }
-      const retrying = row.attempts < row.max_attempts
+      const failure = classifyFailure({ message: input.reason })
+      const rejectedConfiguration = failure._tag === 'Permanent' && failure.kind === 'provider_config'
+      const retrying = !rejectedConfiguration && row.attempts < row.max_attempts
       const to = retrying ? 'Queued' : 'Failed'
       const changed =
         database
@@ -19632,6 +19902,7 @@ export function openJournalStore(
     providerCanStart,
     reserveProviderStart,
     releaseProviderStart,
+    renewProviderStart,
     recordProviderFailure,
     recordProviderSuccess,
     listProviderCircuits,

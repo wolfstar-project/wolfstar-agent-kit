@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  canRecoverFailure,
   classifyCheckFailure,
   classifyFailure,
   contextBudgetExhaustedReason,
@@ -63,6 +64,25 @@ describe('classifyFailure', () => {
     // slipped into a Transient pattern would spend an agent turn per pass.
     expect(classifyFailure({ message: reason })).toEqual({ _tag: 'Permanent', kind: 'policy' })
     expect(mayRetryFailure({ message: reason })).toBe(false)
+  })
+
+  it.each([
+    'Variant unavailable for zai-coding-plan/glm-5.3-flash: medium',
+    'The opencode session failed: Variant unavailable for zai-coding-plan/glm-5.3-flash: medium',
+    'The codex session failed: Variant unavailable for openai/gpt-5.2: high',
+  ])('never retries %s, because the variant the role pinned does not exist', (message) => {
+    // The owned-agent prefix wraps reasons the provider produced. A rejected
+    // variant is one of them that no retry can fix, so it must stop before the
+    // provider kind wins its unbounded recovery budget back.
+    expect(classifyFailure({ message })).toEqual({ _tag: 'Permanent', kind: 'provider_config' })
+    expect(mayRetryFailure({ message })).toBe(false)
+    expect(canRecoverFailure({ message }, 0)).toBe(false)
+  })
+
+  it('keeps retries and recovery for a transient provider failure', () => {
+    const signal = { message: 'The opencode session failed: Unexpected server error. Check server logs for details.' }
+    expect(mayRetryFailure(signal)).toBe(true)
+    expect(canRecoverFailure(signal, 0)).toBe(true)
   })
 
   it('keeps the attempts of a failure nobody has classified', () => {

@@ -8,7 +8,7 @@ export const REVIEW_TOOLS = [
   {
     name: 'review_read',
     description:
-      'Page workspace files or immutable exact revision evidence. Use revision diff with empty path for the complete diff and changed-file metadata. Base means the triple-dot merge base. Follow nextOffset until truncated is false. Binary files and symlinks are unavailable.',
+      'Page workspace files or immutable exact revision evidence. Use revision diff with empty path for text patches and all changed-file metadata. Base means the triple-dot merge base. Follow nextOffset until truncated is false. Binary and symlink revisions return metadata instead of text.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -90,11 +90,20 @@ export function createReviewTools(options: {
           return { _tag: 'Refused', reason: 'The read offset must be between 0 and 32000000 bytes.' }
         const artifact = await evidence()
         if (artifact._tag === 'Unavailable') return artifact
+        const content = artifact.files[record.path]?.[record.revision as 'base' | 'head']
+        if (content?._tag === 'Binary' || content?._tag === 'Symlink')
+          return {
+            _tag: 'Unavailable',
+            reason: `Review cannot read this ${content._tag.toLowerCase()} revision as source text.`,
+            content,
+          }
         const text =
           record.revision === 'diff' && record.path === ''
             ? artifact.diff
-            : artifact.files[record.path]?.[record.revision as 'base' | 'head']
-        if (typeof text !== 'string')
+            : content?._tag === 'Text'
+              ? content.text
+              : undefined
+        if (text === undefined)
           return { _tag: 'Refused', reason: 'This revision has no supported changed file at that path.' }
         const bytes = Buffer.from(text)
         let end = Math.min(Number(offset) + 16_000, bytes.length)

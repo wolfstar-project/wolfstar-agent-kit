@@ -10,6 +10,7 @@ import type {
 import type { Result } from './result.ts'
 import type { ReviewProofAuthorityFactory } from './review-proof-authority.ts'
 import type { ReviewRuntime } from './review-runtime.ts'
+import type { VitalsComparisonRequest, VitalsComparisonResult } from './vitals-comparison.ts'
 import { Buffer } from 'node:buffer'
 import { spawn } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
@@ -29,6 +30,7 @@ import {
   jsonOutputInstruction,
 } from './agent-provider.ts'
 import { opencodeSandboxPaths, prepareAgentSandbox } from './agent-sandbox.ts'
+import { agentSkillCatalogPrompt } from './agent-skill-catalog.ts'
 import { createAgentTransport } from './agent-transport.ts'
 import { materializeAgentMedia } from './github-media.ts'
 import {
@@ -40,6 +42,12 @@ import {
 } from './opencode-result.ts'
 import { err, ok } from './result.ts'
 import { createReviewRuntime, REVIEW_TOOL_NAMES } from './review-runtime.ts'
+import {
+  createVitalsEvidenceDirectory,
+  inspectVitalsComparison,
+  vitalsComparisonScript,
+  vitalsEvidenceInstructions,
+} from './vitals-comparison-runtime.ts'
 import { dailyCheckinDirectory } from './workspace-environment.ts'
 import { isWorkersAiModel, workersAiVariant } from './workers-ai.ts'
 
@@ -70,7 +78,11 @@ export interface OpencodeServer {
   password: string
   /** Internal socket directory for this turn's isolated attachment client. */
   transportDirectory?: string
+  /** The catalog belongs to the server namespace where model tools run. */
+  skillCatalogPath?: string
   memoryExceeded?: () => Promise<boolean>
+  /** Only a controller-created server namespace can inspect its retained reports. */
+  performanceEvidence?: { directory: string; inspect: (signal: AbortSignal) => Promise<VitalsComparisonResult> }
   createSession: (signal: AbortSignal) => Promise<Result<string, string>>
   /** Adds one user message to a busy session. The session reads it before its next model step. */
   steer: (sessionId: string, text: string) => Promise<Result<void, string>>
@@ -84,6 +96,8 @@ export type StartOpencodeServer = (
   environment: NodeJS.ProcessEnv,
   readOnlyPaths?: readonly string[],
   taskId?: string,
+  routineContext?: AgentTurnRequest['routineContext'],
+  vitalsComparison?: VitalsComparisonRequest,
 ) => Promise<Result<OpencodeServer, string | { _tag: 'SandboxSetupFailed' | 'ResourceLimit'; reason: string }>>
 
 /** The fixed user name OpenCode expects with a server password. */
@@ -108,7 +122,16 @@ export function spawnOpencodeServer(
   review?: ReviewRuntime,
   memoryPerAgentGiB?: number,
 ): StartOpencodeServer {
-  return async (workspace, environment, readOnlyPaths = [], taskId) => {
+  return async (workspace, environment, readOnlyPaths = [], taskId, routineContext, vitalsComparison) => {
+    if (
+      vitalsComparison !== undefined &&
+      (routineContext?.routineName !== 'vitals-review' || taskId !== vitalsComparison.taskId || review !== undefined)
+    )
+      return err({ _tag: 'SandboxSetupFailed', reason: 'The performance evidence request has no trusted vitals Task.' })
+    const vitalsEvidenceDirectory =
+      vitalsComparison === undefined
+        ? undefined
+        : await createVitalsEvidenceDirectory(environment.HOME ?? '/home/wolfstar', vitalsComparison)
     const password = randomBytes(24).toString('hex')
     const transportDirectory = await mkdtemp(join(tmpdir(), 'agent-transport-'))
     const transport = await createAgentTransport(join(transportDirectory, 'opencode.sock'))
@@ -121,11 +144,18 @@ export function spawnOpencodeServer(
       environment: { ...environment, ...serverCredentials(password) },
       provider: 'opencode',
       ...(memoryPerAgentGiB === undefined ? {} : { memoryPerAgentGiB }),
-      readOnlyPaths: [...opencodeSandboxPaths(environment), ...readOnlyPaths, ...(review?.readOnlyPaths ?? [])],
+      readOnlyPaths: [
+        ...opencodeSandboxPaths(environment),
+        ...readOnlyPaths,
+        ...(review?.readOnlyPaths ?? []),
+        ...(vitalsComparison === undefined ? [] : [vitalsComparisonScript()]),
+      ],
+      ...(vitalsEvidenceDirectory === undefined ? {} : { vitalsEvidenceDirectory }),
       networkMode: 'opencode-server',
       transportDirectory,
       ...(review === undefined ? {} : { reviewHome: review.home }),
       ...(taskId === undefined ? {} : { taskId }),
+      ...(routineContext === undefined ? {} : { routineContext }),
       ...(readOnly === undefined ? {} : { readOnly }),
     })
       .then(ok)
@@ -189,6 +219,15 @@ export function spawnOpencodeServer(
             ok({
               ...opencodeServer(transport.url, password, workspace, child, session),
               transportDirectory,
+              ...(sandbox.skillCatalogPath === undefined ? {} : { skillCatalogPath: sandbox.skillCatalogPath }),
+              ...(vitalsComparison === undefined || vitalsEvidenceDirectory === undefined
+                ? {}
+                : {
+                    performanceEvidence: {
+                      directory: vitalsEvidenceDirectory,
+                      inspect: (signal: AbortSignal) => inspectVitalsComparison(sandbox, vitalsComparison, signal),
+                    },
+                  }),
               memoryExceeded: sandbox.memoryExceeded,
               close: async (signal) => {
                 child.kill(signal)
@@ -514,7 +553,14 @@ export function createOpencodeProvider(options: OpencodeProviderOptions = {}): A
       review === undefined || options.startOpencodeServer !== undefined
         ? startOpencodeServer
         : spawnOpencodeServer(true, review, options.memoryPerAgentGiB)
-    const started = await start(request.workspace, turnEnvironment.value, mediaPaths, taskId)
+    const started = await start(
+      request.workspace,
+      turnEnvironment.value,
+      mediaPaths,
+      taskId,
+      review === undefined ? request.routineContext : undefined,
+      request.vitalsComparison,
+    )
     if (started._tag === 'Err') {
       yield typeof started.error === 'string'
         ? { _tag: 'Failed', reason: agentProviderFailureReason('opencode', started.error) }
@@ -584,7 +630,12 @@ export function createOpencodeProvider(options: OpencodeProviderOptions = {}): A
       inputError = error
       stop('SIGKILL')
     })
-    child.stdin?.end(prompt)
+    child.stdin?.end(
+      agentSkillCatalogPrompt(
+        `${prompt}${request.vitalsComparison === undefined ? '' : `\n\n${vitalsEvidenceInstructions(request.vitalsComparison)}`}`,
+        review === undefined ? server.skillCatalogPath : undefined,
+      ),
+    )
 
     // A silent run means a wedged agent, and its Task holds its lease until the
     // process ends. Stop it so the Task can fail and retry.
@@ -769,7 +820,27 @@ export function createOpencodeProvider(options: OpencodeProviderOptions = {}): A
       clearInterval(watchdog)
       request.signal.removeEventListener('abort', abort)
       // The run ended, so its server has no session left to serve.
-      await server.close('SIGTERM')
+      let comparisonEvent: Extract<AgentEvent, { _tag: 'VitalsComparison' }> | undefined
+      try {
+        if (request.vitalsComparison !== undefined) {
+          const result =
+            server.performanceEvidence === undefined
+              ? {
+                  _tag: 'Unavailable' as const,
+                  requestId: request.vitalsComparison.id,
+                  reason: 'The performance evidence reader requires an isolated Agent server.',
+                }
+              : await server.performanceEvidence.inspect(request.signal)
+          comparisonEvent = {
+            _tag: 'VitalsComparison',
+            result,
+            retainedDirectory: server.performanceEvidence?.directory ?? null,
+          }
+        }
+      } finally {
+        await server.close('SIGTERM')
+      }
+      if (comparisonEvent !== undefined) yield comparisonEvent
     }
   }
 

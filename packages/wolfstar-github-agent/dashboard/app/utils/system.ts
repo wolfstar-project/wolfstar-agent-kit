@@ -234,7 +234,7 @@ export function restartNotice(request: RestartRequest | null): RestartNotice | u
     return {
       _tag: 'Requested',
       text: updating
-        ? 'Update requested. Active work finishes first.'
+        ? `${request.source === 'schedule' ? 'Scheduled update' : 'Update'} requested. Active work finishes first.`
         : 'Restart requested. Active work finishes first.',
     }
   if (request._tag === 'Restarting')

@@ -41,8 +41,12 @@ import {
   interruptTerminalSubmission,
 } from '../utils/terminal-submission.ts'
 
-const { session, cachedScreen } = defineProps<{ session: TerminalSession; cachedScreen?: TerminalScreen }>()
-const emit = defineEmits<{ screen: [value: TerminalScreen] }>()
+const { session, cachedScreen, initialPrompt } = defineProps<{
+  session: TerminalSession
+  cachedScreen?: TerminalScreen
+  initialPrompt?: string
+}>()
+const emit = defineEmits<{ screen: [value: TerminalScreen]; newSession: [draft?: string] }>()
 const container = useTemplateRef('container')
 const terminalBackground = useCssVar('--terminal-bg', container)
 const terminalForeground = useCssVar('--terminal-fg', container)
@@ -120,6 +124,7 @@ watch(draft, () => {
   if (failure.value === terminalFailureCopy.SizeLimit) failure.value = ''
 })
 const processState = ref(session.state)
+const processExit = shallowRef(session.exit)
 const ended = computed(() => ['Exited', 'Interrupted'].includes(processState.value))
 const earlierRequest = computed(() =>
   terminalEarlierRequest({
@@ -144,7 +149,13 @@ const canAcquireWriter = computed(
 )
 const connectionCopy = computed(() =>
   processState.value === 'Exited'
-    ? 'Agent session exited.'
+    ? processExit.value?.signal
+      ? `Agent stopped by signal ${processExit.value.signal}.`
+      : processExit.value?.code === 0
+        ? 'Session ended.'
+        : processExit.value?.code !== undefined
+          ? `Agent exited with code ${processExit.value.code}.`
+          : 'Agent session exited.'
     : processState.value === 'Interrupted'
       ? 'Agent session interrupted.'
       : processState.value === 'Stopping'
@@ -457,6 +468,7 @@ function connect() {
       writer.value = message.writer
       channel?.setWriter(message.writer)
       processState.value = message.session.state
+      processExit.value = message.session.exit
       failure.value = ''
       if (!history.value && !historyRequest) {
         const request = terminalAttachmentHistoryRequest({
@@ -506,6 +518,7 @@ function connect() {
       }
     } else if (message.type === 'Process') {
       processState.value = message.state
+      processExit.value = message.exit
     } else if (message.type === 'History' && message.generation === session.generation) {
       if (message.requestId !== historyRequestId) return
       historyRequestId = undefined
@@ -707,6 +720,12 @@ watch(
   },
 )
 watch(
+  () => session.exit,
+  (exit) => {
+    if (exit) processExit.value = exit
+  },
+)
+watch(
   [ended, submission],
   ([value]) => {
     if (value) {
@@ -852,6 +871,32 @@ onScopeDispose(() => {
         />
       </UDropdownMenu>
     </div>
+    <div
+      v-if="ended"
+      class="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-default bg-muted px-3 py-2 text-sm"
+    >
+      <p role="status" class="min-w-0 flex-1 text-muted">
+        {{
+          draft
+            ? 'Your draft is saved in this session.'
+            : initialPrompt
+              ? 'Your initial prompt is saved.'
+              : 'Your work remains in the project.'
+        }}
+      </p>
+      <UButton
+        class="min-h-11"
+        @click="emit('newSession', draft && submission._tag === 'Editing' ? draft : !draft ? initialPrompt : undefined)"
+      >
+        {{
+          draft && submission._tag === 'Editing'
+            ? 'Use draft in new session'
+            : !draft && initialPrompt
+              ? 'Review initial prompt'
+              : 'New session'
+        }}
+      </UButton>
+    </div>
     <p v-if="copyAcknowledged" role="status" class="shrink-0 px-3 py-1 text-xs text-muted">Copied</p>
     <p v-if="uncertain && !reviewDelivery" role="alert" class="shrink-0 px-3 py-2 text-sm text-warning">
       Input delivery is unknown. Check the terminal before sending again.
@@ -948,7 +993,7 @@ onScopeDispose(() => {
       <p v-if="submissionCopy" role="status" class="text-sm text-muted">
         {{ submissionCopy }}
       </p>
-      <div class="flex gap-2">
+      <div v-if="!ended" class="flex gap-2">
         <UPopover
           v-model:open="phoneKeysOpen"
           :reference="phoneDraft"

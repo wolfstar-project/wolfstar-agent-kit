@@ -19,7 +19,7 @@ Invoke on intent, not on phrasing. If the next command you are about to run is `
 None of these are reasons to skip it:
 
 - **The user never said "PR".** Once a fix is written and verified, "fix", "ship it", "land this", or a bare "yes" all mean land it. The trigger list in the description is examples, not a required wording.
-- **The change is small.** A one-line fix or a docs edit still needs the repo's template, the AI disclosure, a body with no verification section, and green CI. Size changes none of that.
+- **The change is small.** A one-line fix or a docs edit still needs the repo's template, the AI disclosure, a body with no verification section unless [pr-evidence](../pr-evidence/SKILL.md) calls for testing instructions, and green CI. Size changes none of that.
 - **Invoking costs a turn.** Rewriting a hand-made PR body costs more, and a PR pushed without Step 4 can fail CI in front of a reviewer.
 - **You already ran the git commands.** Then a PR exists and is probably wrong. Re-enter here anyway -- Step 1 detects the existing PR and Step 5 syncs it in place.
 
@@ -147,6 +147,7 @@ Add these local description requirements:
 - Use the effective template and preserve its required comments and sections.
 - Omit verification, testing, and QA sections or mentions. CI owns that evidence.
   Evidence CI cannot produce belongs in the self-identified Agent comment from Step 5.
+  One exception: add the optional `### 🧪 Testing instructions` section only when [pr-evidence](../pr-evidence/SKILL.md#optional-testing-instructions) requires it.
 - Add Breaking Changes and Migration sections only when the operator needs them.
 - Include relevant measured benchmarks. Never invent or estimate a figure.
 - Append the exact AI disclosure from Step 3. Preserve it on every rewrite.
@@ -262,7 +263,8 @@ Keep it to the checks a reviewer would otherwise have to repeat. Prose lines, no
 
 ### Screenshots and video
 
-For a visible change, read and follow [media](references/media.md) before capture, inspection, or upload.
+For a visible change, read [pr-evidence](../pr-evidence/SKILL.md) before the work starts, so the `Before` capture comes from the base branch.
+Then read and follow [media](references/media.md) before capture, inspection, or upload.
 Keep verification evidence in a self-identified Agent comment. Do not attach screenshots of passing checks.
 
 ## Step 6: Wait for CI and Review
@@ -383,5 +385,9 @@ wt remove BRANCH_NAME
 This skill owns PR creation, metadata, CI monitoring, and review feedback repair.
 
 `../adversarial-review/SKILL.md` exclusively owns the automated adversarial review outcome and marked bot status. Do not create or update that status here.
+
+`../review-replies/SKILL.md` answers human review threads one at a time. The marked bot status and its findings stay with Step 6.
+
+`../review-findings/SKILL.md` reviews a diff inline and returns findings in the conversation, with no bot status.
 
 `../take-ownership/SKILL.md` wraps this workflow when one agent owns the current work through delivery verification.

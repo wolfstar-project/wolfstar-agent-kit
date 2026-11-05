@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { describe, expect, it } from 'vitest'
@@ -75,6 +75,8 @@ it('installs executable commands that work in a noninteractive shell', async () 
       env,
       cwd: tmpdir(),
     })
+    const expectedUrl =
+      hostname().split('.')[0] === 'hogwild' ? 'http://127.0.0.1:3210' : 'https://hogwild.tailcad325.ts.net'
     expect(JSON.parse(run.stdout)).toEqual({
       args: [
         'control',
@@ -82,7 +84,7 @@ it('installs executable commands that work in a noninteractive shell', async () 
         '--config',
         join(home, '.config/wolfstar-github-agent/config.yml'),
         '--url',
-        'https://hogwild.tailcad325.ts.net',
+        expectedUrl,
       ],
       cwd: checkout,
     })

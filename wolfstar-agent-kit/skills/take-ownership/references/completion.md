@@ -29,6 +29,9 @@ Never run a broad history search by default.
 
 Ask once only when plausible targets require materially different or destructive actions.
 
+With no target and a request such as "clean up merged branches" or "prune worktrees", run `git fetch --prune origin` and list the local branches `git branch -vv` marks `gone`.
+Take them one at a time, each as its own closure target.
+
 ## 2. Build the closure ledger
 
 Inspect applicable state before editing. Run independent read-only checks in parallel.
@@ -108,6 +111,12 @@ Keep this ledger and return here after the required delivery stages finish.
 
 For a merged pull request, verify its revision on the default branch.
 
+Confirm the merge from the remote, never from recall or the user's word alone.
+`gh pr view NUMBER --json state,headRefOid,mergeCommit` must report `MERGED`.
+Squash and rebase merges leave `git branch --merged` blind and the remote branch gone either way.
+Diff the branch's own paths against the destination: `git diff --stat <branch> origin/main -- <paths>`.
+If the branch holds content the destination lacks, name those commits and stop. That change is not closed.
+
 Then refresh the primary checkout before task cleanup:
 
 1. Resolve the primary checkout with `wt list --format=json`.
@@ -142,6 +151,22 @@ Issue comments, issue closure, review replies, and publications keep normal appr
 
 Draft the exact text when publication approval is missing.
 
+### Notes and memory
+
+Skip this when the agent keeps no notes or memory files for the project.
+
+In scope: files whose body names the merged branch, pull request number, issue, or work brief.
+Every other claim in every other file is out of scope, even one that looks wrong. List it under `Seen, not touched`.
+
+Decide each in-scope claim by reading the current default branch or the review thread, never by recall:
+
+1. **Chronology**: dates, SHAs, run IDs, review rounds, "awaiting review". Retire it. GitHub keeps it.
+2. **Done or false**: a follow-up already on the default branch, or a claim the code contradicts. Drop it and name the deciding line.
+3. **Durable and unrecorded**: a toolchain gotcha, a design reason, or an outside fact, searched and confirmed absent from the repository. Fold it into the file that owns the topic as one added paragraph. Leave the rest of that file alone.
+4. **Ongoing**: a follow-up still true, or an open change this one blocked. Keep it in that change's file or a follow-ups file, with the line that proves it still applies.
+
+Then delete the merged change's own notes file, fix every link to it, drop its index entry, and update the index entry of each file that gained a paragraph.
+
 ## 7. Clean task-owned state
 
 Cleanup starts only after the work reaches `VERIFIED`, `BLOCKED`, or `CANCELLED`.
@@ -149,7 +174,7 @@ Cleanup starts only after the work reaches `VERIFIED`, `BLOCKED`, or `CANCELLED`
 Before deleting a task worktree or branch, prove:
 
 1. No live agent or process owns it.
-2. The worktree is clean.
+2. The worktree is clean. `git -C <worktree> status --ignored --short` lists nothing; ignored files such as `.env` are lost on removal. Name anything listed and stop.
 3. Its tip matches the exact merged pull request head, or it is an ancestor of the destination.
 4. The pull request's merge commit exists on the destination, or Git proves full integration.
 5. No open pull request uses the branch.
@@ -202,6 +227,15 @@ List only unresolved items requiring the user.
 
 Name any preserved worktree or branch. Report end-to-end confidence.
 
+After cleanup, add at most five items each, omitting empty lists:
+
+- **Removed**: worktree, branch, notes file, and the primary checkout's move from one commit to another.
+- **Folded**: fact and destination file.
+- **Dropped**: claim and the line that decided it.
+- **Seen, not touched**: anything outside scope that looked wrong.
+
+End with one line naming what was assumed rather than read.
+
 ## Boundaries
 
 Default scope is the current conversation and current repository.
@@ -213,3 +247,7 @@ This skill does not triage the general backlog.
 It does not inspect unrelated worktrees across the machine.
 
 It does not start the next work item.
+
+---
+
+The notes and merge-proof rules are adapted from [ArefMozafari/post-merge-cleanup](https://github.com/ArefMozafari/post-merge-cleanup), MIT, Copyright (c) 2026 Aref Mozafari.
