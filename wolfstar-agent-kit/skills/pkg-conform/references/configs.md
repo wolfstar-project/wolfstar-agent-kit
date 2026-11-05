@@ -59,6 +59,37 @@ coverage
 }
 ```
 
+### eslint-plugin-harlanzw
+
+Oxlint loads ESLint plugins as `jsPlugins` and reads the plugin from the default export.
+`eslint-plugin-harlanzw` exports it by name, so re-export it:
+
+```js
+// .oxlint/harlanzw.mjs
+import { plugin } from 'eslint-plugin-harlanzw'
+
+export default plugin
+```
+
+Add `"jsPlugins": ["./.oxlint/harlanzw.mjs"]` to `.oxlintrc.json`, then enable rules as `harlanzw/<rule>`:
+
+```json
+{
+  "jsPlugins": ["./.oxlint/harlanzw.mjs"],
+  "rules": {
+    "harlanzw/no-silent-catch": "error",
+    "harlanzw/nuxt-await-navigate-to": "error",
+    "harlanzw/nuxt-no-random": "error",
+    "harlanzw/nuxt-no-unsafe-date": "error",
+    "harlanzw/vue-no-reactive-destructuring": "error",
+    "harlanzw/vue-no-reactivity-after-await": "error"
+  }
+}
+```
+
+Only rules that read a script run. Oxlint does not run Vue template rules (`link-*`, `vue-no-ref-access-in-templates`) or the Markdown rules (`ai-deslop-*`, `prompt-*`, `docs-*`).
+Run a new rule across the repository as `warn` first. `no-test-file-reads`, `prefer-satisfies`, `vue-no-resolve-component-in-composables`, and `nuxt-prefer-navigate-to-over-router-push-replace` raise false positives on common patterns, so enable them only after a count.
+
 ## .oxfmtrc.json
 
 ```json

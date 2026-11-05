@@ -455,6 +455,8 @@ export function jobExecutionContext(
         readingScript = false
         if (scriptLines.length > 0) current.run = redactSecrets(scriptLines.join('\n')).slice(0, 4_000)
       } else if (readingScript && scriptLines.join('\n').length < 4_000) {
+        // GitHub Actions logs carry these literal sequences. The line is parsed, not printed.
+        // oxlint-disable-next-line harlanzw/prefer-node-style-text
         scriptLines.push(line.replaceAll('\x1B[36;1m', '').replaceAll('\x1B[0m', ''))
       }
       if (match?.[1] === 'working-directory') current.workingDirectory = safeText(match[2]!)

@@ -57,6 +57,7 @@
     "@opencode/plugin": "catalog:",
     "@types/node": "catalog:",
     "@types/semver": "catalog:",
+    "eslint-plugin-harlanzw": "catalog:",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "semver": "catalog:",
