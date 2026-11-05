@@ -27,6 +27,7 @@ function request(overrides: Partial<AgentTurnRequest> = {}): AgentTurnRequest {
   }
 }
 
+/* oxlint-disable harlanzw/prefer-node-style-text -- the child prints the exact ANSI bytes real opencode writes. */
 /** One real child process that replays a fixed opencode run. */
 function replay(
   lines: unknown[],
@@ -44,6 +45,7 @@ function replay(
   `
   return (args: string[]) => spawn(process.execPath, ['-e', script, ...args], { stdio: ['ignore', 'pipe', 'pipe'] })
 }
+/* oxlint-enable harlanzw/prefer-node-style-text */
 
 async function collect(events: AsyncIterable<AgentEvent>): Promise<AgentEvent[]> {
   const items: AgentEvent[] = []

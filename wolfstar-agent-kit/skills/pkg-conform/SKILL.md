@@ -179,7 +179,7 @@ See `references/` for detailed templates:
 3. [ ] `.github/workflows/test.yml` - action versions and Markdown path filtering
 4. [ ] `.editorconfig` - standard config
 5. [ ] `.gitignore` - standard patterns
-6. [ ] ESLint config - antfu + `eslint-plugin-wolfstarzw`. Package: `eslint.config.mjs`; Site: `eslint.config.js`
+6. [ ] Lint config - `.oxlintrc.json` and `.oxfmtrc.json`, plus `eslint-plugin-harlanzw` loaded through `.oxlint/harlanzw.mjs`. See `references/configs.md`
 7. [ ] `tsconfig.json` - Package: `module: preserve`, `moduleDetection: force`; Site: `extends .nuxt/tsconfig.json`
 8. [ ] Git hooks - `lint-staged` in devDeps, `pre-commit` runs `lint-staged`
 9. [ ] `AGENTS.md` - router shape, 30 to 80 lines. No `CLAUDE.md`, no `CONTEXT.md`. See `../../references/root-docs.md`

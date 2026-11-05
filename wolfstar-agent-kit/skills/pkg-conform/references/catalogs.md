@@ -12,6 +12,7 @@ catalog:
   '@arethetypeswrong/cli': ^0.18.2
   '@types/node': ^25.2.1
   bumpp: ^10.4.1
+  eslint-plugin-harlanzw: ^0.23.0
   lint-staged: ^16.3.2
   obuild: ^0.4.24
   oxfmt: ^0.65.0
@@ -37,6 +38,7 @@ catalog:
   '@arethetypeswrong/cli': ^0.18.2
   '@types/node': ^25.2.1
   bumpp: ^10.4.1
+  eslint-plugin-harlanzw: ^0.23.0
   lint-staged: ^16.3.2
   obuild: ^0.4.24
   oxfmt: ^0.65.0
@@ -54,6 +56,7 @@ ignoredBuiltDependencies:
 ```json
 {
   "devDependencies": {
+    "eslint-plugin-harlanzw": "catalog:",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "vitest": "catalog:",

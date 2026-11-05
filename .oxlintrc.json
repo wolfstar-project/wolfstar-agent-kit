@@ -4,6 +4,7 @@
     "correctness": "error"
   },
   "plugins": ["import", "oxc", "typescript", "vue"],
+  "jsPlugins": ["./.oxlint/harlanzw.mjs"],
   "rules": {
     "eqeqeq": ["error", "smart"],
     "no-debugger": "error",
@@ -14,7 +15,37 @@
         "ignoreReadBeforeAssign": true
       }
     ],
-    "require-yield": "off"
+    "require-yield": "off",
+    "harlanzw/no-silent-catch": "error",
+    "harlanzw/nuxt-await-navigate-to": "error",
+    "harlanzw/nuxt-no-random": "error",
+    "harlanzw/nuxt-no-redundant-component-imports": "error",
+    "harlanzw/nuxt-no-redundant-import-meta": "error",
+    "harlanzw/nuxt-no-self-layer-alias": "error",
+    "harlanzw/nuxt-no-side-effects-in-async-data-handler": "error",
+    "harlanzw/nuxt-no-side-effects-in-setup": "error",
+    "harlanzw/nuxt-no-unsafe-date": "error",
+    "harlanzw/nuxt-prefer-layer-alias": "error",
+    "harlanzw/nuxt-prefer-nuxt-link-over-router-link": "error",
+    "harlanzw/prefer-node-style-text": "error",
+    "harlanzw/vue-no-async-lifecycle-hook": "error",
+    "harlanzw/vue-no-faux-composables": "error",
+    "harlanzw/vue-no-nested-reactivity": "error",
+    "harlanzw/vue-no-passing-refs-as-props": "error",
+    "harlanzw/vue-no-reactive-destructuring": "error",
+    "harlanzw/vue-no-reactivity-after-await": "error",
+    "harlanzw/vue-no-torefs-on-props": "error",
+    "harlanzw/vue-no-unresolvable-define-emits": "error",
+    "harlanzw/vue-prefer-define-emits-object-syntax": "error",
+    "harlanzw/vue-require-composable-prefix": "error"
   },
-  "ignorePatterns": ["**/.generated/**"]
+  "ignorePatterns": ["**/.generated/**"],
+  "overrides": [
+    {
+      "files": ["**/test/fixtures/**"],
+      "rules": {
+        "harlanzw/nuxt-no-side-effects-in-setup": "off"
+      }
+    }
+  ]
 }

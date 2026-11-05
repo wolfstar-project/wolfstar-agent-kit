@@ -4,6 +4,7 @@
 
 import { spawnSync } from 'node:child_process'
 import process from 'node:process'
+import { styleText } from 'node:util'
 import { plan, stepArgv } from './plan.ts'
 
 const result = plan(process.argv.slice(2))
@@ -13,7 +14,7 @@ if (result._tag === 'Err') {
 }
 
 for (const step of result.steps) {
-  if (step.title) console.log(`\x1B[1m# ${step.title} (${step.host})\x1B[0m`)
+  if (step.title) console.log(styleText('bold', `# ${step.title} (${step.host})`))
   const [file, ...args] = stepArgv(step)
   const { status } = spawnSync(file as string, args, { stdio: 'inherit' })
   if (status !== 0) {

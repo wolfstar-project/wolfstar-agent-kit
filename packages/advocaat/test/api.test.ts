@@ -347,7 +347,7 @@ describe('jev api', () => {
       },
     })
 
-    await client.systemOne({ state: null, questions: { q: noul() } }).catch(() => undefined)
+    await expect(client.systemOne({ state: null, questions: { q: noul() } })).rejects.toBeDefined()
 
     expect(calls).toBe(1)
   })
