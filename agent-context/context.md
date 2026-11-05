@@ -32,7 +32,7 @@ Never publish under my name without approval. Draft it, show the exact text, wai
 ## Email and Chrome identities
 
 - Before email work, read the `email-usage` Skill. Before browser work, read the `browser` Skill.
-- Use `contact@wolfstar.rocks` for personal work, `clients@harlanzw.com` for clients, and `agent@harlanzw.com` for explicit agent identity.
+- Use `contact@wolfstar.rocks` for personal work, `clients@harlanzw.com` for clients, and `agent@wolfstar.rocks` for explicit agent identity.
 - Default signed-in browser work to Agent. Use Clients for client work. Explicit user choices take precedence.
 - If a site requires `contact@wolfstar.rocks`, use Wolfstar's existing main profile.
 - Identity selection needs no extra approval for an authorized task. Honor Chrome's main-profile connection approval.
