@@ -19,7 +19,7 @@ const {
 }>()
 
 const percent = computed(() => {
-  if (current == null || !previous) return null
+  if (current === undefined || current === null || !previous) return null
   return calcTrendPercent(current, previous, inverted)
 })
 

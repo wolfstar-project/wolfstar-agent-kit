@@ -1,6 +1,6 @@
 # Octorun for Wolfstar Agent Kit
 
-Run [Octorun](https://github.com/harlan-zw/octorun) workflows for this repository.
+Run [Octorun](https://github.com/wolfstar-project/octorun) workflows for this repository.
 This private package imports the standalone runtime at an exact Git commit.
 It adds the existing GitHub App mapping and a Claude subscription provider.
 

@@ -1,6 +1,6 @@
 # Hogwild host controls from a phone
 
-At `https://agent.wolfstar.rocks`, sign in with a Passkey, open **System**, choose
+At `https://agent.harlanzw.com`, sign in with a Passkey, open **System**, choose
 **Isolate Hogwild**, then **Confirm with Passkey**. The second Passkey prompt
 authorizes this action. Cancelling before the request leaves the server running.
 
@@ -21,10 +21,10 @@ Never test real isolation on a host without a viable recovery connection.
 
 ## Power off when finished
 
-At `https://agent.wolfstar.rocks`, open **System**, then **Power off Hogwild**.
+At `https://agent.harlanzw.com`, open **System**, then **Power off Hogwild**.
 Acknowledge that someone must physically turn Hogwild back on, then confirm with your Passkey.
 This queues a normal systemd shutdown after five seconds. It interrupts running work.
-Both `agent.wolfstar.rocks` and `hogwild.example.com` become unavailable, along with recovery SSH.
+Both `agent.harlanzw.com` and `hogwild.harlanzw.com` become unavailable, along with recovery SSH.
 The response confirms scheduling, not that power is already off.
 If the response is lost, inspect through admin recovery before submitting another request.
 
@@ -45,7 +45,7 @@ credential and action. An isolation proof cannot authorize power off, or the rev
 The broker persists counters before invoking the existing root-owned isolation controller
 or scheduling one fixed systemd power-off command. It refuses further host actions after submission.
 The socket has no network listener and admits only root and
-the `wolfstar` group. Root code and verification keys are not writable by the Agent.
+the `harlan` group. Root code and verification keys are not writable by the Agent.
 
 Compromise of root can disable this control. The public tunnel and dashboard must
 still be reachable to request isolation. Passkey confirmation proves a credential
@@ -54,7 +54,7 @@ This is workload containment with admin recovery, not a physical network cut.
 
 ## Administrator installation
 
-First install the recoverable controller from `wolfstar-project/hogwild-gh-runner`,
+First install the recoverable controller from `harlan-zw/hogwild-gh-runner`,
 including recovery SSH and boot lock. Validate its `check` action. Build this broker
 in a trusted checkout with the exact workspace lockfile:
 
@@ -63,7 +63,7 @@ node packages/wolfstar-github-agent/security/build.ts /trusted/output
 ```
 
 Provision only public Passkey material, exported from the service's existing
-public browser authority with Node 24 as `wolfstar`:
+public browser authority with Node 24 as `harlan`:
 
 ```sh
 node packages/wolfstar-github-agent/security/export-passkeys.ts ~/.local/share/wolfstar-github-agent/browser-auth > /private/staging/public-passkeys.json

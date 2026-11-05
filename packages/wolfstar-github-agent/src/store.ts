@@ -2524,7 +2524,7 @@ const repositoryPauseMigration = `
 const agentSelectionMigration = `
   CREATE TABLE agent_selection (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    provider TEXT NOT NULL CHECK (provider IN ('claude', 'codex', 'opencode')),
+    provider TEXT NOT NULL CHECK (provider IN ('codex', 'opencode')),
     model TEXT,
     reasoning_effort TEXT,
     updated_at TEXT NOT NULL
@@ -2756,7 +2756,7 @@ const agentProviderMigration = `
     id INTEGER PRIMARY KEY,
     subject_id INTEGER NOT NULL REFERENCES subjects(id),
     role TEXT NOT NULL CHECK (role IN ('conflict_resolution', 'review_fix', 'baseline_repair')),
-    provider TEXT NOT NULL CHECK (provider IN ('claude', 'codex', 'opencode')),
+    provider TEXT NOT NULL CHECK (provider IN ('codex', 'opencode')),
     session_id TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE (subject_id, role, provider)
@@ -2770,7 +2770,7 @@ const agentProviderMigration = `
     id INTEGER PRIMARY KEY,
     subject_id INTEGER NOT NULL REFERENCES subjects(id),
     role TEXT NOT NULL CHECK (role IN ('adversarial_review', 'issue_triage')),
-    provider TEXT NOT NULL CHECK (provider IN ('claude', 'codex', 'opencode')),
+    provider TEXT NOT NULL CHECK (provider IN ('codex', 'opencode')),
     scope_digest TEXT NOT NULL CHECK (length(scope_digest) = 64),
     session_id TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -6281,7 +6281,7 @@ const followsConfigurationSelectionMigration = `
   CREATE TABLE agent_selection_v27 (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     tag TEXT NOT NULL CHECK (tag IN ('FollowsConfiguration', 'Pinned')),
-    provider TEXT CHECK (provider IN ('claude', 'codex', 'opencode')),
+    provider TEXT CHECK (provider IN ('codex', 'opencode')),
     model TEXT,
     reasoning_effort TEXT,
     updated_at TEXT NOT NULL,
@@ -6507,7 +6507,7 @@ const automaticAgentSelectionMigration = `
   CREATE TABLE agent_selection_v37 (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     tag TEXT NOT NULL CHECK (tag IN ('FollowsConfiguration', 'Pinned', 'Automatic')),
-    provider TEXT CHECK (provider IN ('claude', 'codex', 'opencode')),
+    provider TEXT CHECK (provider IN ('codex', 'opencode')),
     model TEXT,
     reasoning_effort TEXT,
     provider_order TEXT CHECK (provider_order IS NULL OR json_valid(provider_order)),
@@ -7048,7 +7048,7 @@ const workflowTelemetryMigration = `
 const providerCircuitMigration = `
   CREATE TABLE provider_circuits (
     id TEXT PRIMARY KEY,
-    provider TEXT NOT NULL CHECK (provider IN ('claude', 'codex', 'opencode')),
+    provider TEXT NOT NULL CHECK (provider IN ('codex', 'opencode')),
     credential TEXT NOT NULL,
     model TEXT NOT NULL,
     failure_class TEXT NOT NULL CHECK (failure_class IN (
@@ -7236,6 +7236,125 @@ const reviewGateProjectionMigration = `
   PRAGMA user_version = 56;
 `
 
+/** Allows Claude anywhere a resumable Agent provider is persisted. */
+const claudeProviderMigration = `
+  CREATE TABLE worker_sessions_v57 (
+    id INTEGER PRIMARY KEY,
+    subject_id INTEGER NOT NULL REFERENCES subjects(id),
+    role TEXT NOT NULL CHECK (role IN ('conflict_resolution', 'review_fix', 'baseline_repair')),
+    provider TEXT NOT NULL CHECK (provider IN ('claude', 'codex', 'opencode')),
+    session_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (subject_id, role, provider)
+  );
+  INSERT INTO worker_sessions_v57 SELECT * FROM worker_sessions;
+  DROP TABLE worker_sessions;
+  ALTER TABLE worker_sessions_v57 RENAME TO worker_sessions;
+
+  CREATE TABLE subject_worker_sessions_v57 (
+    id INTEGER PRIMARY KEY,
+    subject_id INTEGER NOT NULL REFERENCES subjects(id),
+    role TEXT NOT NULL CHECK (role IN ('adversarial_review', 'issue_triage')),
+    provider TEXT NOT NULL CHECK (provider IN ('claude', 'codex', 'opencode')),
+    scope_digest TEXT NOT NULL CHECK (length(scope_digest) = 64),
+    session_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (subject_id, role, provider, scope_digest)
+  );
+  INSERT INTO subject_worker_sessions_v57 SELECT * FROM subject_worker_sessions;
+  DROP TABLE subject_worker_sessions;
+  ALTER TABLE subject_worker_sessions_v57 RENAME TO subject_worker_sessions;
+
+  CREATE TABLE agent_selection_v57 (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    tag TEXT NOT NULL CHECK (tag IN ('FollowsConfiguration', 'Pinned', 'Automatic')),
+    provider TEXT CHECK (provider IN ('claude', 'codex', 'opencode')),
+    model TEXT,
+    reasoning_effort TEXT,
+    provider_order TEXT CHECK (provider_order IS NULL OR json_valid(provider_order)),
+    updated_at TEXT NOT NULL,
+    CHECK ((tag = 'Pinned') = (provider IS NOT NULL)),
+    CHECK ((tag = 'Automatic') = (provider_order IS NOT NULL))
+  );
+  INSERT INTO agent_selection_v57 SELECT * FROM agent_selection;
+  DROP TABLE agent_selection;
+  ALTER TABLE agent_selection_v57 RENAME TO agent_selection;
+
+  DROP INDEX IF EXISTS review_runs_subject_completed;
+  CREATE TABLE review_runs_v57 (
+    id TEXT PRIMARY KEY,
+    subject_id INTEGER NOT NULL REFERENCES subjects(id),
+    revision_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind = 'adversarial_review'),
+    provider TEXT NOT NULL CHECK (provider IN ('claude', 'codex', 'opencode')),
+    session_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    agent_version TEXT NOT NULL,
+    skill_digest TEXT NOT NULL CHECK (length(skill_digest) = 64),
+    head_sha TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    gates TEXT NOT NULL CHECK (json_valid(gates)),
+    outcome_tag TEXT NOT NULL CHECK (outcome_tag IN ('Ready', 'Pending', 'Blocked')),
+    confidence INTEGER,
+    findings TEXT NOT NULL CHECK (json_valid(findings)),
+    content_digest TEXT NOT NULL CHECK (length(content_digest) = 64),
+    usage TEXT NOT NULL DEFAULT '{"_tag":"Unavailable"}' CHECK (json_valid(usage)),
+    supersedes_review_run_id TEXT NULL REFERENCES review_runs_v57(id),
+    FOREIGN KEY (revision_id, subject_id) REFERENCES revisions(id, subject_id),
+    CHECK (completed_at >= started_at),
+    CHECK (confidence IS NULL OR confidence BETWEEN 0 AND 100)
+  );
+  INSERT INTO review_runs_v57 (
+    id, subject_id, revision_id, kind, provider, session_id, model, agent_version, skill_digest,
+    head_sha, started_at, completed_at, gates, outcome_tag, confidence, findings, content_digest,
+    usage, supersedes_review_run_id
+  )
+  SELECT
+    id, subject_id, revision_id, kind, provider, session_id, model, agent_version, skill_digest,
+    head_sha, started_at, completed_at, gates, outcome_tag, confidence, findings, content_digest,
+    usage, supersedes_review_run_id
+  FROM review_runs;
+  DROP TABLE review_runs;
+  ALTER TABLE review_runs_v57 RENAME TO review_runs;
+  CREATE INDEX review_runs_subject_completed ON review_runs(subject_id, completed_at DESC);
+
+  DROP INDEX IF EXISTS provider_circuits_availability;
+  CREATE TABLE provider_circuits_v57 (
+    id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL CHECK (provider IN ('claude', 'codex', 'opencode')),
+    credential TEXT NOT NULL,
+    model TEXT NOT NULL,
+    failure_class TEXT NOT NULL CHECK (failure_class IN (
+      'network', 'overloaded', 'stalled', 'process_exit', 'authentication', 'unknown'
+    )),
+    state_tag TEXT NOT NULL CHECK (state_tag IN ('Closed', 'Open', 'HalfOpen')),
+    failures INTEGER NOT NULL DEFAULT 0 CHECK (failures >= 0),
+    retry_at TEXT,
+    canary_worker_id TEXT,
+    canary_fence INTEGER NOT NULL DEFAULT 0 CHECK (canary_fence >= 0),
+    canary_lease_expires_at TEXT,
+    last_detail TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (provider, credential, model, failure_class),
+    CHECK (
+      (state_tag = 'Open' AND retry_at IS NOT NULL
+        AND canary_worker_id IS NULL AND canary_lease_expires_at IS NULL)
+      OR (state_tag = 'HalfOpen' AND retry_at IS NULL
+        AND canary_worker_id IS NOT NULL AND canary_lease_expires_at IS NOT NULL)
+      OR (state_tag = 'Closed' AND retry_at IS NULL
+        AND canary_worker_id IS NULL AND canary_lease_expires_at IS NULL)
+    )
+  );
+  INSERT INTO provider_circuits_v57 SELECT * FROM provider_circuits;
+  DROP TABLE provider_circuits;
+  ALTER TABLE provider_circuits_v57 RENAME TO provider_circuits;
+  CREATE INDEX provider_circuits_availability
+    ON provider_circuits(provider, credential, state_tag, retry_at);
+
+  PRAGMA user_version = 57;
+`
+
 /** Clears Publication Incidents that existed before they belonged to a repository. */
 const repositoryScopedReviewStatusIncidentMigration = `
   UPDATE incidents
@@ -7244,7 +7363,7 @@ const repositoryScopedReviewStatusIncidentMigration = `
     AND scope_tag = 'Service'
     AND operation = 'review_status_publication';
 
-  PRAGMA user_version = 57;
+  PRAGMA user_version = 58;
 `
 
 /** Distinguishes a plain restart from one that prepares a pinned service commit. */
@@ -7447,41 +7566,6 @@ const reviewRunSupersedesIndexMigration = `
 
   PRAGMA user_version = 64;
 `
-
-function hasColumn(database: DatabaseSync, table: string, column: string): boolean {
-  return database.prepare('SELECT 1 AS found FROM pragma_table_info(?) WHERE name = ?').get(table, column) !== undefined
-}
-
-/**
- * Lets every persisted provider column hold Claude. Journals created before
- * Wolfstar added the provider still carry the narrower CHECK, and SQLite
- * cannot widen a CHECK in place, so each such table is rebuilt from its
- * stored definition. It leaves the schema version alone so upstream
- * migrations keep their numbers.
- */
-function allowClaudeProvider(database: DatabaseSync): void {
-  const narrow = "provider IN ('codex', 'opencode')"
-  const tables = database
-    .prepare(`SELECT name, sql FROM sqlite_master WHERE type = 'table' AND sql LIKE ?`)
-    .all(`%${narrow}%`) as Array<{ name: string; sql: string }>
-  for (const table of tables) {
-    const indexes = database
-      .prepare(`SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL`)
-      .all(table.name) as Array<{ sql: string }>
-    const rebuilt = `${table.name}_claude`
-    const definition = table.sql
-      .replace(/^CREATE TABLE[^(]+/, `CREATE TABLE ${rebuilt} `)
-      .replaceAll(narrow, "provider IN ('claude', 'codex', 'opencode')")
-    applyForeignKeyMigration(
-      database,
-      `${definition};
-      INSERT INTO ${rebuilt} SELECT * FROM ${table.name};
-      DROP TABLE ${table.name};
-      ALTER TABLE ${rebuilt} RENAME TO ${table.name};
-      ${indexes.map((index) => `${index.sql};`).join('\n')}`,
-    )
-  }
-}
 
 function applyMigration(database: DatabaseSync, migration: string): void {
   database.exec('BEGIN IMMEDIATE')
@@ -7826,13 +7910,12 @@ function installSchema(database: DatabaseSync): void {
     version = 56
   }
   if (version === 56) {
-    applyMigration(database, repositoryScopedReviewStatusIncidentMigration)
+    applyForeignKeyMigration(database, claudeProviderMigration)
     version = 57
   }
-  if (version === 58 && !hasColumn(database, 'restart_requests', 'operation_tag')) {
-    // Wolfstar's fork once spent version 57 on the Claude provider migration,
-    // so its journals reach 58 without the restart operation columns.
-    applyMigration(database, restartOperationMigration)
+  if (version === 57) {
+    applyMigration(database, repositoryScopedReviewStatusIncidentMigration)
+    version = 57
   }
   if (version === 57) {
     applyMigration(database, restartOperationMigration)
@@ -8334,10 +8417,7 @@ function installSchema(database: DatabaseSync): void {
     )
     version = 93
   }
-  if (version === 93) {
-    allowClaudeProvider(database)
-    return
-  }
+  if (version === 93) return
   throw new Error(`Unsupported database schema version: ${version}.`)
 }
 

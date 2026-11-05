@@ -252,7 +252,7 @@ describe('conflict worktree', () => {
       git(checkout, 'push', 'origin', 'main')
     }
     const manager = createConflictWorktreeManager({
-      gitIdentity: { name: 'Wolfstar Project', email: 'contact@wolfstar.rocks' },
+      gitIdentity: { name: 'Wolfstar Wilton', email: 'contact@wolfstar.rocks' },
       remoteUrl: () => remote,
       root,
       tokens: {
@@ -284,7 +284,7 @@ describe('conflict worktree', () => {
   it.each(['edit', 'delete', 'reverted edit'] as const)('rejects an unrelated staged %s', async (change) => {
     const { remote, root, task } = fixture()
     const manager = createConflictWorktreeManager({
-      gitIdentity: { name: 'Wolfstar Project', email: 'contact@wolfstar.rocks' },
+      gitIdentity: { name: 'Wolfstar Wilton', email: 'contact@wolfstar.rocks' },
       remoteUrl: () => remote,
       root,
       tokens: {
@@ -394,7 +394,7 @@ describe('conflict worktree', () => {
   it('commits only the verified index when files change after verification', async () => {
     const { remote, root, task } = fixture()
     const manager = createConflictWorktreeManager({
-      gitIdentity: { name: 'Wolfstar Project', email: 'contact@wolfstar.rocks' },
+      gitIdentity: { name: 'Wolfstar Wilton', email: 'contact@wolfstar.rocks' },
       remoteUrl: () => remote,
       root,
       tokens: {
@@ -424,7 +424,7 @@ describe('conflict worktree', () => {
   it('rejects an index changed after verification before creating a commit', async () => {
     const { remote, root, task } = fixture()
     const manager = createConflictWorktreeManager({
-      gitIdentity: { name: 'Wolfstar Project', email: 'contact@wolfstar.rocks' },
+      gitIdentity: { name: 'Wolfstar Wilton', email: 'contact@wolfstar.rocks' },
       remoteUrl: () => remote,
       root,
       tokens: {

@@ -70,6 +70,7 @@
   "devDependencies": {
     "@iconify-json/octicon": "catalog:",
     "@iconify-json/simple-icons": "catalog:",
+    "@internationalized/date": "3.12.4",
     "@nuxt/fonts": "catalog:",
     "@nuxt/icon": "catalog:",
     "@nuxt/ui": "catalog:",

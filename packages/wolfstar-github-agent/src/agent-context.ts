@@ -360,7 +360,7 @@ export const CHECK_SCOPES = {
     'prefer a narrower command that reproduces the same failure; run the exact command of the failing check only when no narrower command reproduces it, then lint and typecheck on the changed files only.',
   /** Conflict resolution, where the merge already names the files in scope. */
   conflictedFiles:
-    'run eslint on the conflicted files, vitest on the test files that import them, and git diff --check.',
+    'run oxlint on the conflicted files, vitest on the test files that import them, and git diff --check.',
   /** Trusted vitals Issue work needs compiled applications for its local comparison. */
   focusedPerformance:
     'run the required local performance comparison, then regression tests, lint, and typecheck on changed files only.',

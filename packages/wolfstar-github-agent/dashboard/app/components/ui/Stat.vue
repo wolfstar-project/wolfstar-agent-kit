@@ -114,7 +114,7 @@ const sizeConfig = computed(() => {
 })
 
 const displayValue = computed(() => {
-  if (value == null) return null
+  if (value === undefined || value === null) return null
   if (format && typeof value === 'number') return format(value)
   return String(value)
 })
@@ -129,7 +129,7 @@ const animatedValueOptions = computed<SlotTextOptions | null>(() => {
 })
 
 const trendDirection = computed(() => {
-  if (trend == null || trend === 0) return 'neutral'
+  if (trend === undefined || trend === null || trend === 0) return 'neutral'
   return trend > 0 ? 'up' : 'down'
 })
 
@@ -163,7 +163,7 @@ const statusChip = computed(() => {
 })
 
 const formattedTrend = computed(() => {
-  if (trend == null) return ''
+  if (trend === undefined || trend === null) return ''
   const abs = Math.abs(trend)
   const sign = trend > 0 ? '+' : trend < 0 ? '-' : ''
   const formatted = format ? format(abs) : abs % 1 === 0 ? String(abs) : abs.toFixed(1)
@@ -207,7 +207,11 @@ const hasChart = computed(() => Boolean(sparkline?.length || slots.chart))
           </span>
         </slot>
         <slot v-if="!card" name="trend">
-          <span v-if="trend != null && trend !== 0" class="font-mono" :class="[trendTypeClass, trendColorClass]">
+          <span
+            v-if="trend !== undefined && trend !== null && trend !== 0"
+            class="font-mono"
+            :class="[trendTypeClass, trendColorClass]"
+          >
             {{ formattedTrend }}
           </span>
           <!-- An explicit null means the comparison exists and is empty. Undefined means there is no comparison, so nothing draws. -->
@@ -296,7 +300,7 @@ const hasChart = computed(() => Boolean(sparkline?.length || slots.chart))
             :class="card && hasChart ? 'ui-stat-legible' : ''"
           >
             <slot>
-              <div v-if="value != null" class="flex min-w-0 items-baseline gap-2">
+              <div v-if="value !== undefined && value !== null" class="flex min-w-0 items-baseline gap-2">
                 <span class="font-mono tracking-tight" :class="[sizeConfig.value, valueClass || 'text-default']">
                   <UiSlotText
                     v-if="animatedValueOptions && displayValue"
@@ -310,7 +314,7 @@ const hasChart = computed(() => Boolean(sparkline?.length || slots.chart))
                 <span v-if="suffix" class="text-sm text-muted">{{ suffix }}</span>
                 <slot v-if="card" name="trend">
                   <span
-                    v-if="trend != null && trend !== 0"
+                    v-if="trend !== undefined && trend !== null && trend !== 0"
                     class="font-mono"
                     :class="[trendTypeClass, trendColorClass]"
                   >

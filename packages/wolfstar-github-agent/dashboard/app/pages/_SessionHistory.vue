@@ -46,6 +46,8 @@ const data = ref<SessionViewSnapshot>()
 const loading = ref(true)
 const failure = ref<{ message: string }>()
 const loadFailure = ref('')
+const hostStatus = (host: SessionHost): string =>
+  sessionHostStatus(data.value, host, loading.value ? 'loading' : loadFailure.value ? 'failed' : 'ready')
 const pending = ref(false)
 const host = useSessionStorage<SessionHost>('agent-session-history-host', 'desktop', {
   initOnMounted: true,
@@ -185,6 +187,12 @@ function remember(session: DesktopSession): void {
   data.value.sessions = [session, ...data.value.sessions.filter((value) => value.id !== session.id)]
 }
 
+function requestStop(): void {
+  if (!selected.value) return
+  stopTarget.value = selected.value.id
+  stopConfirm.value = true
+}
+
 async function stop(): Promise<void> {
   if (readOnly.value) {
     failure.value = { message: 'Read-only Service connection.' }
@@ -257,8 +265,14 @@ usePageTitle('History')
               <span class="flex items-center gap-1 text-sm"
                 ><span
                   class="size-1.5 rounded-full"
-                  :class="sessionHostStatus(data, candidate) === 'Connected' ? 'bg-success' : 'bg-warning'"
-                />{{ sessionHostStatus(data, candidate) }}</span
+                  :class="
+                    hostStatus(candidate) === 'Connected'
+                      ? 'bg-success'
+                      : hostStatus(candidate) === 'Unavailable'
+                        ? 'bg-current opacity-40'
+                        : 'bg-warning'
+                  "
+                />{{ hostStatus(candidate) }}</span
               >
             </button>
           </div>
@@ -357,10 +371,7 @@ usePageTitle('History')
           :loading="pending"
           :disabled="selected?.status === 'stopping'"
           icon="i-octicon-square-fill-16"
-          @click="
-            stopTarget = selected!.id
-            stopConfirm = true
-          "
+          @click="requestStop"
         >
           {{ selected?.status === 'stopping' ? 'Stopping' : 'Stop Agent' }}
         </UButton>

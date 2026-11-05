@@ -23,7 +23,88 @@ import {
   turnEvents,
 } from './fixtures.ts'
 
+const readyTriage = JSON.stringify({
+  _tag: 'READY_TO_IMPLEMENT',
+  difficulty: 2,
+  impact: 4,
+  hasReproduction: true,
+  needsCodebaseReview: false,
+  summary: 'The current implementation drops valid input.',
+  nextAction: 'Reproduce the failure and fix the parser.',
+})
+
 describe('issue work worker', () => {
+  it.each([
+    null,
+    '{invalid',
+    '{}',
+    '',
+    ...['NEEDS_INFO', 'READY_TO_SPEC', 'WAIT_TO_IMPLEMENT'].map((route) =>
+      JSON.stringify({ ...JSON.parse(readyTriage), _tag: route }),
+    ),
+  ])('requires valid ready triage before preparing or running a fix: %s', async (evidence) => {
+    const repository = repositoryMapping()
+    const issue = issueItem()
+    const unexpected = () => {
+      throw new Error('Implementation must not start before validation.')
+    }
+    const worker = createIssueWorkWorker({
+      runtime: unexpected,
+      githubEvidence: { collectOwnership: unexpected },
+      github: {
+        getIssueTriageSnapshot: async () =>
+          ok({
+            body: 'Body',
+            comments: [],
+            state: 'open',
+            title: issue.title,
+            updatedAt: '2026-08-13T01:00:00.000Z',
+          }),
+        getPullRequestTemplate: async () => ok({ _tag: 'Found', body: '### Description' }),
+        listPullRequestFiles: unexpected,
+      },
+      now: () => new Date('2026-08-13T01:00:00.000Z'),
+      store: {
+        getIssueTriageEvidence: (repo, number, revision) => {
+          expect([repo, number, revision]).toEqual([repository.github, issue.number, 'revision-1'])
+          return evidence
+        },
+        getWorkerSession: unexpected,
+        listOpenAgentPullRequests: unexpected,
+        saveWorkerSession: unexpected,
+        updateAgentProgress: unexpected,
+      },
+      validateMapping: async () => ok(repository),
+      worktrees: { prepare: unexpected, verify: unexpected, restack: unexpected, commit: unexpected },
+    })
+    const result = await worker.run(
+      {
+        id: 'issue-work-task',
+        kind: 'issue_work',
+        repository: repository.github,
+        issueNumber: issue.number,
+        revisionId: 'revision-1',
+        state: { _tag: 'Running', workerId: 'worker-1', fence: 1, leaseExpiresAt: '2026-08-13T01:10:00.000Z' },
+        updatedAt: '2026-08-13T01:00:00.000Z',
+        repositoryMapping: repository,
+        issue,
+      },
+      new AbortController().signal,
+    )
+    expect(result).toEqual(
+      ok({
+        _tag: 'ActionRequired',
+        reason: 'Validate the current issue with Issue triage before implementation.',
+        evidence:
+          evidence === null
+            ? 'No triage exists for this issue revision.'
+            : ['{invalid', '{}', ''].includes(evidence)
+              ? 'Stored triage for this issue revision is malformed or has an invalid schema.'
+              : expect.any(String),
+      }),
+    )
+  })
+
   it('preserves deployment evidence without committing an empty change', async () => {
     const repository = repositoryMapping()
     const issue = issueItem()
@@ -84,7 +165,7 @@ describe('issue work worker', () => {
       },
       now: () => new Date('2026-08-13T01:00:00.000Z'),
       store: {
-        getIssueTriageEvidence: () => null,
+        getIssueTriageEvidence: () => readyTriage,
         getWorkerSession: () => 'triage-session',
         listOpenAgentPullRequests: () => [],
         saveWorkerSession: () => undefined,
@@ -185,7 +266,7 @@ describe('issue work worker', () => {
       },
       now: () => new Date('2026-08-13T01:00:00.000Z'),
       store: {
-        getIssueTriageEvidence: () => null,
+        getIssueTriageEvidence: () => readyTriage,
         getWorkerSession: () => 'triage-session',
         listOpenAgentPullRequests: () => [],
         saveWorkerSession: () => undefined,
@@ -291,7 +372,7 @@ describe('issue work worker', () => {
       },
       now: () => new Date('2026-08-13T01:00:00.000Z'),
       store: {
-        getIssueTriageEvidence: () => null,
+        getIssueTriageEvidence: () => readyTriage,
         getRoutineIssueSource: () => ({
           routineName: 'agent-feedback',
           target: 'wolfstar-agent-kit/skills/adversarial-review/SKILL.md',
@@ -397,7 +478,7 @@ Closes #12.`,
       },
       now: () => new Date('2026-08-13T01:00:00.000Z'),
       store: {
-        getIssueTriageEvidence: () => null,
+        getIssueTriageEvidence: () => readyTriage,
         getWorkerSession: (_repository, _number, _role, scopeDigest) =>
           scopeDigest === undefined ? null : 'triage-session',
         listOpenAgentPullRequests: () => [],
@@ -528,7 +609,7 @@ Closes #12.`,
       },
       now: () => new Date('2026-08-13T01:06:00.000Z'),
       store: {
-        getIssueTriageEvidence: () => null,
+        getIssueTriageEvidence: () => readyTriage,
         getWorkerSession: () => 'triage-session',
         listOpenAgentPullRequests: () => [],
         saveWorkerSession: () => undefined,
@@ -614,7 +695,7 @@ Closes #12.`,
       },
       now: () => new Date('2026-08-13T01:00:00.000Z'),
       store: {
-        getIssueTriageEvidence: () => null,
+        getIssueTriageEvidence: () => readyTriage,
         getWorkerSession: (_repository, _number, _role, scopeDigest) =>
           scopeDigest === undefined ? null : 'triage-session',
         listOpenAgentPullRequests: () => [],
@@ -712,7 +793,7 @@ Closes #12.`,
       },
       now: () => new Date('2026-08-13T01:00:00.000Z'),
       store: {
-        getIssueTriageEvidence: () => null,
+        getIssueTriageEvidence: () => readyTriage,
         getWorkerSession: (_repository, _number, _role, scopeDigest) =>
           scopeDigest === undefined ? null : 'triage-session',
         listOpenAgentPullRequests: () => [],
@@ -821,7 +902,7 @@ Closes #12.`,
       },
       now: () => new Date('2026-08-13T01:00:00.000Z'),
       store: {
-        getIssueTriageEvidence: () => null,
+        getIssueTriageEvidence: () => readyTriage,
         getWorkerSession: (_repository, _number, _role, scopeDigest) =>
           scopeDigest === undefined ? null : 'triage-session',
         listOpenAgentPullRequests: () => input.candidates,
@@ -991,7 +1072,7 @@ Closes #12.`,
       },
       now: () => new Date('2026-08-13T01:06:00.000Z'),
       store: {
-        getIssueTriageEvidence: () => null,
+        getIssueTriageEvidence: () => readyTriage,
         getWorkerSession: () => null,
         listOpenAgentPullRequests: () => [],
         saveWorkerSession: () => undefined,
@@ -1066,7 +1147,7 @@ Closes #12.`,
       },
       now: () => new Date('2026-08-13T01:06:00.000Z'),
       store: {
-        getIssueTriageEvidence: () => null,
+        getIssueTriageEvidence: () => readyTriage,
         getWorkerSession: (_repository, _itemNumber, _role, scopeDigest) => {
           asked.push(scopeDigest)
           return scopeDigest === triageDigest ? 'triage-session' : null
@@ -1177,7 +1258,7 @@ describe('issue work pull request metadata', () => {
                 fingerprint: 'vitals-lab#/#mobile#lcp',
                 claim: 'Lab verification: run Unlighthouse on / with --mobile before and after the fix.',
               },
-        getIssueTriageEvidence: () => null,
+        getIssueTriageEvidence: () => readyTriage,
         getWorkerSession: (_repository, _number, _role, scopeDigest) =>
           scopeDigest === undefined ? null : 'triage-session',
         listOpenAgentPullRequests: () => [],
@@ -1691,7 +1772,7 @@ describe('issue work pull request diagram', () => {
       },
       now: () => new Date('2026-08-13T01:00:00.000Z'),
       store: {
-        getIssueTriageEvidence: () => null,
+        getIssueTriageEvidence: () => readyTriage,
         getWorkerSession: (_repository, _number, _role, scopeDigest) =>
           scopeDigest === undefined ? null : 'triage-session',
         listOpenAgentPullRequests: () => [],

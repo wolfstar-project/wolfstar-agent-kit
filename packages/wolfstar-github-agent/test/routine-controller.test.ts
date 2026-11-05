@@ -461,3 +461,58 @@ describe('routines of a repository with no Repository mapping', () => {
     }
   })
 })
+
+describe('dashboard Routine overrides', () => {
+  it('retires an inherited schedule when dashboard policy disables it without reading GitHub', async () => {
+    const store = openJournalStore(':memory:')
+    try {
+      await syncRepositoryRoutines(repositoryMapping(), {
+        github: githubReturning(ok({ _tag: 'Present', specSha: 'old', text: specText })),
+        now: at(),
+        store,
+      })
+      expect(store.listRoutines()).toHaveLength(1)
+      const outcome = await syncRepositoryRoutines(repositoryMapping(), {
+        github: {
+          readRoutineSpec: async () => {
+            throw new Error('must not read inherited spec')
+          },
+        },
+        now: at(),
+        store,
+        specOverride: { routines: [] },
+      })
+      expect(outcome._tag).toBe('Synced')
+      expect(store.listRoutines()).toEqual([])
+    } finally {
+      store.close()
+    }
+  })
+  it('uses the dashboard timezone, cron and mode instead of inherited schedules', async () => {
+    const store = openJournalStore(':memory:')
+    try {
+      const outcome = await syncRepositoryRoutines(repositoryMapping(), {
+        github: {
+          readRoutineSpec: async () => {
+            throw new Error('must not read inherited spec')
+          },
+        },
+        now: at(),
+        store,
+        specOverride: {
+          routines: [
+            { name: 'pr-triage', crons: ['0 10 * * 1'], timeZone: 'Europe/Rome', mode: 'report', enabled: false },
+          ],
+        },
+      })
+      expect(outcome).toMatchObject({
+        _tag: 'Synced',
+        routines: [
+          { name: 'pr-triage', crons: ['0 10 * * 1'], timeZone: 'Europe/Rome', mode: 'report', enabled: false },
+        ],
+      })
+    } finally {
+      store.close()
+    }
+  })
+})

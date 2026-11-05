@@ -122,7 +122,7 @@ describe('configuration boundary', () => {
       login: im-brundlefly
       token_path: /home/wolfstar/.config/wolfstar-github-agent/brundlefly-token
       name: Brundlefly
-      url: https://github.com/harlan-zw/brundlefly
+      url: https://github.com/wolfstar-project/brundlefly
       instructions: Use short, clear sentences.`,
     )
     const result = parseConfigText(text)
@@ -130,7 +130,7 @@ describe('configuration boundary', () => {
       login: 'im-brundlefly',
       tokenPath: '/home/wolfstar/.config/wolfstar-github-agent/brundlefly-token',
       name: 'Brundlefly',
-      url: 'https://github.com/harlan-zw/brundlefly',
+      url: 'https://github.com/wolfstar-project/brundlefly',
       instructions: 'Use short, clear sentences.',
     })
   })
@@ -709,6 +709,31 @@ agent:
         { path: '$.external_repositories[0].issues', message: 'Expected all or at least one positive issue number.' },
       ]),
     })
+  })
+
+  it('reads the GitHub App slug that names its bot', () => {
+    const result = parseConfigText(
+      configText.replace('app_id: 12345', 'app_id: 12345\n  app_slug: wolfstar-project-agent-abcd'),
+    )
+
+    expect(result._tag === 'Ok' && result.value.github.appSlug).toBe('wolfstar-project-agent-abcd')
+    const without = parseConfigText(configText)
+    expect(without._tag === 'Ok' && 'appSlug' in without.value.github).toBe(false)
+  })
+
+  it('rejects a GitHub App slug GitHub could not have issued', () => {
+    for (const slug of ['Wolfstar Agent', '-agent', 'agent[bot]']) {
+      const result = parseConfigText(configText.replace('app_id: 12345', `app_id: 12345\n  app_slug: '${slug}'`))
+      expect(result).toEqual({
+        _tag: 'Err',
+        error: expect.arrayContaining([
+          {
+            path: '$.github.app_slug',
+            message: 'Expected the GitHub App slug: lowercase letters, digits, and dashes.',
+          },
+        ]),
+      })
+    }
   })
 
   it('rejects an invalid GitHub App boundary', () => {

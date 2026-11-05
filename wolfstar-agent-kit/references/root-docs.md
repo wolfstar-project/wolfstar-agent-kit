@@ -25,8 +25,8 @@ Nothing else may sit at the root. A new root Markdown file is an error.
 | `CONTRIBUTING.md`                           | how a human contributes                                                 | humans                                               |
 | `LICENSE.md`, `SECURITY.md`, `CHANGELOG.md` | the usual                                                               | humans, tooling                                      |
 
-The installed Brundlefly `copywriting` Skill creates and audits `COPY.md`, the way
-the installed Brundlefly `glossary` Skill does for `GLOSSARY.md`. A site with
+The `copywriting` Skill creates and audits `COPY.md`, the way
+the `glossary` Skill does for `GLOSSARY.md`. A site with
 user-visible strings and no `COPY.md` is a gap; run its `init` workflow.
 
 `COPY.md` owns the words on screen. `DESIGN.md` owns the pixels and defers voice
@@ -144,7 +144,7 @@ Example header:
 ```markdown
 # EXECUTE: canonical Metrics on the Analytics band
 
-Status: in progress · 2026-09-04 · branch `feat/snapshot-sources`, PR [#807](https://github.com/wolfstar-project/nuxtseo.com/pull/807)
+Status: in progress · 2026-09-04 · branch `feat/snapshot-sources`, PR [#807](https://github.com/harlan-zw/nuxtseo.com/pull/807)
 
 **Next move:** Wolfstar reviews. The four metrics are on the branch.
 
@@ -193,7 +193,7 @@ Use [templates/AGENTS.md](../skills/pkg-conform/templates/AGENTS.md) to start on
 
 Nothing enforces this contract yet. Read it and apply it by hand.
 
-`AGENTS.md` is already in `eslint-plugin-harlanzw`'s `PROMPT_MARKERS` and
+`AGENTS.md` is already in `the prose lint plugin`'s `PROMPT_MARKERS` and
 `PROMPT_FILES`, so its 41 existing prompt and deslop rules fire on the file as
 soon as a repository stops ignoring it. Those rules catch wording. They do not
 check anything below.

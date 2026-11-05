@@ -57,7 +57,7 @@ function setup(findings: ReviewFinding[] = [finding]) {
     headSha: pullRequest.headSha,
     provider: 'codex',
     sessionId: 'review-session',
-    model: 'gpt-5.6-sol',
+    model: 'gpt-6-astra',
     agentVersion: '0.0.0',
     skillDigest: 'a'.repeat(64),
     startedAt: '2026-09-08T04:00:01.000Z',

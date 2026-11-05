@@ -36,7 +36,7 @@ A passing build does not prove server routes work. Request them.
 4. Search the server log: `rg -n 'is not defined|ReferenceError|NUXT_E' run.log`. Expect no hits.
 5. Stop the server.
 
-On 2026-10-06 the trial on a copy of wolfstar.rocks returned 200 for `/`, `/feed.xml`, `/feed.json`, `/api/projects`, and `/experimental`, 400 for an invalid tweet id, and 404 for an unknown path.
+On 2026-10-06 the trial on a copy of harlanzw.com returned 200 for `/`, `/feed.xml`, `/feed.json`, `/api/projects`, and `/experimental`, 400 for an invalid tweet id, and 404 for an unknown path.
 
 ## Browser Pass
 
@@ -51,7 +51,7 @@ Open these pages and check the console for errors:
 
 Take one screenshot per changed area. Keep screenshots in the session scratchpad.
 
-Before you blame the upgrade for a console error, load the same page on a build of the base branch. On wolfstar.rocks the 404 page logs `NUXT_E1005` twice on both Nuxt 4.5.2 and 4.6.0.
+Before you blame the upgrade for a console error, load the same page on a build of the base branch. On harlanzw.com the 404 page logs `NUXT_E1005` twice on both Nuxt 4.5.2 and 4.6.0.
 
 ## Pull Request
 

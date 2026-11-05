@@ -19,10 +19,10 @@ Current:
 - optional GitHub webhooks on their own port, which hint a reconciliation instead of carrying state
 - authenticated [H3](https://h3.dev) and [srvx](https://srvx.h3.dev) dashboard
 - safe merge conflict commits and pushes
-- three agent providers: [Claude](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://developers.openai.com/codex/sdk/), and [opencode](https://opencode.ai). Set `agent.provider` to `claude`, `codex`, or `opencode`
-- role-specific Claude profiles through the official Claude Agent SDK, with structured output and resumable Claude Code sessions
-- Codex uses `gpt-6.1-sol` for every role, with high reasoning for adversarial review and medium reasoning for other work
+- two agent providers: [Codex](https://developers.openai.com/codex/sdk/) and [opencode](https://opencode.ai). Set `agent.provider` to `codex` or `opencode`
+- role-specific Codex profiles: `gpt-6-astra` with high reasoning for adversarial review, `gpt-6-luna` with low reasoning for pull request triage, and `gpt-6.1-sol` with medium reasoning for other work
 - the opencode profile runs `zai-coding-plan/glm-5.3-flash` at the high reasoning effort for every role
+- opencode also runs [Cloudflare Workers AI](https://developers.cloudflare.com/workers-ai/) models, named `cloudflare-workers-ai/@cf/...` in the Agent selection. Put the API token and the account endpoint in `~/.config/opencode/opencode.json` under `providers.cloudflare-workers-ai.settings` as `apiKey` and `baseURL` (`https://api.cloudflare.com/client/v4/accounts/<account id>/ai/v1`), then provision the worker again
 - switch the Agent provider, model, and reasoning effort from the dashboard or the tray, with no restart
 - `Automatic` Agent selection picks the provider with capacity left, and keeps a reserve of each published window for your own terminal
 - opencode answers on the GLM Coding Plan with `zai-coding-plan/glm-5.3-flash`, and the service reads that plan's live quota
@@ -32,7 +32,7 @@ Current:
 - conflict fixes push only when the pull request head commit still matches
 - repair commits push only when the approved head commit still matches
 
-Still to build: PR conformance and deployment ownership.
+Still to build: Claude reviews, PR conformance, and deployment ownership.
 
 ## Run
 
@@ -47,8 +47,6 @@ chmod 600 /absolute/path/to/wolfstar-github-agent.yml
 chmod 600 /absolute/path/to/github-app-private-key.pem
 codex login          # Codex provider only
 codex login status   # Codex provider only
-claude auth login    # Claude provider only
-claude auth status   # Claude provider only
 opencode auth list   # opencode provider only
 wt --version
 pnpm --filter wolfstar-github-agent dashboard:build
@@ -72,6 +70,23 @@ The sync rejects missing files, unsafe symlinks, untrusted paths, and files that
 The dashboard denies framing. If another page must frame it, list its origin in `server.frame_ancestors`: HTTPS, or `http://localhost` with a port.
 
 Save the dashboard password in `dashboard-password` beside the config file. Use at least 32 bytes and restrict the file to mode `600`.
+
+After the first local start, open **Settings** to edit the configuration through form controls.
+Choose Automation, Routines, Agents, GitHub, Repositories, Connection, Account, or Advanced; unsaved edits stay in place when changing sections.
+Provider order uses move controls, and repository policies and advanced options open on demand.
+The dashboard reads and saves the file passed with `--config`, including a file named `config.yml`.
+Saving validates the complete service configuration and its referenced files, retains YAML comments and advanced settings, and rejects changes based on an outdated copy.
+Select **Restart after current work** to apply the saved file. A pinned Agent selection still overrides the default provider.
+Configuration editing requires private dashboard access; the public ingress cannot read or change the host file.
+Provider credentials remain in their existing local login or secret files.
+
+New configurations opt out of inherited repository schedules with `routines_from_repositories: false`. Use Routines to add `routine_overrides` per repository, with explicit names, cron expressions, time zones, modes and enabled state. An empty routine list disables that repository's schedules. Existing configurations that omit this setting retain repository schedules until changed.
+
+Repositories includes `repository_defaults` for discovered repositories, plus explicit per-repository policies that take precedence. A user repository trusts its actual owner and App bot by default. An organization trusts its App bot; configure the maintainers explicitly instead of inheriting another installation's account.
+
+Auto merge can use the Agent's published READY review alone (`auto_merge.review.mode: agent`), or additionally wait for exact reviewer logins (`reviewers`). Choose `require: all` or `any` and `allow_resolved_feedback`. Approvals must cover the current head. Resolved feedback requires current-head review threads; open selected-reviewer threads and native requests for changes block. Kodiak, Pullfrog, Greptile and PR Lens must be entered using the logins actually installed on the repository. Plain comments, diagrams and check summaries are not native approvals.
+
+Manage Passkeys under Account. The sign-out button above Settings opens a confirmation before ending the browser session. Issue cutoff uses the shared `UiDatePicker`, while the file keeps its YYYY-MM-DD value.
 
 Sign in with that password, then select `Manage Passkeys` and `Add Passkey`.
 Use `Sign in with Passkey` on later visits. The password remains available for recovery and machine clients.
@@ -364,7 +379,7 @@ GitHub is the durable Review workflow record. The newest confirmed canonical com
 
 Select `Automatic` in the Agent provider control to pick the provider by remaining capacity. It walks `agent.order` and takes the first provider whose window has more than its `agent.reserve_percent` left.
 
-Claude does not publish a subscription window to the service, so no Reserve applies to it. Codex publishes a seven-day window, read from `codex app-server`. opencode publishes the GLM Coding Plan windows, read from `https://api.z.ai/api/monitor/usage/quota/limit` with the key in `~/.config/opencode/opencode.json`. The plan publishes a five-hour window and a weekly one, and the fuller of the two decides, because a spent five-hour window stalls the fleet for hours whatever the week has left.
+Codex publishes a seven-day window, read from `codex app-server`. opencode publishes the GLM Coding Plan windows, read from `https://api.z.ai/api/monitor/usage/quota/limit` with the key in `~/.config/opencode/opencode.json`. The plan publishes a five-hour window and a weekly one, and the fuller of the two decides, because a spent five-hour window stalls the fleet for hours whatever the week has left.
 
 A provider that publishes no limit always passes. When no provider may spend, the service stops claiming new Agent Tasks. The System pane shows `Reserve reached`. Active agents and Publications finish.
 

@@ -108,7 +108,7 @@ See `references/site-package-json.md` for template, optional scripts, and rules.
 
 See `references/site-structure.md` for Nuxt 4 directory layout.
 
-See `references/site-configs.md` for nuxt.config.ts, tsconfig, Oxlint, Oxfmt, .npmrc, and .gitignore templates.
+See `references/site-configs.md` for nuxt.config.ts, tsconfig, eslint, .npmrc, .gitignore templates.
 
 ---
 
@@ -149,14 +149,14 @@ See `references/` for detailed templates:
 - `../../references/code-comments.md` - the comment contract for any code this skill writes
 - `references/pkg-package-json.md` - single repo and monorepo package.json templates
 - `references/catalogs.md` - pnpm workspace catalogs
-- `references/configs.md` - package config file templates (Oxlint, Oxfmt, Vitest, tsconfig, obuild)
+- `references/configs.md` - package config file templates (eslint, vitest, tsconfig, obuild)
 - `references/github-actions.md` - CI/CD workflows (Package only)
 
 **Site references** (when project type is Site):
 
 - `references/site-package-json.md` - package.json template, rules, optional scripts
 - `references/site-structure.md` - Nuxt 4 directory layout and conventions
-- `references/site-configs.md` - nuxt.config.ts, tsconfig, Oxlint, Oxfmt, npmrc, editorconfig, gitignore
+- `references/site-configs.md` - nuxt.config.ts, tsconfig, eslint, npmrc, editorconfig, gitignore
 - `references/site-github-actions.md` - the shared CI gate, deploy gating, self-hosted runner rules
 
 **Nuxt module references** (when `@nuxt/module-builder` detected):
@@ -179,7 +179,7 @@ See `references/` for detailed templates:
 3. [ ] `.github/workflows/test.yml` - action versions and Markdown path filtering
 4. [ ] `.editorconfig` - standard config
 5. [ ] `.gitignore` - standard patterns
-6. [ ] Oxlint and Oxfmt configs - `.oxlintrc.json` and `.oxfmtrc.json`
+6. [ ] ESLint config - antfu + `eslint-plugin-wolfstarzw`. Package: `eslint.config.mjs`; Site: `eslint.config.js`
 7. [ ] `tsconfig.json` - Package: `module: preserve`, `moduleDetection: force`; Site: `extends .nuxt/tsconfig.json`
 8. [ ] Git hooks - `lint-staged` in devDeps, `pre-commit` runs `lint-staged`
 9. [ ] `AGENTS.md` - router shape, 30 to 80 lines. No `CLAUDE.md`, no `CONTEXT.md`. See `../../references/root-docs.md`
@@ -201,7 +201,7 @@ See `references/` for detailed templates:
 13. [ ] `pnpm.overrides` - `vite` set to `^8.0.0`
 14. [ ] `nuxt.config.ts` - `future.compatibilityVersion: 5`, `compatibilityDate`, standard module stack
 15. [ ] `tsconfig.json` - just `{ "extends": "./.nuxt/tsconfig.json" }`
-16. [ ] `.oxlintrc.json` and `.oxfmtrc.json` - site build directories ignored
+16. [ ] `eslint.config.js` - antfu config with `node/prefer-global/process` and `node/prefer-global/buffer` off
 17. [ ] `.npmrc` - `shamefully-hoist=true`
 18. [ ] `.gitignore` - includes `.nuxt/`, `.output/`, `.data/`, `.wrangler/`, `wrangler.toml`
 19. [ ] `.editorconfig` - 2-space indent, LF, UTF-8, trim trailing whitespace (except `.md`)
@@ -215,7 +215,7 @@ When `@nuxt/module-builder` detected, also check (extends Package checklist):
 
 **Structure:** 17. [ ] `src/module.ts` - main module entry exists 18. [ ] `src/runtime/app/` - client/SSR code directory 19. [ ] `src/runtime/server/` - Nitro server code directory 20. [ ] `src/types.ts` - module options types 21. [ ] `playground/` - nuxt.config.ts, app.vue, pages/ 22. [ ] `test/fixtures/basic/` - nuxt.config.ts
 
-**Config:** 23. [ ] `pnpm-workspace.yaml` - add `nuxt:` catalog 24. [ ] `package.json` - nuxt module exports, peerDependencies 25. [ ] `tsconfig.json` - extends `.nuxt/tsconfig.json` 26. [ ] `vitest.config.ts` - use `defineVitestProject` for e2e 27. [ ] `build.config.ts` - nuxt externals including `#imports` 28. [ ] `.oxlintrc.json` and `.oxfmtrc.json` - ignore fixtures/playground 29. [ ] `.gitignore` - nuxt build dirs
+**Config:** 23. [ ] `pnpm-workspace.yaml` - add `nuxt:` catalog 24. [ ] `package.json` - nuxt module exports, peerDependencies 25. [ ] `tsconfig.json` - extends `.nuxt/tsconfig.json` 26. [ ] `vitest.config.ts` - use `defineVitestProject` for e2e 27. [ ] `build.config.ts` - nuxt externals including `#imports` 28. [ ] `eslint.config.mjs` - ignore fixtures/playground 29. [ ] `.gitignore` - nuxt build dirs
 
 **Scripts:** 30. [ ] `typecheck` - uses `nuxt typecheck` (not `tsc`) 31. [ ] `dev:prepare` - prepares module + playground 32. [ ] `prepare:fixtures` - prepares test fixtures 33. [ ] `.github/workflows/test.yml` - includes the prepare step and Markdown path filtering
 
@@ -233,7 +233,7 @@ Read for **all project types**:
 
 - `pnpm-workspace.yaml`, `package.json` — deps, catalogs, `packageManager`, `type`
 - `.github/workflows/*.yml` — action versions against v6 standards
-- `.oxlintrc.json`, `.oxfmtrc.json`, `tsconfig.json`, `.editorconfig`, `.gitignore`
+- `eslint.config.{js,mjs}`, `tsconfig.json`, `.editorconfig`, `.gitignore`
 
 **If Package**, also read: `build.config.ts`, `vitest.config.ts`, package `exports`, release scripts.
 

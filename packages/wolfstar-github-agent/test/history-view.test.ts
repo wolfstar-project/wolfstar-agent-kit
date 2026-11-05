@@ -25,7 +25,7 @@ function reviewAgent(overrides: Partial<ReviewAgent> = {}): ReviewAgent {
     headSha: 'abc1234',
     provider: 'codex',
     sessionId: 'session-1',
-    model: 'gpt-5.6-sol',
+    model: 'gpt-6-astra',
     agentVersion: '1.0.0',
     skillDigest: 'sha256:0',
     startedAt: '2026-08-20T11:00:00.000Z',
@@ -374,11 +374,11 @@ describe('reviewCommentUrl', () => {
 
 describe('skipped pull requests on History', () => {
   const skip = {
-    key: 'triage-skip:wolfstar-project/nuxt-seo#500@rev-z',
-    repository: 'wolfstar-project/nuxt-seo',
+    key: 'triage-skip:harlan-zw/nuxt-seo#500@rev-z',
+    repository: 'harlan-zw/nuxt-seo',
     pullRequestNumber: 500,
     title: 'docs: fix a typo',
-    url: 'https://github.com/wolfstar-project/nuxt-seo/pull/500',
+    url: 'https://github.com/harlan-zw/nuxt-seo/pull/500',
     decidedBy: 'model' as const,
     confidence: 0.95,
     reason: 'model: classification chose skip with confidence 0.95.',

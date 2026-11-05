@@ -93,22 +93,22 @@ describe('the bands against recorded Review runs', () => {
   // here would publish its pull request numbers and file tree in this public
   // repository, so the fixture names public repositories only.
   const publicRepositories = new Set([
-    'wolfstar-project/wolfstar-agent-kit',
-    'wolfstar-project/request-indexing',
+    'harlan-zw/harlan-agent-kit',
+    'harlan-zw/request-indexing',
     'nuxt/scripts',
-    'wolfstar-project/unlighthouse.dev',
-    'wolfstar-project/wolfstar-nuxt',
-    'wolfstar-project/nuxt-skew-protection',
+    'harlan-zw/unlighthouse.dev',
+    'harlan-zw/harlan-nuxt',
+    'harlan-zw/nuxt-skew-protection',
     'skilld-dev/skilld',
-    'wolfstar-project/mdream',
+    'harlan-zw/mdream',
     'nuxt-modules/robots',
-    'wolfstar-project/unhead.unjs.io',
-    'wolfstar-project/nuxt-schema-org',
-    'wolfstar-project/unlighthouse',
-    'wolfstar-project/nuxt-ai-ready',
-    'wolfstar-project/nuxt-seo',
-    'wolfstar-project/eslint-plugin-harlanzw',
-    'wolfstar-project/wolfstar.rocks',
+    'harlan-zw/unhead.unjs.io',
+    'harlan-zw/nuxt-schema-org',
+    'harlan-zw/unlighthouse',
+    'harlan-zw/nuxt-ai-ready',
+    'harlan-zw/nuxt-seo',
+    'harlan-zw/eslint-plugin-harlanzw',
+    'harlan-zw/harlanzw.com',
   ])
 
   it('records runs from public repositories only', () => {

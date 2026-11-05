@@ -97,15 +97,23 @@ export function createAutoMergeController(options: AutoMergeControllerOptions): 
       const publication = attempts.find((attempt) => attempt.id === decision.reviewRunId)?.gatePublication
       if (publication?._tag !== 'Published') return
 
+      const reviewerPolicy = options.policy._tag === 'Enabled' ? options.policy.reviewerPolicy : undefined
+      const reviewerPolicyIdentity = JSON.stringify(reviewerPolicy)
       const handoff = await options.merger.merge(
         {
           repository: context.repository,
           number: subject.number,
           expectedHeadSha: decision.headSha,
           method: decision.method,
+          reviewerPolicy,
           authorize: (autoMerge) => {
             const current = currentContext(autoMerge)
-            if (current === null) return err('Auto merge lost its current authority before the GitHub write.')
+            if (
+              current === null ||
+              reviewerPolicyIdentity !==
+                JSON.stringify(options.policy._tag === 'Enabled' ? options.policy.reviewerPolicy : undefined)
+            )
+              return err('Auto merge lost its current authority before the GitHub write.')
             const currentAttempts = options.store.listReviewRuns(repository.github, subject.number)
             const currentDecision = autoMergeDecision({
               attempts: currentAttempts,

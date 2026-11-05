@@ -162,7 +162,7 @@ function reviewAgent(overrides: Partial<ReviewAgent> = {}): ReviewAgent {
     headSha: 'abc1234',
     provider: 'codex',
     sessionId: 'session-1',
-    model: 'gpt-5.6-sol',
+    model: 'gpt-6-astra',
     agentVersion: '1.0.0',
     skillDigest: 'sha256:0',
     startedAt: '2026-08-14T11:00:00.000Z',
@@ -338,7 +338,7 @@ describe('history outcome visibility', () => {
 
 describe('repositoryName', () => {
   it('drops the owner and keeps a name that has no owner', () => {
-    expect(repositoryName('wolfstar-project/nuxt-seo')).toBe('nuxt-seo')
+    expect(repositoryName('harlan-zw/nuxt-seo')).toBe('nuxt-seo')
     expect(repositoryName('nuxt-seo')).toBe('nuxt-seo')
   })
 })

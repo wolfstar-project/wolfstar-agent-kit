@@ -421,7 +421,7 @@ describe('conflict worker', () => {
     expect(prompt).toContain('Base branch: feat/parent at current-base')
     expect(prompt).toContain('- src/a.ts\n- src/b.vue')
     expect(prompt).toContain(
-      'Check budget: run eslint on the conflicted files, vitest on the test files that import them, and git diff --check.',
+      'Check budget: run oxlint on the conflicted files, vitest on the test files that import them, and git diff --check.',
     )
     expect(prompt).toContain('Do not run the full test suite, the full typecheck, or a build.')
     expect(prompt).toContain('Do not install or update the toolchain.')

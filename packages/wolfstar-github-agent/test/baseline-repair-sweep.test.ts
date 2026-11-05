@@ -362,7 +362,7 @@ describe('obsolete Baseline repair attention', () => {
           headSha: fixture.review.pullRequest.headSha,
           provider: 'codex',
           sessionId: 'saved-session',
-          model: 'gpt-5.6-sol',
+          model: 'gpt-6-astra',
           agentVersion: '0.0.0',
           skillDigest: 'c'.repeat(64),
           startedAt: at(2),

@@ -89,7 +89,7 @@ On the service host, pass `--url http://127.0.0.1:3210`. That host may not resol
 
 For daily check-ins, apply [daily-checkin](../../daily-checkin/SKILL.md). It owns collection, interpretation, storage, and reporting.
 
-A `daily-checkin` Routine runs the central daily-checkin Skill against the site's `@harlan-zw/nuxt-checkin` module. Sites declare checks and prompt items in module configuration. They do not need `.claude/skills/daily-checkin/SKILL.md`. Credentials remain in the repository environment or private credential files.
+A `daily-checkin` Routine runs the central daily-checkin Skill against the site's `@wolfstar-project/nuxt-checkin` module. Sites declare checks and prompt items in module configuration. They do not need `.claude/skills/daily-checkin/SKILL.md`. Credentials remain in the repository environment or private credential files.
 
 Each site keeps one persistent daily report issue. Update its body and title with the latest settled report.
 Use `[CLEAR]`, `[ACTION NEEDED]`, or `[BLOCKED]` before `Daily check-in: OWNER/REPOSITORY`.
@@ -120,7 +120,7 @@ A pinned Agent selection overrides it. Wolfstar switches the Agent provider, mod
 
 Automatic selection picks the Agent provider by remaining capacity. It walks `order` and takes the first provider whose window has more than its own Reserve left. `order` defaults to opencode first, because opencode answers on the GLM Coding Plan. Codex publishes a seven-day window. opencode publishes the GLM Coding Plan five-hour and weekly windows, and the fuller window decides. When no provider may spend, the service stops claiming new agent Tasks and shows `Reserve reached` in the System pane. Active agents and Publications finish. Reaching a Reserve is normal state, not an Incident.
 
-For `codex`, use `gpt-6.1-sol` with high reasoning for adversarial review. Use `gpt-6.1-sol` with medium reasoning for Repair, conflict resolution, issue triage, issue work, and Baseline repair. Pull request triage needs no Agent: Classification answers it through the `advocaat` package over the Cloudflare AI endpoint.
+For `codex`, use `gpt-6-astra` with high reasoning for adversarial review. Use `gpt-6.1-sol` with medium reasoning for Repair, conflict resolution, issue triage, issue work, and Baseline repair. Pull request triage needs no Agent: Classification answers it through the `advocaat` package over the Cloudflare AI endpoint.
 
 For `opencode`, use `zai-coding-plan/glm-5.3-flash` at the `high` Reasoning effort for every role. `agent.reasoning_effort.<provider>.<role>` in the configuration replaces one role's default, for example `agent.reasoning_effort.opencode.review_fix: medium`. A pinned Agent selection with an explicit Reasoning effort still wins over the file.
 

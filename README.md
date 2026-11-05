@@ -6,7 +6,7 @@
 
 <h1>wolfstar-agent-kit</h1>
 
-> 🤖 Wolfstar Project's agent kit for Nuxt and TypeScript work. 35 Skills, 10 hooks, and a service that works on [GitHub](https://github.com) repositories autonomously.
+> 🤖 Wolfstar Project's agent kit for Nuxt and TypeScript work. 40 Skills, 8 hooks, and a service that works on [GitHub](https://github.com) repositories autonomously.
 
 It installs as a [Claude Code](https://claude.com/code) plugin. Codex reads the
 same directory and picks up the Skills.
@@ -24,13 +24,13 @@ Maintained by [Wolfstar Project](https://github.com/wolfstar-project). Contact: 
 - ✍️ **Writing**: PRs, changelogs, tweets. Plus a pass that strips the AI tells back out
 - 📋 **Triage**: Issues, the PR backlog, [Sentry](https://sentry.io), and the inbox
 - 🪝 **Hooks**: [pnpm](https://pnpm.io) only. Lint on save. Checks before every push
-- 🤖 **GitHub agent**: A local service that opens the work on issues and PRs while I do something else
+- 🤖 **GitHub agent**: A local service that reads and validates issues, implements fixes, and reviews PRs while I do something else
 
 ## How I use it
 
 My main checkout stays clean, I never work in it. Every task gets its own worktree with [worktrunk](https://github.com/max-sixty/worktrunk). The agent works in there and it can't commit or push until [`check`](./bin/check) passes, so lint, typecheck and tests. Then the [`pr` Skill](./wolfstar-agent-kit/skills/pr/SKILL.md) opens the PR. The [hooks](./wolfstar-agent-kit/hooks) block the command if any of that gets skipped, which is good, because I skip things when I'm tired.
 
-The other part runs on its own. [The service](./packages/wolfstar-github-agent/README.md) checks configured repositories, finds an issue or pull request that has been waiting, and gives it to [Claude](https://docs.anthropic.com/en/docs/claude-code), [Codex](https://developers.openai.com/codex/sdk/), or [opencode](https://opencode.ai). It reviews the change but [can't touch the code](./wolfstar-agent-kit/skills/adversarial-review/SKILL.md). If it finds something real, a second agent does the fix, then the whole thing gets reviewed again.
+The other part runs on its own. [The service](./packages/wolfstar-github-agent/README.md) checks configured repositories for issues and pull requests that have been waiting. It reads each issue and validates it against the code before deciding whether it is ready to implement or needs more information or a spec. Once ready, and approved when required, the agent implements the fix, verifies it, and opens a pull request. Pull requests go through a [read-only review](./wolfstar-agent-kit/skills/adversarial-review/SKILL.md). If the reviewer finds something real, a second agent does the fix, then the whole thing gets reviewed again.
 
 The bit I still have to do is read all of it. That's the slow part, not the agents. So I make them show me something first: a test that was failing and now passes, a typecheck, or for frontend work [the page running in a browser](./wolfstar-agent-kit/skills/nuxt-frontend-review/SKILL.md). [Small stuff like dependency bumps](./wolfstar-agent-kit/references/auto-merge.md) merges without me. If there's a real decision in it, it waits.
 
@@ -101,8 +101,9 @@ Start a new Codex thread after a reinstall, otherwise the new Skills stay unload
 ## Skills
 
 Personal Skills live in [`wolfstar-agent-kit/skills/`](./wolfstar-agent-kit/skills).
-Portable Skills come from [Brundlefly](https://github.com/harlan-zw/brundlefly), [Ripast](https://github.com/harlan-zw/ripast), and Aref Mozafari's review and pull request Skills.
-The [Ripast skill](https://github.com/harlan-zw/ripast/blob/main/packages/cli/skills/ripast/SKILL.md) lives in Ripast's repository.
+`pr-evidence`, `review-findings`, `review-replies`, and the merge cleanup in `take-ownership` adapt Aref Mozafari's MIT-licensed [pr-evidence](https://github.com/ArefMozafari/pr-evidence), [review-findings](https://github.com/ArefMozafari/review-findings), [review-replies](https://github.com/ArefMozafari/review-replies), and [post-merge-cleanup](https://github.com/ArefMozafari/post-merge-cleanup).
+Portable Skills come from [Brundlefly](https://github.com/harlan-zw/brundlefly) and [Ripast](https://github.com/wolfstar-project/ripast).
+The [Ripast skill](https://github.com/wolfstar-project/ripast/blob/main/packages/cli/skills/ripast/SKILL.md) lives in Ripast's repository.
 The declaration pins its source commit.
 Run `pnpm sync:skills` to install the declared Skills through skilld.
 Use a skilld CLI that supports `skilld sync`.
@@ -124,16 +125,6 @@ Service updates run the same restore before starting workers on either host.
 | `pull-request-summary` | Check PR description text before personal `pr` publishes it.                                                 |
 | `glossary`             | Create or audit GLOSSARY.md for names and vocabulary drift.                                                  |
 | `copywriting`          | Create or audit COPY.md for voice and canonical wording.                                                     |
-
-| Aref Mozafari Skill                                                        | Use                                                                                 |
-| -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| [`pr-evidence`](https://github.com/ArefMozafari/pr-evidence)               | Show a pull request's change with before and after screenshots or the one snippet.  |
-| [`post-merge-cleanup`](https://github.com/ArefMozafari/post-merge-cleanup) | Confirm a merge from the remote, then retire its branch, worktree, and stale notes. |
-| [`review-replies`](https://github.com/ArefMozafari/review-replies)         | Answer review comments on your own pull request one thread at a time.               |
-| [`review-findings`](https://github.com/ArefMozafari/review-findings)       | Report every review finding in one fixed shape with a comment ready to paste.       |
-
-Personal `pr` keeps its own description template. `pr-evidence` adds the screenshots and snippet a reviewer needs.
-`post-merge-cleanup` uses raw `git worktree` commands. In a kit checkout, run its removal steps through `wt` instead.
 
 [`skilld.json`](./.skills/skilld.json) declares exact sources, Agent targets, and required Skills.
 Personal `pr` calls Brundlefly `pull-request-summary` for its description gate.
@@ -163,11 +154,16 @@ The personal kit does not bundle this Skill in its marketplace package. Run `pnp
 | [`pkg-conform`](./wolfstar-agent-kit/skills/pkg-conform/SKILL.md)                                               | Conform or scaffold a TypeScript package or Nuxt module                                                        |
 | [`plan-ceo`](./wolfstar-agent-kit/skills/plan-ceo/SKILL.md)                                                     | Challenge scope and strategy before anyone writes code                                                         |
 | [`pr`](./wolfstar-agent-kit/skills/pr/SKILL.md)                                                                 | Create or update a pull request from current work                                                              |
+| [`pr-evidence`](./wolfstar-agent-kit/skills/pr-evidence/SKILL.md)                                               | Show before and after screenshots or a focused snippet, with optional manual testing instructions              |
 | [`pr-lens`](./wolfstar-agent-kit/skills/pr-lens/SKILL.md)                                                       | Draw a change as animated architecture and data-flow diagrams with [PR Lens](https://prlens.dev)               |
 | [`pr-triage`](./wolfstar-agent-kit/skills/pr-triage/SKILL.md)                                                   | Repair, rank, and order the owned PR backlog                                                                   |
+| [`close-off`](./wolfstar-agent-kit/skills/close-off/SKILL.md)                                                   | Finish loose ends, verify delivery, clean task-owned Git state                                                 |
+| [`wolfstar-announcements`](./wolfstar-agent-kit/skills/wolfstar-announcements/SKILL.md)                         | Write release, stage, and hotfix announcements for Discord and the website                                     |
 | [`daily-checkin`](./wolfstar-agent-kit/skills/daily-checkin/SKILL.md)                                           | Run nuxt-checkin and interpret site prompt items                                                               |
 | [`dependency-updates`](./wolfstar-agent-kit/skills/dependency-updates/SKILL.md)                                 | Attempt weekly dependency updates, including majors, in one pull request                                       |
 | [`ci-review`](./wolfstar-agent-kit/skills/ci-review/SKILL.md)                                                   | Review CI warnings and errors, then propose verified repairs                                                   |
+| [`review-findings`](./wolfstar-agent-kit/skills/review-findings/SKILL.md)                                       | Review a diff inline and report findings with comments ready to paste                                          |
+| [`review-replies`](./wolfstar-agent-kit/skills/review-replies/SKILL.md)                                         | Answer human review threads on your own PR one at a time                                                       |
 | [`seo-review`](./wolfstar-agent-kit/skills/seo-review/SKILL.md)                                                 | Triage a Site's NuxtSEO actions and repair the ones the code owns                                              |
 | [`vitals-review`](./wolfstar-agent-kit/skills/vitals-review/SKILL.md)                                           | File a Site's poor field vitals and persistent lab drops from NuxtSEO, then repair them                        |
 | [`sentry-checkin`](./wolfstar-agent-kit/skills/sentry-checkin/SKILL.md)                                         | Triage open Sentry issues and repair them with verified PRs                                                    |
@@ -222,7 +218,7 @@ pnpm service:status    # Show the service state
 pnpm service:update    # Rebuild and restart
 ```
 
-[`packages/octorun`](./packages/octorun/README.md) consumes the standalone [Octorun](https://github.com/harlan-zw/octorun) runtime for this repository.
+[`packages/octorun`](./packages/octorun/README.md) consumes the standalone [Octorun](https://github.com/wolfstar-project/octorun) runtime for this repository.
 It runs automatic change summaries and explicit `@octorun review` commands with the existing App and Claude subscription.
 Run `pnpm octorun doctor`, then `pnpm octorun serve` for continuous processing.
 

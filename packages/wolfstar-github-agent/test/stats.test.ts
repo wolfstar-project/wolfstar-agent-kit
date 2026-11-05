@@ -499,7 +499,7 @@ describe('journal Stats evidence', () => {
       headSha: task.pullRequest.headSha,
       provider: 'codex' as const,
       sessionId: 'stats-session',
-      model: 'gpt-5.6-sol',
+      model: 'gpt-6-astra',
       agentVersion: '1.0.0',
       skillDigest: 'f'.repeat(64),
       startedAt: '2026-08-13T01:01:00.000Z',

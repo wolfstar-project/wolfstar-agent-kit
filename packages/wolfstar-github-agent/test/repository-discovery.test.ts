@@ -1,4 +1,5 @@
 import type { InstalledRepository } from '../src/repository-discovery.ts'
+import { agentActorLogin } from '../src/review-comment.ts'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -9,6 +10,7 @@ import {
   discoverLocalCheckouts,
   installedWithoutCheckout,
   isAllowedRepository,
+  readGitHubAppSlug,
 } from '../src/repository-discovery.ts'
 import { canRepairPullRequestHead } from '../src/repository-policy.ts'
 import { pullRequestItem, repositoryMapping } from './fixtures.ts'
@@ -380,4 +382,113 @@ describe('repository discovery', () => {
       ).toBe(true)
     },
   )
+})
+
+describe('the App bot as a writable pull request author', () => {
+  const installed = [
+    {
+      github: 'wolfstar-project/example',
+      defaultBranch: 'main',
+      archived: false,
+      fork: false,
+      topics: [],
+      authentication: { _tag: 'App' as const, installationId: 1 },
+      owner: { login: 'wolfstar-project', type: 'Organization' as const },
+    },
+  ] as unknown as Parameters<typeof buildRepositoryMappings>[0]
+  const checkouts = [{ github: 'wolfstar-project/example', checkout: '/home/agent/pkg/example' }]
+
+  it('trusts only the actual App bot by default for an organization', () => {
+    const named = buildRepositoryMappings(
+      installed,
+      checkouts,
+      [],
+      ['wolfstar-project'],
+      undefined,
+      agentActorLogin('wolfstar-project-agent-abcd'),
+    )
+    const fallback = buildRepositoryMappings(installed, checkouts, [], ['wolfstar-project'])
+
+    expect(named[0]?.writablePullRequestAuthors).toEqual(['wolfstar-project-agent-abcd[bot]'])
+    expect(fallback[0]?.writablePullRequestAuthors).toEqual(['wolfstar-github-agent[bot]'])
+  })
+})
+
+describe('agentActorLogin', () => {
+  it('names the bot after the App slug, and keeps the historical bot without one', () => {
+    expect(agentActorLogin('Wolfstar-Project-Agent-ABCD')).toBe('wolfstar-project-agent-abcd[bot]')
+    expect(agentActorLogin(undefined)).toBe('wolfstar-github-agent[bot]')
+  })
+})
+
+describe('readGitHubAppSlug', () => {
+  const options = { appId: 1, allowedOwners: ['wolfstar-project'], privateKey: 'key' }
+
+  it('returns the slug GitHub reports, lower cased', async () => {
+    expect(await readGitHubAppSlug(options, async () => 'Wolfstar-GitHub-Agent')).toBe('wolfstar-github-agent')
+  })
+
+  it('returns undefined when GitHub cannot answer, so the configured slug stays', async () => {
+    expect(
+      await readGitHubAppSlug(options, async () => {
+        throw new Error('rate limited')
+      }),
+    ).toBeUndefined()
+  })
+
+  it('refuses an answer that is not a slug', async () => {
+    for (const answer of ['', 'agent[bot]', 'two words', '-agent']) {
+      expect(await readGitHubAppSlug(options, async () => answer)).toBeUndefined()
+    }
+  })
+})
+
+it('never inherits another installation owner as a trusted author', () => {
+  const result = buildRepositoryMappings(
+    [
+      {
+        github: 'alice/example',
+        defaultBranch: 'main',
+        archived: false,
+        fork: false,
+        topics: [],
+        authentication: 'app',
+        owner: { login: 'alice', type: 'User' },
+      },
+    ],
+    [{ github: 'alice/example', checkout: '/repo' }],
+    [],
+    ['alice'],
+    undefined,
+    'my-agent[bot]',
+  )
+  expect(result[0]?.writablePullRequestAuthors).toEqual(['alice', 'my-agent[bot]'])
+})
+
+it('applies dashboard defaults and gives an explicit repository policy precedence', () => {
+  const installed: InstalledRepository[] = [
+    {
+      github: 'alice/example',
+      defaultBranch: 'main',
+      archived: false,
+      fork: false,
+      topics: [],
+      authentication: 'app',
+      owner: { login: 'alice', type: 'User' },
+    },
+  ]
+  const checkouts = [{ github: 'alice/example', checkout: '/repo' }]
+  const defaults = { writablePullRequestAuthors: ['maintainer'], issueWork: false, enabled: false }
+  expect(
+    buildRepositoryMappings(installed, checkouts, [], ['alice'], undefined, 'agent[bot]', defaults)[0],
+  ).toMatchObject(defaults)
+  const explicit = repositoryMapping({
+    github: 'alice/example',
+    enabled: true,
+    writablePullRequestAuthors: ['explicit'],
+    issueWork: true,
+  })
+  expect(
+    buildRepositoryMappings(installed, checkouts, [explicit], ['alice'], undefined, 'agent[bot]', defaults)[0],
+  ).toMatchObject({ enabled: true, writablePullRequestAuthors: ['explicit'], issueWork: true })
 })

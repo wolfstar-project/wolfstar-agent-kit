@@ -180,7 +180,7 @@ describe('building the scan prompt', () => {
         configuredProvider: 'opencode',
         maximumActiveAgents: 1,
         providers: {
-          claude: { name: 'claude', runTurn: provider.runTurn },
+          claude: { name: 'claude', async *runTurn() {} },
           codex: provider,
           opencode: {
             name: 'opencode',

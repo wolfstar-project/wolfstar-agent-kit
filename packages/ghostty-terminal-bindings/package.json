@@ -16,7 +16,7 @@
     "build:source": "node scripts/build.ts",
     "typecheck": "tsc --noEmit",
     "test:run": "vitest run",
-    "lint": "oxlint src scripts test"
+    "lint": "eslint src scripts test"
   },
   "dependencies": {
     "ghostty-web": "catalog:"

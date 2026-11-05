@@ -1,5 +1,6 @@
 import type { AgentActivityLog } from './agent-activity.ts'
 import type { BrowserAuth } from './browser-auth.ts'
+import type { ConfigurationEditor } from './config-editor.ts'
 import type { DesktopBroker } from './desktop-broker.ts'
 import type { EmergencyProxy } from './emergency-isolation.ts'
 import type { AgentHost, AgentSlotLimits, HostAgentPool, HostCapacity } from './host-capacity.ts'
@@ -27,6 +28,7 @@ import {
   parseDesktopWorktree,
 } from './desktop-protocol.ts'
 import { registerEmergencyRoutes } from './emergency-routes.ts'
+import { registerConfigurationRoutes } from './configuration-routes.ts'
 import { parseAgentSlots } from './host-capacity.ts'
 import { parseIncidentResolutionRequest } from './incident-resolution.ts'
 import { latestDelivery } from './latest-delivery.ts'
@@ -36,6 +38,9 @@ import { registerSessionRoutes } from './session-routes.ts'
 import { parseStatsRange } from './stats.ts'
 
 export interface AgentAppOptions {
+  configuration?: ConfigurationEditor
+  /** The repositories the GitHub App can see, for the Settings repository pickers. */
+  installedRepositories?: () => string[]
   emergencyIsolation?: EmergencyProxy
   pullRequestDiff?: ReturnType<typeof createPullRequestDiffSource>
   repairRecovery?: (request: RepairRecoveryRequest) => Promise<Result<RepairRecoveryResponse, string>>
@@ -105,7 +110,7 @@ export interface AgentAppOptions {
 }
 
 /** Prerendered dashboard routes below `/`, each with its own payload. */
-const DASHBOARD_PAGES = ['sessions', 'history', 'watching', 'routines', 'flow', 'stats'] as const
+const DASHBOARD_PAGES = ['sessions', 'history', 'watching', 'routines', 'flow', 'stats', 'settings'] as const
 
 const securityHeaders = {
   'cache-control': 'no-store',
@@ -491,6 +496,8 @@ export function createAgentApp(options: AgentAppOptions): H3 {
       const publicIngress = event.req.headers.get('x-wolfstar-agent-ingress') === 'public'
       const authority = publicIngress ? options.browserAuth?.public : options.browserAuth?.private
       const path = new URL(event.req.url).pathname
+      if (publicIngress && (path === '/api/configuration' || path === '/api/installed-repositories'))
+        throw createError({ status: 403, message: 'Host configuration requires private dashboard access.' })
       if (authority && path.startsWith('/api/browser-auth/')) return
       const browserShell =
         options.browserAuth &&
@@ -562,6 +569,9 @@ export function createAgentApp(options: AgentAppOptions): H3 {
   })
 
   app.get('/api/state', () => dashboardSnapshot(options))
+
+  if (options.configuration !== undefined) registerConfigurationRoutes(app, options.configuration)
+  app.get('/api/installed-repositories', () => ({ repositories: options.installedRepositories?.() ?? [] }))
 
   app.get('/api/tasks', () => ({
     tasks: options.store.listTasks(),

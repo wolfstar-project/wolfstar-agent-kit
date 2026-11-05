@@ -27,7 +27,7 @@ pnpm release patch|minor|major  # Bump version, tag, push (syncs plugin.json, ma
 **Hook lifecycle** (`wolfstar-agent-kit/hooks/`, wired in `.claude-plugin/plugin.json`):
 
 - `SessionStart`: detect project type (Nuxt module/app, UnJS, Vue, Node), show git info, warn if not pnpm
-- `PreToolUse` (Bash): block npm/yarn/npx (`pnpm-only.sh`); block raw `git worktree` mutation and `.claude/worktrees` paths (`wt-only.sh`); keep email read only (`himalaya-read-only.sh`); require the PR skill (`pr-skill-only.sh`); on `git commit` inject the commit-format rule (`pre-commit-push.sh`)
+- `PreToolUse` (Bash): block npm/yarn/npx (`pnpm-only.sh`); block raw `git worktree` mutation and `.claude/worktrees` paths (`wt-only.sh`); keep email read only (`himalaya-read-only.sh`); require the PR skill (`pr-skill-only.sh`); block work on an already-merged branch (`merged-branch-guard.sh`); on commit/push/PR run `check` and block on failure (`pre-commit-push.sh`)
 - `PostToolUse` (Write|Edit): Oxlint autofix and Oxfmt on the edited file
 - `PostToolUse` (Bash): append a `command-not-found.sh` install or BSD/GNU flag suggestion to the shell output, once per session per command
 
@@ -40,6 +40,8 @@ pnpm release patch|minor|major  # Bump version, tag, push (syncs plugin.json, ma
 **Workflow** (`.github/workflows/test.yml`): select jobs from changed paths with `scripts/ci-changes.ts`. Executable Markdown runs tests. Code runs lint, typecheck, build, and tests. README, changelog, license, and plan prose skip these jobs. Keep path selection at the job level so required checks report. Use GitHub hosted runners. The test job installs a pinned `wt` for real worktree workflows.
 
 **Two service checkouts**: Hogwild runs the controller from its own clone, and the desktop runs `wolfstar-desktop-agent` from a clone of the same path on the desktop. Both halves of an offloaded turn must speak the same shape, so `pnpm service:hogwild:update` moves both and `DESKTOP_PROTOCOL` in `desktop-protocol.ts` guards the gap. A desktop reporting an older protocol is stood down, and the work stays on Hogwild. Raise that constant whenever the turn or report shape changes.
+
+**Cloudflare Worker** (`packages/wolfstar-github-edge/`): a relay in front of the controller, which runs on Hogwild. It holds no Agent and no state beyond a Queue and an R2 bucket. The Worker checks the webhook signature with `GITHUB_WEBHOOK_SECRET` and queues the delivery, so a restarting controller loses none. The queue consumer forwards it to `CONTROLLER_URL/webhook`, and the controller verifies the signature again. Every other path is proxied to the same controller behind Cloudflare Access, with the public Origin translated to the controller's. Agent sessions, provider logins and the journal live on the controller's host, never on the Worker.
 
 **Worktrees**: `wt` (worktrunk) owns every worktree, at `<parent>/<repo>.<branch-slug>`. Full rules in `wolfstar-agent-kit/references/worktree-isolation.md`.
 

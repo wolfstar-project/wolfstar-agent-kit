@@ -4,9 +4,9 @@ import { terminalProjectGroups } from '../dashboard/app/utils/terminal-project-g
 
 const now = Date.parse('2026-10-17T00:00:00Z')
 const projects: TerminalProject[] = [
-  { id: 'package', name: 'Package', path: '/home/wolfstar/pkg/package' },
-  { id: 'site', name: 'Site', path: '/home/wolfstar/sites/site' },
-  { id: 'unused', name: 'Unused', path: '/home/wolfstar/pkg/unused' },
+  { id: 'package', name: 'Package', path: '/home/harlan/pkg/package' },
+  { id: 'site', name: 'Site', path: '/home/harlan/sites/site' },
+  { id: 'unused', name: 'Unused', path: '/home/harlan/pkg/unused' },
   { id: 'other', name: 'Other', path: '/work/other' },
 ]
 const sessions = [{ projectId: 'package', createdAt: '2026-10-16T00:00:00Z' }] as TerminalSession[]
@@ -48,7 +48,7 @@ it('bounds recent projects and ignores malformed stored visits', () => {
   const inventory = Array.from({ length: 12 }, (_, index) => ({
     id: `p${index}`,
     name: `P${index}`,
-    path: `/home/wolfstar/pkg/p${index}`,
+    path: `/home/harlan/pkg/p${index}`,
   }))
   const visited = Object.fromEntries(inventory.map((project, index) => [project.id, now - index * 1000]))
   const result = terminalProjectGroups({ projects: inventory, sessions: [], visited, now, all: false })
@@ -72,7 +72,7 @@ it('keeps older running projects visible when recent visits fill the short list'
   const inventory = Array.from({ length: 10 }, (_, index) => ({
     id: `p${index}`,
     name: `P${index}`,
-    path: `/home/wolfstar/pkg/p${index}`,
+    path: `/home/harlan/pkg/p${index}`,
   }))
   const visited = Object.fromEntries(inventory.slice(0, 8).map((project) => [project.id, now]))
   const running = [{ projectId: 'p9', createdAt: '2025-01-01T00:00:00Z', state: 'Running' }] as TerminalSession[]

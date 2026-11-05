@@ -56,9 +56,9 @@ The desktop zsh aliases `hogwild`, `hogwild-lan`, `hogwild-admin`, `hogwild-admi
 
 Public routes go internet, Cloudflare tunnel, Caddy `:8080`, then the loopback port above:
 
-- `hogwild.example.com`, the status site
-- `dragon.wolfstar.rocks`, the deck
-- `agent.wolfstar.rocks`, the Agent dashboard behind Basic auth; `/webhook` reaches the signed webhook listener
+- `hogwild.harlanzw.com`, the status site
+- `dragon.harlanzw.com`, the deck
+- `agent.harlanzw.com`, the Agent dashboard behind Basic auth; `/webhook` reaches the signed webhook listener
 
 ## Repos and config that own each part
 
@@ -68,9 +68,9 @@ Public routes go internet, Cloudflare tunnel, Caddy `:8080`, then the loopback p
 | Agent context, worktrunk, env files                         | same repo, `scripts/`                                                      | same                                                                                        | `pnpm sync:context:hogwild`, `pnpm service:hogwild:sync-env`, `pnpm service:hogwild:sync-worktrunk` |
 | Agent config                                                | not in git                                                                 | `hogwild:~/.config/wolfstar-github-agent/config.yml`                                        | edit, then request durable Restart                                                                  |
 | Agent state                                                 | not in git                                                                 | `hogwild:~/.local/share/wolfstar-github-agent/state.sqlite`, `journal.sqlite`, `worktrees/` | back up before a migration                                                                          |
-| Runner supervisor, runners.conf, Dockerfile, host hardening | `wolfstar-project/hogwild-gh-runner` (private) `github-runner/`            | `~/pkg/hogwild-gh-runner`                                                                   | install steps in its README                                                                         |
+| Runner supervisor, runners.conf, Dockerfile, host hardening | `harlan-zw/hogwild-gh-runner` (private) `github-runner/`                   | `~/pkg/hogwild-gh-runner`                                                                   | install steps in its README                                                                         |
 | Host security layout, Docker rules, pending items           | same repo, `hogwild/`                                                      | same                                                                                        | `hogwild/README.md`                                                                                 |
-| Status site                                                 | `wolfstar-project/hogwild.example.com`                                     | `~/pkg/hogwild.example.com`                                                                 | GitHub Actions deploy job to `hogwild-deploy`                                                       |
+| Status site                                                 | `harlan-zw/hogwild.harlanzw.com`                                           | `~/pkg/hogwild.harlanzw.com`                                                                | GitHub Actions deploy job to `hogwild-deploy`                                                       |
 | Caddy routes                                                | `scripts/30-agent.caddy` for the agent route; others live only on the host |                                                                                             | `sudo systemctl reload caddy`                                                                       |
 
 A deploy reads `~/.config/wolfstar-github-agent/config.yml` with the new revision before it restarts anything. If the new revision rejects the file, the deploy stops and the running revision keeps serving. Run the same check by hand with `wolfstar-github-agent check-config --config <path>`.

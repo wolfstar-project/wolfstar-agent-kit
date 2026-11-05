@@ -446,7 +446,7 @@ export function createReviewFixWorker(options: ReviewFixWorkerOptions): ReviewFi
             taskKind: 'review_fix',
             pullRequestNumber: task.pullRequestNumber,
             pullRequestTitle: turn.value.value.commitMessage,
-            pullRequestBody: `${task.pickup === undefined ? `Review of #${task.pullRequestNumber} finished after merge.` : `Repairs a selected Review finding from #${task.pullRequestNumber}.`}\n\n${turn.value.value.summary}\n\n> 🤖 AI disclosure: [Wolfstar Agent Kit](https://github.com/wolfstar-project/wolfstar-agent-kit) modified this description. [My AI open-source policy](https://harlanzw.com/blog/ai-in-open-source).`,
+            pullRequestBody: `${task.pickup === undefined ? `Review of #${task.pullRequestNumber} finished after merge.` : `Repairs a selected Review finding from #${task.pullRequestNumber}.`}\n\n${turn.value.value.summary}\n\n> 🤖 AI disclosure: [Wolfstar Agent Kit](https://github.com/wolfstar-project/wolfstar-agent-kit) modified this description. [AI open source policy](https://harlanzw.com/blog/ai-in-open-source).`,
             commitSha: committed.value.commitSha,
             baseSha: committed.value.baseSha,
             baseRef: validated.value.defaultBranch,

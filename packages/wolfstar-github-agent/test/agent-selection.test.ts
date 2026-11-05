@@ -36,13 +36,13 @@ describe('agent selection parsing', () => {
     const parsed = parseAgentSelection({
       _tag: 'Pinned',
       provider: 'codex',
-      model: 'gpt-5.6-luna',
+      model: 'gpt-6-luna',
       reasoningEffort: 'max',
     })
 
     expect(parsed).toEqual({
       _tag: 'Ok',
-      value: { _tag: 'Pinned', provider: 'codex', model: 'gpt-5.6-luna', reasoningEffort: 'max' },
+      value: { _tag: 'Pinned', provider: 'codex', model: 'gpt-6-luna', reasoningEffort: 'max' },
     })
   })
 
@@ -50,13 +50,13 @@ describe('agent selection parsing', () => {
     const parsed = parseAgentSelection({
       _tag: 'Pinned',
       provider: 'claude',
-      model: 'claude-sonnet-5',
+      model: 'claude-sonnet-5-5',
       reasoningEffort: 'high',
     })
 
     expect(parsed).toEqual({
       _tag: 'Ok',
-      value: { _tag: 'Pinned', provider: 'claude', model: 'claude-sonnet-5', reasoningEffort: 'high' },
+      value: { _tag: 'Pinned', provider: 'claude', model: 'claude-sonnet-5-5', reasoningEffort: 'high' },
     })
   })
 
@@ -119,18 +119,15 @@ describe('agent profile resolution', () => {
   it('keeps each role default when the selection names only a provider', () => {
     const profile = resolveAgentProfile({ provider: 'codex', model: null, reasoningEffort: null }, 3)
 
-    expect(profile.roles.adversarial_review).toEqual({ model: 'gpt-6.1-sol', reasoningEffort: 'high' })
-    for (const [role, settings] of Object.entries(profile.roles)) {
-      expect(settings.model).toBe('gpt-6.1-sol')
-      expect(settings.reasoningEffort).toBe(role === 'adversarial_review' ? 'high' : 'medium')
-    }
+    expect(profile.roles.adversarial_review).toEqual({ model: 'gpt-6-astra', reasoningEffort: 'high' })
+    expect(profile.roles.issue_work).toEqual({ model: 'gpt-6.1-sol', reasoningEffort: 'medium' })
   })
 
   it('applies one model and one reasoning effort to every role', () => {
-    const profile = resolveAgentProfile({ provider: 'codex', model: 'gpt-5.6-luna', reasoningEffort: 'low' }, 3)
+    const profile = resolveAgentProfile({ provider: 'codex', model: 'gpt-6-luna', reasoningEffort: 'low' }, 3)
 
     for (const role of Object.values(profile.roles))
-      expect(role).toEqual({ model: 'gpt-5.6-luna', reasoningEffort: 'low', reasoningEffortExplicit: true })
+      expect(role).toEqual({ model: 'gpt-6-luna', reasoningEffort: 'low', reasoningEffortExplicit: true })
   })
 
   it('replaces one role default with the configured Reasoning effort and keeps the others', () => {

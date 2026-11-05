@@ -68,13 +68,13 @@ export function formatTimeAgo(timestamp: number | string | Date | null | undefin
 
 /** Compact: 1234 reads as 1.2K. A missing value reads as a dash. */
 export function formatNumber(n: number | null | undefined): string {
-  if (n == null) return '–'
+  if (n === undefined || n === null) return '–'
   return compactNumberFormat.format(n)
 }
 
 /** Grouped and exact: 1,234. For a table where every digit matters. */
 export function formatExactNumber(n: number | null | undefined): string {
-  if (n == null) return '–'
+  if (n === undefined || n === null) return '–'
   return groupedNumberFormat.format(n)
 }
 

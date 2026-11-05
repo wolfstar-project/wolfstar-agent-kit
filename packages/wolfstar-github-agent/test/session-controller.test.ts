@@ -20,7 +20,7 @@ function fixture() {
     host: 'desktop' as const,
     projectId: 'pkg/example',
     provider: 'codex' as const,
-    model: 'gpt-5.6-sol',
+    model: 'gpt-6-astra',
     reasoningEffort: 'high' as const,
     prompt: 'Fix this project.',
     requestId: 'request-1',

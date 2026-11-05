@@ -29,6 +29,8 @@ export {
 export type { AgentRuntime, AgentRuntimeSource } from './agent-profile.ts'
 export type { AgentEvent, AgentProvider, AgentProviderName, AgentTurnRequest } from './agent-provider.ts'
 export { createAgentApp } from './app.ts'
+export { createConfigurationEditor } from './config-editor.ts'
+export type { ConfigurationEditor, ConfigurationView, ConfigurationError } from './config-editor.ts'
 export { createApprovalController } from './approval-controller.ts'
 export { APPROVAL_LABELS, approvalLabels } from './approval-labels.ts'
 export { createAutoMergeController } from './auto-merge-controller.ts'

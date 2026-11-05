@@ -32,7 +32,7 @@ Never publish under my name without approval. Draft it, show the exact text, wai
 ## Email and Chrome identities
 
 - Before email work, read the `email-usage` Skill. Before browser work, read the `browser` Skill.
-- Use `contact@wolfstar.rocks` for personal work, `clients@wolfstar.rocks` for clients, and `agent@wolfstar.rocks` for explicit agent identity.
+- Use `contact@wolfstar.rocks` for personal work, `clients@harlanzw.com` for clients, and `agent@harlanzw.com` for explicit agent identity.
 - Default signed-in browser work to Agent. Use Clients for client work. Explicit user choices take precedence.
 - If a site requires `contact@wolfstar.rocks`, use Wolfstar's existing main profile.
 - Identity selection needs no extra approval for an authorized task. Honor Chrome's main-profile connection approval.
@@ -43,13 +43,13 @@ Never publish under my name without approval. Draft it, show the exact text, wai
 - A named `dev-browser` session does not select a Chrome profile. Never substitute another identity's session.
 - For ordinary shared Chrome, select an existing tab in the intended profile. Verify the target site's signed-in email.
 - Reconnect after Chrome restarts. Never kill shared Chrome or stop the shared browser daemon to repair attachment.
-- Himalaya: pass `-a wolfstar`, `-a clients`, or `-a hotmail` explicitly. Discover other accounts with `account list`.
-- `wolfstar` and `clients` share the existing Zoho mailbox. Scan it once when checking all mail.
+- Himalaya: pass `-a wolfstarzw`, `-a clients`, or `-a hotmail` explicitly. Discover other accounts with `account list`.
+- `wolfstarzw` and `clients` share the existing Zoho mailbox. Scan it once when checking all mail.
 - Use `himalaya message read --preview` to avoid marking mail as read.
 - Agent mail access is read only by default. Draft exact messages in chat or private scratch files.
 - Never send, forward, schedule, save drafts, move, delete, or flag mail without explicit authorization for that action.
 - If a read-only Hook blocks an authorized action, report it. Never bypass the Hook through another tool.
-- Never print full mail configs or credentials. Keep `wolfstar.rocks` receiving through Zoho unless migration is requested.
+- Never print full mail configs or credentials. Keep `harlanzw.com` receiving through Zoho unless migration is requested.
 
 ## Writing style
 

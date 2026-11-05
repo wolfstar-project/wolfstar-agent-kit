@@ -50,7 +50,7 @@ denies 'himalaya folder create Archive'
 denies 'himalaya folder delete Archive'
 denies 'himalaya folder expunge INBOX'
 denies 'himalaya template send'
-denies 'himalaya account configure wolfstar'
+denies 'himalaya account configure harlanzw'
 
 # A mutating call hidden later in a pipeline still counts.
 denies 'himalaya envelope list | head -5 && himalaya message delete 42'

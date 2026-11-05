@@ -108,7 +108,7 @@ export function jev(options: JevOptions = {}) {
         ...(options.retries === undefined ? {} : { retries: options.retries }),
         ...(options.baseURL === undefined ? {} : { baseURL: options.baseURL }),
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
-        fetcher: fetcher(options.fetch, init.headers, signal),
+        fetcher: clefFetcher(options.model, fetcher(options.fetch, init.headers, signal)),
       })
       const sent: Promise<SystemOneResult<Q>> = client.systemOne(req).then(throwOnFailure)
       if (signal === undefined) return sent
@@ -202,6 +202,30 @@ function fetcher(
       ...(headers === undefined
         ? {}
         : { headers: { ...(init?.headers as Record<string, string> | undefined), ...headers } }),
+    })
+  }
+}
+
+const CLEF_MODEL = /^@cf\/cloudflare\/(clef(?:-flash|-omni)?)$/
+
+/**
+ * Clef answers the same System One questions as Jev, but over a different wire:
+ * the model id is part of the path (`/ai/run/@cf/cloudflare/clef`) and the body
+ * is flat, `{ model: 'clef', state, questions }`, with the short name as its
+ * selector. The shared client only speaks the Jev wire, so a Clef model id is
+ * rewritten here, on its way out.
+ */
+function clefFetcher(
+  model: string | undefined,
+  base: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
+): (input: string | URL | Request, init?: RequestInit) => Promise<Response> {
+  const selector = model === undefined ? undefined : CLEF_MODEL.exec(model)?.[1]
+  if (model === undefined || selector === undefined) return base
+  return (input, init) => {
+    const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as { input?: Record<string, unknown> }) : {}
+    return base(`${String(input)}/${model}`, {
+      ...init,
+      body: JSON.stringify({ model: selector, ...body.input }),
     })
   }
 }

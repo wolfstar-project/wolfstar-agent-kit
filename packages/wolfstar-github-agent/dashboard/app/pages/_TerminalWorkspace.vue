@@ -243,17 +243,19 @@ const forceTotal = computed(() => (capacity.value._tag === 'Available' ? capacit
 const capacityReason = computed(() =>
   loading.value
     ? 'Connecting to the terminal host.'
-    : capacity.value._tag === 'Unavailable'
-      ? terminalFailureCopy.CapacityUnavailable
-      : capacity.value.regular._tag === 'Unavailable'
+    : providers.value.length === 0
+      ? terminalFailureCopy.ProviderUnavailable
+      : capacity.value._tag === 'Unavailable'
         ? terminalFailureCopy.CapacityUnavailable
-        : capacity.value.regular._tag === 'AtCapacity'
-          ? capacity.value.regular.reason === 'MaintenanceReserve'
-            ? 'The remaining slot is reserved for host maintenance.'
-            : ['Memory', 'MemoryPressure', 'OverrideMemory'].includes(capacity.value.regular.reason)
-              ? 'The host needs more available memory.'
-              : 'All session slots are in use.'
-          : '',
+        : capacity.value.regular._tag === 'Unavailable'
+          ? terminalFailureCopy.CapacityUnavailable
+          : capacity.value.regular._tag === 'AtCapacity'
+            ? capacity.value.regular.reason === 'MaintenanceReserve'
+              ? 'The remaining slot is reserved for host maintenance.'
+              : ['Memory', 'MemoryPressure', 'OverrideMemory'].includes(capacity.value.regular.reason)
+                ? 'The host needs more available memory.'
+                : 'All session slots are in use.'
+            : '',
 )
 const willQueue = computed(() => capacity.value._tag === 'Available' && capacity.value.regular._tag === 'AtCapacity')
 
@@ -692,7 +694,7 @@ watch(
           <div class="flex gap-2">
             <select
               v-model="provider"
-              :disabled="pending"
+              :disabled="pending || providers.length === 0"
               aria-label="Agent provider"
               class="min-h-11 min-w-0 flex-1 rounded border border-default bg-default px-2 text-base focus-visible:outline-2 focus-visible:outline-primary"
             >

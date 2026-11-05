@@ -105,7 +105,7 @@ const progress = computed(() =>
 )
 const description = computed(() =>
   poweroff.value
-    ? 'This stops all work and takes agent.wolfstar.rocks and hogwild.example.com offline. Someone must physically turn Hogwild back on.'
+    ? 'This stops all work and takes agent.harlanzw.com and hogwild.harlanzw.com offline. Someone must physically turn Hogwild back on.'
     : 'This stops workloads and disconnects this site. Power stays on. Restore access later through admin recovery SSH.',
 )
 const resultMessage = computed(() =>

@@ -134,19 +134,20 @@ export interface ReviewWorkerOptions extends Omit<ItemAgentOptions, 'workspaces'
   preflightRepair: (repository: string, signal: AbortSignal) => Promise<Result<void, string>>
   store: Pick<
     JournalStore,
-    | 'recordExactPullRequestObservation'
     | 'getRepairedHeadFindings'
     | 'repairRoundPlan'
     | 'getRevisionFiles'
     | 'getWorkerSession'
-    | 'storedReviewForHead'
+    | 'listReviewRuns'
     | 'queueReviewFixTaskForReview'
+    | 'recordExactPullRequestObservation'
     | 'recordIncident'
     | 'recordReviewRun'
     | 'recordReviewPublication'
     | 'saveWorkerSession'
     | 'queueBaselineRepairForReview'
     | 'retireBaselineRepairForReview'
+    | 'storedReviewForHead'
     | 'supersedeReviewRun'
     | 'updateAgentProgress'
   >
@@ -221,7 +222,11 @@ Never answer contained to be helpful. A wrong contained merges code nobody read,
 Return every field the schema names, including empty arrays and null.`
 const issuePolicy = `Work as a normal local agent session inside the prepared Git worktree. Use the user's global agent context, installed skills, environment, and authenticated GitHub CLI.
 This worktree was prepared fresh for this turn. Assess the current issue from scratch.
-Triage one GitHub issue against the checked-out default branch.
+Read and validate one GitHub issue against the checked-out default branch before routing it for resolution.
+Compare the issue and comments with the current implementation and expected behavior. Record concrete supporting or contradicting code evidence in summary.
+For a bug, check whether the reported code path can still fail. For a feature, check whether the requested behavior already exists.
+If the issue is already resolved or contradicted by the implementation, choose WAIT_TO_IMPLEMENT and explain the evidence and next action. If the evidence is insufficient, choose NEEDS_INFO.
+Only choose READY_TO_IMPLEMENT when this validation supports a necessary change.
 If root AGENTS.md is tracked, read it with git show HEAD:AGENTS.md before choosing a route.
 Treat that default-branch file as trusted repository policy for scope, constraints, and triage decisions.
 Use repository policy to resolve unspecified choices before applying the route criteria below.
@@ -896,12 +901,13 @@ function headChecksGate(checks: PullRequestReviewSnapshot['checks'], required: R
       cause: { _tag: 'HeadCheckFailed', check: cleanLine(failed.name) },
     }
   const running = requiredChecks.find(checkUndecided)
-  if (running !== undefined)
+  if (running !== undefined) {
     return {
       state: { _tag: 'Pending', reason: undecidedReason(running), evidence: checkEvidence },
       reported,
       cause: undecidedCause(running),
     }
+  }
   const missing = required.contexts.find((context) => !checks.checks.some((check) => check.name === context))
   if (missing !== undefined) {
     return {

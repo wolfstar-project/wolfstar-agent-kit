@@ -32,7 +32,7 @@ const justifyClass = computed(() => {
   return 'justify-start'
 })
 
-const isHeaderEmpty = computed(() => label === '' || label == null)
+const isHeaderEmpty = computed(() => label === '' || label === undefined || label === null)
 
 const sortIcon = computed(() => (sortDirection ? 'collapse' : 'sort'))
 

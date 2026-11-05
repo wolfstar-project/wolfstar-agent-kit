@@ -763,7 +763,6 @@ const command = defineCommand({
     'evaluate-issue-triage': evaluateIssueTriage,
   },
   async run({ args, rawArgs }) {
-    // citty runs this after it ran the subcommand, so stop before the service
     // starts and binds the dashboard port. citty dispatches on the first
     // positional argument, so look there, even when options precede the name.
     if (invokesSubCommand(rawArgs, rootSubCommandNames, rootArguments)) return

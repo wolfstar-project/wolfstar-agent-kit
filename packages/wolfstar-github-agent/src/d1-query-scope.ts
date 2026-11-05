@@ -1,6 +1,6 @@
 /** Production sites covered by the approved weekly review and its shared read-only credential. */
 export const PRODUCTION_D1_REPOSITORIES: ReadonlySet<string> = new Set([
-  'wolfstar-project/wolfstar.rocks',
+  'wolfstar-project/harlanzw.com',
   'wolfstar-project/requestindexing.com',
   'wolfstar-project/unhead.unjs.io',
   'wolfstar-project/scripts.nuxt.com',

@@ -49,6 +49,7 @@ import {
   vitalsEvidenceInstructions,
 } from './vitals-comparison-runtime.ts'
 import { dailyCheckinDirectory } from './workspace-environment.ts'
+import { isWorkersAiModel, workersAiVariant } from './workers-ai.ts'
 
 /** Tools that write files, so activity shows a file change instead of a command. */
 const fileTools = new Set(['edit', 'write', 'apply_patch'])
@@ -463,6 +464,10 @@ export function opencodeArguments(
   mediaPaths: readonly string[] = [],
   freshSessionId?: string,
 ): string[] {
+  // Workers AI models each expose their own variants, so the role's effort maps onto one of them.
+  const effort = isWorkersAiModel(request.model)
+    ? workersAiVariant(request.model, request.reasoningEffort)
+    : request.reasoningEffort
   return [
     'run',
     '--server',
@@ -473,7 +478,7 @@ export function opencodeArguments(
     'json',
     '--auto',
     '--model',
-    `${request.model}${request.reasoningEffort === undefined ? '' : `#${request.reasoningEffort}`}`,
+    `${request.model}${effort === undefined ? '' : `#${effort}`}`,
   ]
 }
 

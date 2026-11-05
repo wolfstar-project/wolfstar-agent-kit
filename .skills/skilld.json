@@ -45,18 +45,6 @@
     },
     "slop-naming-recovery": {
       "source": "github:harlan-zw/brundlefly/skills/slop-naming-recovery#commit:7f7ee237bddfbe5cc6447b1cabc6d397140486be"
-    },
-    "pr-evidence": {
-      "source": "github:ArefMozafari/pr-evidence/skills/pr-evidence#commit:cb8c053d31ca064e87454419059301d9fcf3e2b7"
-    },
-    "post-merge-cleanup": {
-      "source": "github:ArefMozafari/post-merge-cleanup/skills/post-merge-cleanup#commit:68a8a341fdd1188ee69da2990d7995a470e1bcf8"
-    },
-    "review-replies": {
-      "source": "github:ArefMozafari/review-replies/skills/review-replies#commit:b67de95978d6d861755cb2a2a95c6529e4153b17"
-    },
-    "review-findings": {
-      "source": "github:ArefMozafari/review-findings/skills/review-findings#commit:bc52c1df53c647b95f76c668ef4713a3a6f92346"
     }
   },
   "requires": {

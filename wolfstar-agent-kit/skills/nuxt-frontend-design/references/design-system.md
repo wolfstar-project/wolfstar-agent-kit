@@ -285,4 +285,8 @@ nuxt.config.ts             # Modules, fonts, colorMode
 
 ## Component docs
 
-If a Nuxt UI docs MCP server is connected, use it for props, slots, and emits instead of guessing.
+Use `nuxt-ui-remote` MCP for component docs:
+
+- `mcp__nuxt-ui-remote__get-component` — full docs for any component
+- `mcp__nuxt-ui-remote__get-component-metadata` — props/slots/events
+- `mcp__nuxt-ui-remote__list-components` — all available components

@@ -29,3 +29,6 @@ packages/notes-viewer/.vitepress/dist/
 
 # Eval runs write results here. They are reproduced by rerunning the suite.
 wolfstar-agent-kit/evals/results/
+
+# Wrangler build output and local state
+.wrangler/

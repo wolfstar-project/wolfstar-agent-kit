@@ -44,9 +44,22 @@ export function sessionHostProjects(snapshot: SessionViewSnapshot | undefined, h
   return [...projects.values()]
 }
 
-export function sessionHostStatus(snapshot: SessionViewSnapshot | undefined, host: SessionHost): string {
+export function sessionHostStatus(
+  snapshot: SessionViewSnapshot | undefined,
+  host: SessionHost,
+  request: 'loading' | 'failed' | 'ready' = 'loading',
+): string {
+  if (request === 'failed') return 'Unavailable'
   const state = snapshot?.hosts[host]
-  return !state ? 'Checking' : !state.connected ? 'Offline' : !state.current ? 'Update required' : 'Connected'
+  return !state
+    ? request === 'loading'
+      ? 'Checking'
+      : 'Unavailable'
+    : !state.connected
+      ? 'Offline'
+      : !state.current
+        ? 'Update required'
+        : 'Connected'
 }
 
 export interface SessionTool {

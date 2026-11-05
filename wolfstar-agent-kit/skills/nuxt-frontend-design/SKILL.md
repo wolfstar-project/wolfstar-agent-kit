@@ -2,6 +2,7 @@
 name: nuxt-frontend-design
 description: 'Build or polish Nuxt UI v4+ pages and design systems. Use for landing pages, dashboards, tokens, motion, or generic-looking UX.'
 argument-hint: '[component/page/area]'
+model: opus
 effort: max
 license: MIT
 ---
@@ -165,7 +166,7 @@ its words ships whatever sentence each agent liked that day.
 
 After emitting `DESIGN.md`, check for `COPY.md` at the project root. If the project has
 user-visible strings and no `COPY.md`, say so and offer to run the
-installed Brundlefly `copywriting` Skill `init` workflow. Do not write one from inside
+`copywriting` Skill `init` workflow. Do not write one from inside
 this skill: it bootstraps from the strings that already ship, and that is a different harvest
 from the one done here.
 

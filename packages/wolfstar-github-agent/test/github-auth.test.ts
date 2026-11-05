@@ -26,9 +26,9 @@ describe('renamed GitHub App repositories', () => {
       vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
         const endpoint = String(url)
         let response: Response
-        if (endpoint === 'https://api.github.com/repos/harlan-zw/ripast/installation') {
+        if (endpoint === 'https://api.github.com/repos/wolfstar-project/ripast/installation') {
           response = Response.json({ message: 'Not Found' }, { status: 404 })
-        } else if (endpoint === 'https://api.github.com/repos/harlan-zw/ripide/installation') {
+        } else if (endpoint === 'https://api.github.com/repos/wolfstar-project/ripide/installation') {
           response = Response.json({ id: 42 })
         } else if (endpoint === 'https://api.github.com/app/installations/42/access_tokens') {
           const body = JSON.parse(String(init?.body))
@@ -48,17 +48,17 @@ describe('renamed GitHub App repositories', () => {
       const provider = createGitHubAppTokenProvider({
         appId: 123,
         privateKey,
-        resolveRenamedRepository: async () => 'harlan-zw/ripide',
+        resolveRenamedRepository: async () => 'wolfstar-project/ripide',
       })
 
-      expect(await provider.getToken('harlan-zw/ripast', access)).toEqual(
+      expect(await provider.getToken('wolfstar-project/ripast', access)).toEqual(
         ok({ token: 'scoped-token', expiresAt: '2126-01-01T00:00:00Z' }),
       )
       expect(minted).toEqual([{ repositories: ['ripide'], permissions }])
     },
   )
 
-  it.each(['another-owner/ripide', 'harlan-zw/ripast', 'harlan-zw/ripide/another', undefined])(
+  it.each(['another-owner/ripide', 'wolfstar-project/ripast', 'wolfstar-project/ripide/another', undefined])(
     'refuses a token when trusted discovery cannot name a same-owner rename: %s',
     async (current) => {
       const requested: string[] = []
@@ -72,11 +72,11 @@ describe('renamed GitHub App repositories', () => {
         resolveRenamedRepository: async () => current,
       })
 
-      expect(await provider.getToken('harlan-zw/ripast', 'item_write')).toEqual({
+      expect(await provider.getToken('wolfstar-project/ripast', 'item_write')).toEqual({
         _tag: 'Err',
-        error: expect.objectContaining({ repository: 'harlan-zw/ripast', status: 404 }),
+        error: expect.objectContaining({ repository: 'wolfstar-project/ripast', status: 404 }),
       })
-      expect(requested).toEqual(['https://api.github.com/repos/harlan-zw/ripast/installation'])
+      expect(requested).toEqual(['https://api.github.com/repos/wolfstar-project/ripast/installation'])
     },
   )
 
@@ -95,8 +95,8 @@ describe('renamed GitHub App repositories', () => {
       },
     })
 
-    await provider.getToken('harlan-zw/ripast', 'read')
-    expect(await provider.getToken('harlan-zw/ripast', 'item_write')).toEqual(
+    await provider.getToken('wolfstar-project/ripast', 'read')
+    expect(await provider.getToken('wolfstar-project/ripast', 'item_write')).toEqual(
       ok({ token: 'ripide', expiresAt: '2126-01-01T00:00:00Z' }),
     )
     expect(minted).toEqual(['ripast', 'ripast', 'ripide'])

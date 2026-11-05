@@ -93,6 +93,39 @@ export async function discoverLocalCheckouts(roots: string[]): Promise<LocalChec
   return checkouts.flatMap((checkout) => (checkout === undefined ? [] : [checkout]))
 }
 
+async function readAppSlugFromGitHub(options: GitHubAppRepositoryDiscoveryOptions): Promise<string> {
+  const app = new App({
+    appId: options.appId,
+    privateKey: options.privateKey,
+    Octokit: Octokit.defaults({
+      userAgent: options.userAgent ?? 'wolfstar-github-agent/0.0.0',
+      throttle: failFastThrottle,
+    }),
+  })
+  const { data } = await app.octokit.rest.apps.getAuthenticated()
+  return data?.slug ?? ''
+}
+
+/**
+ * The slug the GitHub App has now.
+ *
+ * An App can be renamed after its creation, and its bot then posts under the
+ * new slug. A slug written into a configuration file at creation goes stale,
+ * so the controller asks GitHub instead. Undefined means GitHub could not say,
+ * and the caller keeps the configured slug.
+ */
+export async function readGitHubAppSlug(
+  options: GitHubAppRepositoryDiscoveryOptions,
+  read: (options: GitHubAppRepositoryDiscoveryOptions) => Promise<string> = readAppSlugFromGitHub,
+): Promise<string | undefined> {
+  try {
+    const slug = (await read(options)).trim().toLowerCase()
+    return /^[a-z0-9][a-z0-9-]{0,62}$/.test(slug) ? slug : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export async function discoverGitHubAppRepositories(
   options: GitHubAppRepositoryDiscoveryOptions,
 ): Promise<InstalledRepository[]> {
@@ -181,7 +214,8 @@ function inheritedRelease(
 function defaultMapping(
   repository: InstalledRepository,
   checkout: string,
-  releaseDefaults?: PackageReleaseDefaults,
+  releaseDefaults: PackageReleaseDefaults | undefined,
+  appActorLogin: string,
 ): RepositoryMapping {
   const ownership = repository.owner.type === 'User' ? 'owned' : 'maintained'
   const release = inheritedRelease(repository, checkout, releaseDefaults)
@@ -193,7 +227,7 @@ function defaultMapping(
     ownership,
     ...(release === undefined ? {} : { release }),
     defaultBranch: repository.defaultBranch,
-    writablePullRequestAuthors: ['wolfstar-project', AGENT_ACTOR_LOGIN],
+    writablePullRequestAuthors: [...(repository.owner.type === 'User' ? [repository.owner.login] : []), appActorLogin],
     writablePullRequestHeadPrefixes: [
       'fix/',
       'feat/',
@@ -342,6 +376,8 @@ export function buildRepositoryMappings(
   overrides: RepositoryMapping[],
   allowedOwners: string[],
   releaseDefaults?: PackageReleaseDefaults,
+  appActorLogin: string = AGENT_ACTOR_LOGIN,
+  repositoryDefaults: Partial<RepositoryMapping> = {},
 ): RepositoryMapping[] {
   const checkoutByRepository = new Map(checkouts.map((checkout) => [checkout.github.toLowerCase(), checkout.checkout]))
   const overrideByRepository = new Map(overrides.map((mapping) => [mapping.github.toLowerCase(), mapping]))
@@ -352,19 +388,23 @@ export function buildRepositoryMappings(
       if (!isAllowedRepository(repository.github, allowedOwners)) return []
       const checkout = checkoutByRepository.get(repository.github.toLowerCase())
       if (checkout === undefined) return []
-      const defaults = defaultMapping(repository, checkout, releaseDefaults)
+      const defaults = defaultMapping(repository, checkout, releaseDefaults, appActorLogin)
       const override = overrideByRepository.get(repository.github.toLowerCase())
       return [
         {
           ...defaults,
+          ...repositoryDefaults,
           ...override,
           github: repository.github,
           checkout,
           // Discover App access unless the owner selects a dedicated automation account.
           // Configuration alone cannot establish an App installation.
-          authentication: override?.githubAccount === undefined ? repository.authentication : 'user',
+          authentication:
+            (override?.githubAccount ?? repositoryDefaults.githubAccount) === undefined
+              ? repository.authentication
+              : 'user',
           defaultBranch: repository.defaultBranch,
-          enabled: !repository.archived && (override?.enabled ?? true),
+          enabled: !repository.archived && (override?.enabled ?? repositoryDefaults.enabled ?? true),
         },
       ]
     })

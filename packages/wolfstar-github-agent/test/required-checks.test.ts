@@ -98,6 +98,7 @@ function reviewWith(input: { headChecks: GitHubCheck[]; requiredChecks: Required
         throw new Error('Unexpected Repair queue.')
       },
       getRepairedHeadFindings: () => [],
+      listReviewRuns: () => [],
       repairRoundPlan: () => ({ _tag: 'Allowed' as const, number: 1 }),
       getWorkerSession: () => null,
       storedReviewForHead: () => ({ _tag: 'None' }),

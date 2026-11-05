@@ -1,6 +1,6 @@
 # The harness that produces Measurements
 
-Reference implementation: `wolfstar-project/gscdump`, added in its PR #81.
+Reference implementation: `harlan-zw/gscdump`, added in its PR #81.
 
 ## What a repository needs
 

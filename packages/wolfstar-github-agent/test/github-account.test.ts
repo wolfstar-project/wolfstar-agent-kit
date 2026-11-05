@@ -14,10 +14,10 @@ const account: GitHubAccount = {
   login: 'im-brundlefly',
   tokenPath: '/private/brundlefly-token',
   name: 'Brundlefly',
-  url: 'https://github.com/harlan-zw/brundlefly',
+  url: 'https://github.com/wolfstar-project/brundlefly',
   instructions: 'Use short, clear sentences.',
 }
-const repository = 'harlan-zw/brundlefly'
+const repository = 'wolfstar-project/brundlefly'
 const now = () => new Date('2026-10-12T00:00:00Z')
 
 function provider(readLogin: () => Promise<string>, readToken = async () => 'account-token') {
@@ -90,7 +90,7 @@ it('changes automated attribution while preserving evidence, markers, and comman
   const evidence = `<!-- wolfstar-agent-kit:issue-triage -->\nWolfstar Agent Kit owns this code.\n\`\`\`text\n${disclosure}\n\`\`\`\n`
   const result = githubAccountBody(evidence + disclosure, account)
   expect(result).toBe(
-    `${evidence}> [Brundlefly](https://github.com/harlan-zw/brundlefly) posted this automated triage. [AI open source policy](https://harlanzw.com/blog/ai-in-open-source).`,
+    `${evidence}> [Brundlefly](https://github.com/wolfstar-project/brundlefly) posted this automated triage. [AI open source policy](https://harlanzw.com/blog/ai-in-open-source).`,
   )
   expect(githubAccountBody(evidence + disclosure)).toBe(evidence + disclosure)
 })
@@ -98,7 +98,7 @@ it('changes automated attribution while preserving evidence, markers, and comman
 it('recognises both original and branded Routine logs for the configured repository', () => {
   const input = {
     repository,
-    title: 'ci-review: run log for harlan-zw/brundlefly',
+    title: 'ci-review: run log for wolfstar-project/brundlefly',
     labels: ['routine:ci-review'],
   }
   expect(isRoutineTrackingIssue({ ...input, body: trackingIssueBody('ci-review'), account })).toBe(true)

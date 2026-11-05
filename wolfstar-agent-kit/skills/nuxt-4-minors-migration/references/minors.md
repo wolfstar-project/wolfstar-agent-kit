@@ -17,7 +17,7 @@ Tier 0.
    - List them with `pnpm outdated -r --include-workspace-root --format json`. Update catalog entries at their source, and keep each entry's caret or exact pin.
    - Hold TypeScript on 6, as that Skill requires.
    - Hold `h3` on 1. Nuxt 4 runs nitropack v2, which needs h3 1; h3 2 belongs to Nitro v3 and Nuxt 5.
-   - Expect majors to break code. On wolfstar.rocks, VueUse 15 replaced the `useNow` `interval` option with `scheduler: cb => useIntervalFn(cb, ms)`, and `@antfu/eslint-config` 9.5 began sorting `pnpm-workspace.yaml` and requiring `minimumReleaseAgeExcludePrune: true`. Run `eslint --fix pnpm-workspace.yaml` for the second.
+   - Expect majors to break code. On harlanzw.com, VueUse 15 replaced the `useNow` `interval` option with `scheduler: cb => useIntervalFn(cb, ms)`, and `@antfu/eslint-config` 9.5 began sorting `pnpm-workspace.yaml` and requiring `minimumReleaseAgeExcludePrune: true`. Run `eslint --fix pnpm-workspace.yaml` for the second.
    - A `wrangler` bump changes the generated `worker-configuration.d.ts`. Regenerate it with the repository's `wrangler types` script, or CI's types check fails.
 4. **Overrides.** Remove a `vite` override that pins Vite below 8, and any `rolldown-vite` override. Nuxt 4.5 ships Vite 8 on Rolldown.
 5. **Supply-chain policy.** With `trustPolicy: no-downgrade`, pnpm rejects the cssnano 9 family that `@nuxt/vite-builder` 4.6.0 installs. Expect about 30 packages. Repeat these steps until the install passes:
@@ -51,7 +51,7 @@ Tier 0.
 - **T2: `experimental.extractAsyncDataHandlers` moves handlers into lazy chunks.** A prerendered page then ships none of them.
   Detect: most routes prerender, through `nitro.static`, `prerender` routes, or `prerender: true` route rules.
   Change: build with and without it. Compare the JavaScript a prerendered page loads up front: the files its HTML names through module scripts and `modulepreload` links. Keep it only when that number drops. The total in `.output/public/_nuxt` grows either way, because handlers move into extra chunks.
-  On wolfstar.rocks, whose handlers only query content, it raised a page from 14 files and 882,848 bytes to 21 files and 884,558 bytes, so the site keeps it off.
+  On harlanzw.com, whose handlers only query content, it raised a page from 14 files and 882,848 bytes to 21 files and 884,558 bytes, so the site keeps it off.
 - **T3: `experimental.typescriptPlugin`** adds editor features and installs `@dxup/nuxt`. Follow-up only.
 
 ## 4.3

@@ -26,7 +26,7 @@ const hydrationAbsoluteFormat = new Intl.DateTimeFormat('en-AU', {
 const localAbsoluteFormat = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 
 const parsed = computed(() => {
-  if (date == null) return null
+  if (date === undefined || date === null) return null
   const d = typeof date === 'number' ? new Date(date * 1000) : new Date(date)
   return Number.isNaN(d.getTime()) ? null : d
 })

@@ -123,6 +123,9 @@ export type ClassificationConfig =
 export type ServiceTrigger = 'github' | 'routine'
 
 export interface AgentConfig {
+  routinesFromRepositories?: boolean
+  routineOverrides?: Record<string, RoutineSpec>
+  repositoryDefaults?: Partial<RepositoryMapping>
   agent: {
     provider: AgentProviderName
     /**
@@ -166,6 +169,8 @@ export interface AgentConfig {
   }
   github: {
     appId: number
+    /** The App's slug, when the App is not named wolfstar-github-agent. Its bot posts as `<slug>[bot]`. */
+    appSlug?: string
     privateKeyPath: string
     allowedOwners: string[]
   }
@@ -791,6 +796,7 @@ export type AgentRole =
   | 'review_fix'
   | 'baseline_repair'
   | 'adversarial_review'
+  | 'pull_request_triage'
   | 'issue_triage'
   | 'issue_work'
   | 'batch_plan'
@@ -1410,15 +1416,31 @@ export interface ReviewAgent extends ReviewRun {
 
 export type DashboardAgent = ActiveAgent | ReviewAgent
 
-export type CodexAgentModel = 'gpt-5.6-sol' | 'gpt-5.6-terra' | 'gpt-5.6-luna' | 'gpt-6.1-sol'
-export type ClaudeAgentModel = 'claude-fable-5' | 'claude-opus-4-8' | 'claude-sonnet-5'
+/** Older models stay accepted, so a configuration or a stored record that pins one keeps loading. */
+export type CodexAgentModel =
+  | 'gpt-6-astra'
+  | 'gpt-6.1-sol'
+  | 'gpt-6-sol'
+  | 'gpt-6-luna'
+  | 'gpt-5.6-sol'
+  | 'gpt-5.6-terra'
+  | 'gpt-5.6-luna'
+export type ClaudeAgentModel =
+  | 'claude-fable-5-1'
+  | 'claude-opus-5-5'
+  | 'claude-sonnet-5-5'
+  | 'claude-haiku-5-5'
+  | 'claude-fable-5'
+  | 'claude-opus-4-8'
+  | 'claude-sonnet-5'
 /**
  * Models opencode can answer with.
  *
  * `zai-coding-plan/` runs on the GLM Coding Plan, which publishes a real quota
  * and is the route the service prefers. `opencode-go/` is metered per token.
  * The `opencode/` models are the free tier, and they keep answering after
- * everything above has reached its limit.
+ * everything above has reached its limit. `cloudflare-workers-ai/` runs on
+ * the Cloudflare account's Workers AI and is billed per token there.
  */
 export type OpencodeAgentModel =
   | 'zai-coding-plan/glm-4.7'
@@ -1454,6 +1476,18 @@ export type OpencodeAgentModel =
   | 'opencode-go/qwen3.6-plus'
   | 'opencode-go/qwen3.7-max'
   | 'opencode-go/qwen3.7-plus'
+  | WorkersAiAgentModel
+/** Cloudflare Workers AI models opencode runs through its `cloudflare-workers-ai` provider. */
+export type WorkersAiAgentModel =
+  | 'cloudflare-workers-ai/@cf/moonshotai/kimi-k2.7-code'
+  | 'cloudflare-workers-ai/@cf/moonshotai/kimi-k2.6'
+  | 'cloudflare-workers-ai/@cf/zai-org/glm-5.3'
+  | 'cloudflare-workers-ai/@cf/zai-org/glm-5.3-flash'
+  | 'cloudflare-workers-ai/@cf/zai-org/glm-5.2'
+  | 'cloudflare-workers-ai/@cf/deepseek-ai/deepseek-v4-pro-0813'
+  | 'cloudflare-workers-ai/@cf/deepseek-ai/deepseek-v4-flash-0731'
+  | 'cloudflare-workers-ai/@cf/qwen/qwen3.8-27b'
+  | 'cloudflare-workers-ai/@cf/openai/gpt-oss-120b'
 export type AgentModel = ClaudeAgentModel | CodexAgentModel | OpencodeAgentModel
 export type CodexReasoningEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 

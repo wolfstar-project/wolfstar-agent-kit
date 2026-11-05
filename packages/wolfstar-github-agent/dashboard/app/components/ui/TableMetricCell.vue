@@ -21,7 +21,7 @@ const {
   align?: 'left' | 'center' | 'right'
 }>()
 
-const isNullish = computed(() => value == null || display === null)
+const isNullish = computed(() => value === undefined || value === null || display === null)
 
 // Color rides the failure, never the pass. A table of green "good" values spends
 // the page's color budget on non-events, so the one failing row can't stand out.

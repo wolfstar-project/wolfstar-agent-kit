@@ -143,7 +143,7 @@ ${automatedDisclosure({ kind: 'review', disclaimer: `It is not Wolfstar's person
 
 The automated review stopped. Reason: ${cleanLine(review.reason)}
 
-Push a new commit to start a new review. To review this commit again, comment \`@wolfstar-agent rerun\`.`
+Push a new commit to start a new review. To review this commit again, comment \`/wolfstar-agent rerun\`.`
 }
 
 /**

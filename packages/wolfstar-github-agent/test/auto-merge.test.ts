@@ -51,7 +51,7 @@ function attempt(
     baseRef: 'main',
     provider: 'codex',
     sessionId: 'session-1',
-    model: 'gpt-5.6-sol',
+    model: 'gpt-6-astra',
     agentVersion: '0.0.0',
     skillDigest: 'digest',
     startedAt: '2026-08-18T00:00:00.000Z',

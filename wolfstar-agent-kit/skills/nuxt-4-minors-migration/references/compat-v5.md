@@ -155,7 +155,7 @@ These rarely need code changes. Check the detection once.
 Tier 1. Nuxt 5 removes these. They work on 4.6, so change them now.
 
 - **`NUXT_B5023`: a config file loaded through `jiti`.**
-  Detect: the warning in build output. The trial on wolfstar.rocks hit it for `import ... from './build/warnings'` in `nuxt.config.ts`.
+  Detect: the warning in build output. The trial on harlanzw.com hit it for `import ... from './build/warnings'` in `nuxt.config.ts`.
   Fix: add the real extension (`.ts`) to relative imports in `nuxt.config.ts`, `modules/`, and layer configs. Replace `enum`, `namespace`, and parameter properties there with plain code.
 - **`process.client`, `process.server`, `process.dev`.**
   Detect: `rg -n 'process\.(client|server|dev|browser)\b' app layers modules`.

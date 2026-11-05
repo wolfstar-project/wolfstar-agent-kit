@@ -2,8 +2,8 @@ import type { AuthenticationResponseJSON, WebAuthnCredential } from '@simpleweba
 import { randomUUID } from 'node:crypto'
 import { generateAuthenticationOptions, verifyAuthenticationResponse } from '@simplewebauthn/server'
 
-export const emergencyOrigin = 'https://agent.wolfstar.rocks'
-export const emergencyRPID = 'agent.wolfstar.rocks'
+export const emergencyOrigin = 'https://agent.harlanzw.com'
+export const emergencyRPID = 'agent.harlanzw.com'
 export interface EmergencyPasskey {
   id: string
   publicKey: string

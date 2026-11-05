@@ -9,7 +9,7 @@ function sdkMessage(message: unknown): SDKMessage {
 
 function request(overrides: Partial<AgentTurnRequest> = {}): AgentTurnRequest {
   return {
-    model: 'claude-sonnet-5',
+    model: 'claude-sonnet-5-5',
     outputSchema: { type: 'object', properties: { outcome: { type: 'string' } } },
     prompt: 'Resolve the conflict.',
     reasoningEffort: 'medium',
@@ -34,7 +34,7 @@ const result = sdkMessage({
   structured_output: { outcome: 'resolved' },
   usage: {},
   modelUsage: {
-    'claude-sonnet-5': {
+    'claude-sonnet-5-5': {
       inputTokens: 10,
       cacheReadInputTokens: 20,
       cacheCreationInputTokens: 3,
@@ -141,7 +141,7 @@ describe('createClaudeProvider', () => {
         allowDangerouslySkipPermissions: true,
         cwd: '/tmp/worktree',
         effort: 'medium',
-        model: 'claude-sonnet-5',
+        model: 'claude-sonnet-5-5',
         outputFormat: { type: 'json_schema', schema: request().outputSchema },
         permissionMode: 'bypassPermissions',
         resume: '12345678-1234-1234-1234-123456789abc',

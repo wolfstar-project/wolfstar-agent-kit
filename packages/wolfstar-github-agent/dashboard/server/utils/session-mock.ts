@@ -18,7 +18,7 @@ const sessions: DesktopSession[] = [
     host: 'desktop',
     project: projects[0]!,
     provider: 'codex',
-    model: 'gpt-5.6-sol',
+    model: 'gpt-6-astra',
     reasoningEffort: 'high',
     title: 'Check sitemap route handling',
     createdAt: now(),

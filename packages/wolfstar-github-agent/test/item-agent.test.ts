@@ -185,6 +185,7 @@ describe('subject Workers', () => {
         },
         getRepairedHeadFindings: () => [],
         repairRoundPlan: () => ({ _tag: 'Allowed' as const, number: 1 }),
+        listReviewRuns: () => [],
         getWorkerSession: () => null,
         storedReviewForHead: () => ({ _tag: 'None' }),
         getRevisionFiles: () => null,
@@ -249,8 +250,8 @@ describe('subject Workers', () => {
     expect(comments[4]).toContain('READY · 96/100')
     expect(comments.join('\n')).not.toContain('Head commit and CI checked')
     expect(stamped).toEqual(['READY'])
-    expect(attempt).toEqual(expect.objectContaining({ model: 'gpt-6.1-sol', confidence: 96 }))
-    expect(capture.requests).toEqual([expect.objectContaining({ model: 'gpt-6.1-sol', reasoningEffort: 'medium' })])
+    expect(attempt).toEqual(expect.objectContaining({ model: 'gpt-6-astra', confidence: 96 }))
+    expect(capture.requests).toEqual([expect.objectContaining({ model: 'gpt-6-astra', reasoningEffort: 'medium' })])
     expect(capture.requests[0]?.prompt).toContain(
       'Never run a repository-wide test suite, typecheck, build, dev server, site crawl, or Lighthouse audit',
     )
@@ -331,6 +332,7 @@ describe('subject Workers', () => {
           },
           getRepairedHeadFindings: () => [],
           repairRoundPlan: () => ({ _tag: 'Allowed' as const, number: 1 }),
+          listReviewRuns: () => [],
           getWorkerSession: () => null,
           storedReviewForHead: () => ({ _tag: storedTag }),
           getRevisionFiles: () => null,
@@ -492,6 +494,7 @@ describe('subject Workers', () => {
         },
         getRepairedHeadFindings: () => [],
         repairRoundPlan: () => ({ _tag: 'Allowed' as const, number: 1 }),
+        listReviewRuns: () => [],
         getWorkerSession: () => null,
         storedReviewForHead: () => ({ _tag: 'None' }),
         getRevisionFiles: () => null,
@@ -677,6 +680,7 @@ describe('subject Workers', () => {
         },
         getRepairedHeadFindings: () => [],
         repairRoundPlan: () => ({ _tag: 'Allowed' as const, number: 1 }),
+        listReviewRuns: () => [],
         getWorkerSession: () => null,
         storedReviewForHead: () => ({ _tag: 'None' }),
         getRevisionFiles: () => null,
@@ -820,6 +824,7 @@ describe('subject Workers', () => {
         },
         getRepairedHeadFindings: () => [],
         repairRoundPlan: () => ({ _tag: 'Allowed' as const, number: 1 }),
+        listReviewRuns: () => [],
         getWorkerSession: () => null,
         storedReviewForHead: () => ({ _tag: 'None' }),
         getRevisionFiles: () => null,
@@ -983,6 +988,7 @@ describe('subject Workers', () => {
           }
         },
         repairRoundPlan: () => ({ _tag: 'Allowed' as const, number: 1 }),
+        listReviewRuns: () => [],
         getRepairedHeadFindings: (_repository, _pullRequestNumber, commitSha) => {
           askedForHeadSha = commitSha
           return [
@@ -1135,6 +1141,7 @@ describe('subject Workers', () => {
         },
         getRepairedHeadFindings: () => [],
         repairRoundPlan: () => ({ _tag: 'Allowed' as const, number: 1 }),
+        listReviewRuns: () => [],
         getWorkerSession: () => null,
         storedReviewForHead: () => ({ _tag: 'None' }),
         getRevisionFiles: () => null,
@@ -1283,6 +1290,7 @@ describe('subject Workers', () => {
         },
         getRepairedHeadFindings: () => [],
         repairRoundPlan: () => ({ _tag: 'Allowed' as const, number: 1 }),
+        listReviewRuns: () => [],
         getWorkerSession: () => null,
         storedReviewForHead: () => ({ _tag: 'None' }),
         getRevisionFiles: () => null,
@@ -1424,6 +1432,7 @@ describe('subject Workers', () => {
         },
         getRepairedHeadFindings: () => [],
         repairRoundPlan: () => ({ _tag: 'Allowed' as const, number: 1 }),
+        listReviewRuns: () => [],
         getWorkerSession: () => null,
         storedReviewForHead: () => ({ _tag: 'None' }),
         getRevisionFiles: () => null,
@@ -1563,6 +1572,7 @@ describe('subject Workers', () => {
         },
         getRepairedHeadFindings: () => [],
         repairRoundPlan: () => ({ _tag: 'Allowed' as const, number: 1 }),
+        listReviewRuns: () => [],
         getWorkerSession: () => null,
         storedReviewForHead: () => ({ _tag: 'None' }),
         getRevisionFiles: () => null,
@@ -1813,6 +1823,9 @@ describe('subject Workers', () => {
       'Verify that the target file and symbol exist. Do not run test suites. Do not prove library types exist.',
     )
     expect(capture.requests[0]?.prompt).toContain('Use pnpm for every package command. Never use npx.')
+    expect(capture.requests[0]?.prompt).toContain(
+      'Only choose READY_TO_IMPLEMENT when this validation supports a necessary change.',
+    )
     expect(triageResult).toEqual({
       _tag: route,
       difficulty: 2,

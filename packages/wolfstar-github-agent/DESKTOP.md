@@ -13,7 +13,7 @@ A turn the desktop has no memory for is deferred, and the controller queues it a
 
 ## Install
 
-First install `desktop-capacity` from `wolfstar-project/hogwild-gh-runner`.
+First install `desktop-capacity` from `harlan-zw/hogwild-gh-runner`.
 Update the Hogwild controller and the desktop service checkout to this revision.
 The desktop uses its existing provider login, tools, and repository environment files.
 

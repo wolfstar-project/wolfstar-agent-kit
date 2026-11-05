@@ -343,7 +343,7 @@ describe('circuitNotice', () => {
     id: 'circuit-1',
     provider: 'codex' as const,
     credential: 'chatgpt',
-    model: 'gpt-5.6-sol',
+    model: 'gpt-6-astra',
     failureClass: 'network' as const,
     failures: 3,
     lastDetail: 'ECONNRESET',

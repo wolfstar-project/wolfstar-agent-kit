@@ -263,6 +263,15 @@ export function isSnapshotStale(generatedAt: string, now: Date): boolean {
   )
 }
 
+export function repositoryState(repository: RepositoryStatus): {
+  label: string
+  tone: 'error' | 'warning' | 'success'
+} {
+  if (repository.lastError !== null) return { label: 'Action required', tone: 'error' }
+  if (repository.lastSuccessAt === null) return { label: 'Starting', tone: 'warning' }
+  return { label: 'Healthy', tone: 'success' }
+}
+
 export function activeAgentProgress(agent: ActiveAgent): string {
   if (agent.state._tag === 'Publishing') return 'Fix verified. Waiting to push the commit.'
   return agent.progress.label

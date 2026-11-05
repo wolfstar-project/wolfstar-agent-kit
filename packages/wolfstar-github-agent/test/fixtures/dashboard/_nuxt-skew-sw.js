@@ -1,2 +1,2 @@
-const loadedModules = new Set()
+const _loadedModules = new Set()
 self.addEventListener('fetch', () => {})

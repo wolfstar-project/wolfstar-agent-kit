@@ -4,6 +4,7 @@ import {
   sessionAcceptsMessage,
   sessionFailureMessage,
   sessionHostProjects,
+  sessionHostStatus,
   sessionRunning,
   sessionTimeline,
 } from '../dashboard/app/utils/session.ts'
@@ -29,6 +30,19 @@ function session(overrides: Partial<DesktopSession> = {}): DesktopSession {
 }
 
 describe('session presentation', () => {
+  it('stops reporting Checking after the host request fails', () => {
+    expect(sessionHostStatus(undefined, 'hogwild', 'failed')).toBe('Unavailable')
+    expect(sessionHostStatus(undefined, 'desktop', 'loading')).toBe('Checking')
+  })
+  it('does not present a previous connection as live after a failed refresh', () => {
+    const previous = {
+      hosts: { desktop: { connected: true, current: true }, hogwild: { connected: true, current: true } },
+      projects: { desktop: [], hogwild: [] },
+      sessions: [],
+    }
+    expect(sessionHostStatus(previous, 'hogwild', 'failed')).toBe('Unavailable')
+    expect(sessionHostStatus(previous, 'hogwild', 'ready')).toBe('Connected')
+  })
   it('pairs a command completion with its running row and preserves tool/message order', () => {
     const value = session({
       messages: [{ id: 'prompt', role: 'user', text: 'Inspect routes', createdAt: '2026-10-08T01:00:00Z' }],

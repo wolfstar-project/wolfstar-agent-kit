@@ -1,6 +1,6 @@
 # Public Dashboard
 
-The Dashboard uses `https://agent.wolfstar.rocks` through Hogwild's existing Cloudflare Tunnel.
+The Dashboard uses `https://agent.harlanzw.com` through Hogwild's existing Cloudflare Tunnel.
 Sign in as `agent` with the existing Dashboard password.
 The Service still binds `127.0.0.1:3210`.
 
@@ -30,7 +30,7 @@ sudo systemctl reload caddy
 If validation fails, remove the new route before retrying.
 Keep any previous route outside the imported directory for rollback.
 
-Create a proxied CNAME for `agent.wolfstar.rocks`:
+Create a proxied CNAME for `agent.harlanzw.com`:
 
 ```text
 01ae8636-4e43-4a6e-b658-856c1e3cce15.cfargotunnel.com
@@ -46,7 +46,7 @@ Caddy redirects public HTTP requests to HTTPS.
 The Dashboard checks its existing password on every route.
 Caddy translates the public Host to the Service's configured Host.
 
-For methods other than GET and HEAD, Caddy requires `Origin: https://agent.wolfstar.rocks`.
+For methods other than GET and HEAD, Caddy requires `Origin: https://agent.harlanzw.com`.
 It translates that exact Origin for the Service's own check.
 It rejects missing, foreign, and Tailscale origins on the public route.
 Never replace every Origin with the allowed value.
@@ -112,13 +112,13 @@ Disabling `server.agent_sessions` preserves stored Agent sessions and leaves mai
 
 ## Rollback
 
-Remove the `agent.wolfstar.rocks` DNS record.
+Remove the `agent.harlanzw.com` DNS record.
 Remove `/etc/caddy/routes/30-agent.caddy`, validate Caddy, then reload it.
 If replacing a previous route, restore that route instead.
 
 ## GitHub webhooks
 
-The same hostname accepts GitHub deliveries at `https://agent.wolfstar.rocks/webhook`.
+The same hostname accepts GitHub deliveries at `https://agent.harlanzw.com/webhook`.
 Caddy sends only that exact path to the separate listener on `127.0.0.1:3211`.
 GitHub signatures authenticate deliveries. They do not use the Dashboard password or browser Origin.
 Every other path keeps the existing Dashboard authentication and Origin checks.

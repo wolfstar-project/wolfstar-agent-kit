@@ -111,6 +111,7 @@ function reviewWith(input: { headChecks: GitHubCheck[]; baseChecks?: GitHubCheck
       getRepairedHeadFindings: () => [],
       repairRoundPlan: () => ({ _tag: 'Allowed' as const, number: 1 }),
       getWorkerSession: () => null,
+      listReviewRuns: () => [],
       storedReviewForHead: () => ({ _tag: 'None' }),
       getRevisionFiles: () => null,
       supersedeReviewRun: (input) => ({ _tag: 'Inserted', reviewRunId: input.id }),

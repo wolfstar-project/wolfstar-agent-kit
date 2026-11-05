@@ -24,7 +24,6 @@ DASHBOARD_ORIGIN = DASHBOARD_URL.rstrip('/')
 PASSWORD_FILE = Path.home() / '.config/wolfstar-github-agent/dashboard-password'
 APP_ICON = Path(__file__).resolve().parent.parent / 'assets/github-app-icon.png'
 PROVIDER_LABELS = {
-    'claude': 'Claude',
     'codex': 'Codex',
     'opencode': 'opencode',
 }

@@ -1818,6 +1818,43 @@ describe('journal store', () => {
         at: '2026-08-13T01:02:03.000Z',
       }),
     ).toEqual({ _tag: 'Duplicate', work: 'issue_work', taskId: work?.id })
+
+    expect(store.getDashboardSnapshot('2026-08-13T01:02:03.500Z').agents).toEqual([
+      expect.objectContaining({ role: 'issue_work', session: { _tag: 'Connected', id: 'issue-session' } }),
+    ])
+    if (work === null) throw new Error('Expected approved issue work.')
+    expect(
+      store.stagePublication({
+        taskId: work.id,
+        workerId: work.state.workerId,
+        fence: work.state.fence,
+        at: '2026-08-13T01:02:04.000Z',
+        publication: {
+          _tag: 'OpenPullRequest',
+          taskKind: 'issue_work',
+          issueNumber: 12,
+          pullRequestTitle: 'Fix #12: Broken thing',
+          pullRequestBody: 'Closes #12.',
+          diagram: null,
+          commitSha: 'issue-commit',
+          baseSha: 'base-sha',
+          baseRef: 'main',
+          expectedHeadSha: 'base-sha',
+          headRef: 'fix/issue-12',
+          artifactRef: 'refs/wolfstar-github-agent/publications/issue-work',
+          patchDigest: 'issue-patch',
+          changedFiles: 2,
+        },
+      })._tag,
+    ).toBe('Staged')
+    expect(store.claimNextPublication('publisher', '2026-08-13T01:02:05.000Z', 60_000)).toEqual(
+      expect.objectContaining({
+        _tag: 'OpenPullRequest',
+        taskKind: 'issue_work',
+        issueNumber: 12,
+        pullRequestTitle: 'Fix #12: Broken thing',
+      }),
+    )
   })
 
   it.each(['owned', 'maintained'] as const)('keeps every open %s issue visible for Approval', (ownership) => {
@@ -6117,7 +6154,7 @@ describe('journal store', () => {
           headSha,
           provider: 'codex',
           sessionId: `session-${number}`,
-          model: 'gpt-5.6-sol',
+          model: 'gpt-6-astra',
           agentVersion: '1.2.3',
           skillDigest: 'f'.repeat(64),
           startedAt: '2026-08-13T01:01:00.000Z',
@@ -6156,7 +6193,7 @@ describe('journal store', () => {
         headSha: task.pullRequest.headSha,
         provider: 'codex',
         sessionId: 'session-1',
-        model: 'gpt-5.6-sol',
+        model: 'gpt-6-astra',
         agentVersion: '1.2.3',
         skillDigest: 'f'.repeat(64),
         startedAt: '2026-08-13T01:01:00.000Z',

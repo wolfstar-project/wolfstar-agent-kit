@@ -66,7 +66,7 @@ The report has two lists.
 - With it, nothing in `server/` is auto-imported on 4.x under compatibility version 5, so the helper fails at runtime. Ask the module to export it, or keep `experimental.nitroAutoImports: true` with a comment that names the helpers until it does.
 - On Nuxt 5, server auto-imports drop only the h3 and Nitro helpers. Helpers that modules register, and `server/utils` and `shared/utils` exports, stay auto-imported. This was checked against `packages/nitro-server/src/index.ts` on `nuxt/nuxt` `main` on 2026-10-06.
 
-Seen on 2026-10-06: `nuxt-auth-utils` (`getUserSession`, `requireUserSession`, `setUserSession`), `@nuxtjs/turnstile` (`verifyTurnstileToken`), `evlog` (`useLogger`), and `@harlan-zw/nuxt-wide-events` (`createWideEvent`).
+Seen on 2026-10-06: `nuxt-auth-utils` (`getUserSession`, `requireUserSession`, `setUserSession`), `@nuxtjs/turnstile` (`verifyTurnstileToken`), `evlog` (`useLogger`), and `@wolfstar-project/nuxt-wide-events` (`createWideEvent`).
 
 **"Unmapped auto-imports"** needs a fix by hand. The script exits with code 1 while any remain.
 

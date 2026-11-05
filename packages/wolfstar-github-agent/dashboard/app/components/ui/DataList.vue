@@ -81,7 +81,7 @@ const isLoading = computed(() => loading || (!hydrated.value && !items?.length))
 // squashes even a dominant row into a third of the track and renders the tail
 // as slivers, so the bars carry no magnitude. An explicit `barTotal` still wins.
 const computedBarTotal = computed(() => {
-  if (barTotal != null) return barTotal
+  if (barTotal !== undefined && barTotal !== null) return barTotal
   if (!barValue || !items?.length) return 0
   return items.reduce((max, item) => Math.max(max, barValue!(item)), 0)
 })

@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite'
 // This query deliberately reads no sessions, cookies, tokens, or private keys.
 const directory = process.argv[2]
 if (!directory || process.argv.length !== 3) throw new Error('Provide the browser-auth directory.')
-const authority = createHash('sha256').update('https://agent.wolfstar.rocks').digest('hex')
+const authority = createHash('sha256').update('https://agent.harlanzw.com').digest('hex')
 const database = new DatabaseSync(join(directory, authority, 'auth.sqlite'), { readOnly: true })
 try {
   const userId = database.prepare('SELECT user_id FROM account WHERE id=1').get()?.user_id

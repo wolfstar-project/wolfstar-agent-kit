@@ -162,6 +162,7 @@ describe('a fresh Review publishes its Merge risk verdict', () => {
           throw new Error('A clean review must not queue Repair work.')
         },
         getRepairedHeadFindings: () => [],
+        listReviewRuns: () => [],
         repairRoundPlan: () => ({ _tag: 'Allowed' as const, number: 1 }),
         getWorkerSession: () => null,
         storedReviewForHead: () => ({ _tag: 'None' }),
@@ -285,6 +286,7 @@ describe('a fresh Review publishes its Merge risk verdict', () => {
           throw new Error('A clean review must not queue Repair work.')
         },
         getRepairedHeadFindings: () => [],
+        listReviewRuns: () => [],
         repairRoundPlan: () => ({ _tag: 'Allowed' as const, number: 1 }),
         getWorkerSession: () => null,
         storedReviewForHead: () => ({ _tag: 'None' }),

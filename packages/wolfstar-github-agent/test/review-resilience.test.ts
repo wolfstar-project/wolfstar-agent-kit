@@ -158,6 +158,7 @@ function harness(input: {
           return { _tag: 'Queued', taskId: 'repair-task', rounds: { number: 1, limit: 3 } }
         }),
       getRepairedHeadFindings: () => [],
+      listReviewRuns: () => [],
       repairRoundPlan: () => input.repairRounds ?? { _tag: 'Allowed', number: 1 },
       storedReviewForHead: (_repository, _pullRequestNumber, headSha) => {
         const run = (input.reviewRuns ?? []).find((candidate) => candidate.headSha === headSha)
@@ -391,7 +392,7 @@ describe('review resilience', () => {
           headSha: 'abc123',
           provider: 'codex',
           sessionId: 'stored-session',
-          model: 'gpt-5.6-sol',
+          model: 'gpt-6-astra',
           agentVersion: '0.0.0',
           skillDigest: 'a'.repeat(64),
           startedAt: '2026-08-13T00:40:00.000Z',

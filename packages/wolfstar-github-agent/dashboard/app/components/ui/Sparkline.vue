@@ -103,10 +103,10 @@ function normalize(input: number[] | Datum[] | undefined, yAxis?: string): numbe
   // A series can carry null/undefined holes. Detect the key from the first
   // real datum and treat holes as 0 so neither key-detection nor access ever
   // derefs null.
-  const first = data.find((d) => d != null)
+  const first = data.find((d) => d !== undefined && d !== null)
   if (!first) return []
   const yKey = yAxis || guessYKey(first)
-  return data.map((d) => (d == null ? 0 : Number(d[yKey]) || 0))
+  return data.map((d) => (d === undefined || d === null ? 0 : Number(d[yKey]) || 0))
 }
 
 function guessYKey(d: Datum): string {

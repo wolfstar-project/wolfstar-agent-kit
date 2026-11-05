@@ -11,15 +11,15 @@ Use this Skill with [email-triage](../email-triage/SKILL.md) for inbox checks an
 
 ## Identity map
 
-| Purpose                  | Email address             | Himalaya account                                             |
-| ------------------------ | ------------------------- | ------------------------------------------------------------ |
-| Wolfstar's personal work | `contact@wolfstar.rocks`  | `wolfstar`                                                   |
-| Client work              | `clients@wolfstar.rocks`  | `clients`                                                    |
-| Explicit agent identity  | `agent@wolfstar.rocks`    | Discover through `account list`; never substitute `wolfstar` |
-| Hotmail                  | `wolfstar103@hotmail.com` | `hotmail`                                                    |
+| Purpose                  | Email address             | Himalaya account                                               |
+| ------------------------ | ------------------------- | -------------------------------------------------------------- |
+| Wolfstar's personal work | `contact@wolfstar.rocks`  | `wolfstarzw`                                                   |
+| Client work              | `clients@harlanzw.com`    | `clients`                                                      |
+| Explicit agent identity  | `agent@harlanzw.com`      | Discover through `account list`; never substitute `wolfstarzw` |
+| Hotmail                  | `wolfstar103@hotmail.com` | `hotmail`                                                      |
 
 The desktop Himalaya config is `~/.config/himalaya/config.toml`.
-`wolfstar` and `clients` authenticate as `contact@wolfstar.rocks` on Zoho.
+`wolfstarzw` and `clients` authenticate as `contact@wolfstar.rocks` on Zoho.
 They share one mailbox. The `clients` profile selects a different From address.
 A Chrome profile separates cookies and signed-in sessions. It does not separate Zoho mail.
 An Agent profile grants no extra authority to publish or send.
@@ -46,10 +46,10 @@ Discover its accounts separately. Desktop account names do not prove remote avai
 Read commands place options after the subcommand:
 
 ```bash
-himalaya envelope list -a wolfstar -o json -s 50 -f INBOX
-himalaya envelope list -a clients -o json -s 50 -f INBOX to clients@wolfstar.rocks
+himalaya envelope list -a wolfstarzw -o json -s 50 -f INBOX
+himalaya envelope list -a clients -o json -s 50 -f INBOX to clients@harlanzw.com
 himalaya message read -a clients --preview -f INBOX <id>
-himalaya folder list -a wolfstar
+himalaya folder list -a wolfstarzw
 ```
 
 Always use `--preview` with `message read`. Normal reads set the Seen flag.
@@ -81,13 +81,13 @@ Verify the target site's signed-in account before reading mail in a browser.
 
 ## Zoho and Mailflare
 
-Keep `wolfstar.rocks` receiving through Zoho unless Wolfstar requests migration.
+Keep `harlanzw.com` receiving through Zoho unless Wolfstar requests migration.
 Use Zoho aliases when another public address should share the existing account.
 For a separate Mailflare inbox, route a dedicated receiving subdomain through Cloudflare.
 Forward the chosen Zoho alias to that inbox using a verified Zoho rule.
 Configure outgoing authentication separately from incoming MX records.
 Do not enable root-domain Cloudflare Email Routing to configure one alias.
 
-The Mailflare checkout is `~/sites/mail.wolfstar.rocks`.
+The Mailflare checkout is `~/sites/mail.harlanzw.com`.
 Inspect live DNS, mailbox configuration, forwarding, and sender authorization before claiming delivery works.
 Never infer agent mail delivery from a Chrome profile, an alias, or a local config entry.

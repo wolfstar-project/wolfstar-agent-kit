@@ -169,7 +169,6 @@ const recovery = [
 ]
 
 const gaps = [
-  { title: 'Claude review', text: 'The service starts Codex or opencode Agents only, so no Claude review runs.' },
   { title: 'Take Ownership', text: 'The service does not watch a merge deployment or run production smoke checks.' },
 ]
 

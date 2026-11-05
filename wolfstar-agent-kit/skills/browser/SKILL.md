@@ -21,8 +21,8 @@ For `dev-browser`, read `dev-browser --help` before unfamiliar operations.
 
 | Identity | Email                    | Preferred browser         | Endpoint                   |
 | -------- | ------------------------ | ------------------------- | -------------------------- |
-| Clients  | `clients@wolfstar.rocks` | Chrome Clients Automation | `http://127.0.0.1:9223`    |
-| Agent    | `agent@wolfstar.rocks`   | Chrome Agent Automation   | `http://127.0.0.1:9224`    |
+| Clients  | `clients@harlanzw.com`   | Chrome Clients Automation | `http://127.0.0.1:9223`    |
+| Agent    | `agent@harlanzw.com`     | Chrome Agent Automation   | `http://127.0.0.1:9224`    |
 | Wolfstar | `contact@wolfstar.rocks` | Existing Wolfstar Chrome  | Built-in dynamic discovery |
 
 The dedicated data directories are `~/.local/share/wolfstar-agent-kit/chrome/clients` and `~/.local/share/wolfstar-agent-kit/chrome/agent`.

@@ -36,7 +36,7 @@ function reviewStoreAt(effort: 'low' | undefined) {
     headSha: 'abc123',
     provider: 'codex',
     sessionId: 'session-1',
-    model: 'gpt-5.6-sol',
+    model: 'gpt-6-astra',
     ...(effort === undefined ? {} : { reasoningEffort: effort }),
     agentVersion: '1.2.3',
     skillDigest: 'f'.repeat(64),

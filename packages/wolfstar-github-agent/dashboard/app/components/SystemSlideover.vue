@@ -59,6 +59,11 @@ function inspectRecovery(candidate: Extract<RepairRecoveryRequest, { _tag: 'Plan
   recoveryOpen.value = true
 }
 const { connection: host, history: hostHistory } = useHogwildStatus()
+const terminalHost = useTerminalHost()
+/** The controller's own host: Hogwild, or the edge deployment when the dashboard runs there. */
+const primaryHost = computed(() =>
+  terminalHost.state.value._tag === 'Available' ? terminalHost.state.value.capabilities.hostLabel : 'Hogwild',
+)
 const incidentLimit = ref(50)
 const visibleIncidents = computed(() => incidents.value.slice(0, incidentLimit.value))
 const desktopState = computed(() => desktopPresentation(snapshot.value.desktop, !controlsUnavailable.value))
@@ -301,12 +306,13 @@ function activityLine(item: AgentActivityItem): string {
             <span class="h-px flex-1 bg-border" aria-hidden="true" />
           </h3>
           <p class="mt-2 text-sm text-muted">
-            Hogwild takes work first. Desktop helps only when Hogwild has no capacity for queued work.
+            {{ primaryHost }} takes work first. Desktop helps only when {{ primaryHost }} has no capacity for queued
+            work.
           </p>
           <div class="mt-4 divide-y divide-default border-y border-default">
             <div class="py-4">
               <div class="flex items-center justify-between gap-3">
-                <h4 class="font-medium">Hogwild</h4>
+                <h4 class="font-medium">{{ primaryHost }}</h4>
                 <StateBadge tone="neutral" label="Primary" />
               </div>
               <dl class="mt-3 grid grid-cols-2 gap-3 text-sm">
@@ -345,7 +351,7 @@ function activityLine(item: AgentActivityItem): string {
                     :color="count === hogwildSlots ? 'primary' : 'neutral'"
                     :variant="count === hogwildSlots ? 'solid' : 'outline'"
                     :aria-pressed="count === hogwildSlots"
-                    :aria-label="`${count} Agent slots on Hogwild`"
+                    :aria-label="`${count} Agent slots on ${primaryHost}`"
                     :disabled="controlPending"
                     @click="setAgentSlots('hogwild', count)"
                   >
@@ -353,7 +359,7 @@ function activityLine(item: AgentActivityItem): string {
                   </UButton>
                 </div>
                 <p class="mt-2 text-xs" :class="overMemory ? 'status-warning' : 'text-muted'">
-                  {{ memoryAdvice }}<template v-if="overMemory"> Hogwild may run out of memory. </template>
+                  {{ memoryAdvice }}<template v-if="overMemory"> {{ primaryHost }} may run out of memory. </template>
                 </p>
               </div>
               <HostWork
@@ -437,7 +443,8 @@ function activityLine(item: AgentActivityItem): string {
                   </UButton>
                 </div>
                 <p class="mt-2 text-xs text-muted">
-                  Zero keeps every Agent on Hogwild. Each desktop Agent needs {{ slotLimits.memoryPerAgentGiB }} GiB.
+                  Zero keeps every Agent on {{ primaryHost }}. Each desktop Agent needs
+                  {{ slotLimits.memoryPerAgentGiB }} GiB.
                 </p>
               </div>
               <div class="mt-4">

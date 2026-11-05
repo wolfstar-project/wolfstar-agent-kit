@@ -309,8 +309,8 @@ export function createProviderCapacitySource(options: ProviderCapacitySourceOpti
   const readClaude = options.readClaude ?? (() => Promise.resolve({ _tag: 'Unpublished' }))
   const readCodex = options.readCodex ?? (() => readCodexCapacity())
   const readOpencode = options.readOpencode ?? (() => readZaiCapacity())
-  const readGo = options.readOpencodeGo ?? (async () => readOpencodeGoCapacity())
   let claude: ProviderCapacity = { _tag: 'Unpublished' }
+  const readGo = options.readOpencodeGo ?? (async () => readOpencodeGoCapacity())
   let codex: ProviderCapacity = { _tag: 'Unavailable', reason: 'The Codex weekly window has not been read yet.' }
   let opencode: ProviderCapacity = { _tag: 'Unavailable', reason: 'The GLM Coding Plan quota has not been read yet.' }
   let go: ProviderCapacity = { _tag: 'Unavailable', reason: 'OpenCode Go credentials have not been read yet.' }

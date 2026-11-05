@@ -1,6 +1,8 @@
 import type { GitHubSource } from './github.ts'
 import type { JournalStore } from './store.ts'
-import type { RepositoryMapping, Routine, RoutineRun } from './types.ts'
+import type { RepositoryMapping, Routine, RoutineRun, RoutineSpec } from './types.ts'
+import { createHash } from 'node:crypto'
+import { ok } from './result.ts'
 import { candidateIssueCommands } from './candidate-issue-controller.ts'
 import { routineReportCommand } from './routine-report-controller.ts'
 import { dueRoutine, parseCron } from './routine-schedule.ts'
@@ -15,6 +17,7 @@ export type RoutineSyncOutcome =
   | { _tag: 'Unread'; reason: string }
 
 export interface RoutineSyncDependencies {
+  specOverride?: RoutineSpec | undefined
   github: Pick<GitHubSource, 'readRoutineSpec'>
   now: () => Date
   signal?: AbortSignal
@@ -39,7 +42,15 @@ export async function syncRepositoryRoutines(
   repository: RepositoryMapping,
   dependencies: RoutineSyncDependencies,
 ): Promise<RoutineSyncOutcome> {
-  const source = await dependencies.github.readRoutineSpec(repository, dependencies.signal)
+  const override = dependencies.specOverride
+  const source =
+    override === undefined
+      ? await dependencies.github.readRoutineSpec(repository, dependencies.signal)
+      : ok({
+          _tag: 'Present' as const,
+          specSha: createHash('sha256').update(JSON.stringify(override)).digest('hex'),
+          text: '',
+        })
   if (source._tag === 'Err') return { _tag: 'Unread', reason: source.error.message }
 
   const at = dependencies.now().toISOString()
@@ -59,7 +70,7 @@ export async function syncRepositoryRoutines(
     return { _tag: 'Absent', retired }
   }
 
-  const spec = parseRoutineSpec(source.value.text)
+  const spec = override === undefined ? parseRoutineSpec(source.value.text) : ok(override)
   if (spec._tag === 'Err') {
     // A refused spec removes this repository's Routines. Keeping the last good
     // one would run a schedule nobody can read in the source any more.

@@ -280,3 +280,125 @@ describe('gitHub auto-merge handoff', () => {
     })
   })
 })
+
+describe('external reviewer evidence at the merge boundary', () => {
+  function reviewed(
+    options: {
+      state?: string
+      commit?: string
+      unresolvedSecondPage?: boolean
+      failRead?: boolean
+      fallback?: boolean
+      revokeOnFallback?: boolean
+      closedDuringReviewRead?: boolean
+    } = {},
+  ) {
+    let mutations = 0
+    let pages = 0
+    let reads = 0
+    const service = createGitHubPullRequestMerger({
+      tokens: {
+        getToken: async () => ok({ token: 'token', expiresAt: '2126-01-01T00:00:00Z' }),
+        invalidate: () => undefined,
+      },
+      createClient: () =>
+        ({
+          paginate: async () => {
+            reads++
+            if (options.failRead) throw new Error('GitHub unavailable')
+            return [
+              {
+                user: { login: 'reviewer[bot]' },
+                state: options.revokeOnFallback && reads > 1 ? 'CHANGES_REQUESTED' : (options.state ?? 'APPROVED'),
+                commit_id: options.commit ?? 'abc123',
+              },
+            ]
+          },
+          graphql: async (query: string, variables: { after?: string }) => {
+            if (query.includes('reviewThreads')) {
+              pages++
+              return {
+                repository: {
+                  pullRequest: {
+                    headRefOid: 'abc123',
+                    reviewThreads: {
+                      nodes: variables.after
+                        ? [
+                            {
+                              isResolved: false,
+                              comments: {
+                                nodes: [{ author: { login: 'reviewer[bot]' }, originalCommit: { oid: 'abc123' } }],
+                              },
+                            },
+                          ]
+                        : [],
+                      pageInfo: {
+                        hasNextPage: Boolean(options.unresolvedSecondPage && !variables.after),
+                        endCursor: 'next',
+                      },
+                    },
+                  },
+                },
+              }
+            }
+            if (options.fallback) throw new Error('Pull request is in clean status')
+            mutations++
+            return {}
+          },
+          rest: {
+            pulls: {
+              get: async () => ({
+                data: {
+                  ...currentPullRequest(),
+                  state: options.closedDuringReviewRead && reads > 0 ? 'closed' : 'open',
+                },
+              }),
+              listReviews: () => undefined,
+              merge: async () => {
+                mutations++
+                return { data: { merged: true, sha: 'merged' } }
+              },
+            },
+          },
+        }) as unknown as Octokit,
+    })
+    return {
+      run: () =>
+        service.merge({
+          ...input,
+          reviewerPolicy: { reviewers: ['reviewer[bot]'], require: 'all', allowResolvedFeedback: false },
+        }),
+      mutations: () => mutations,
+      pages: () => pages,
+    }
+  }
+  it('hands off only after a current-head native approval', async () => {
+    const h = reviewed()
+    expect((await h.run())._tag).toBe('Ok')
+    expect(h.mutations()).toBe(1)
+  })
+  it.each([{ commit: 'old' }, { state: 'CHANGES_REQUESTED' }, { failRead: true }])(
+    'refuses stale, blocking or unavailable evidence: %j',
+    async (options) => {
+      const h = reviewed(options)
+      expect((await h.run())._tag).toBe('Err')
+      expect(h.mutations()).toBe(0)
+    },
+  )
+  it('reads every thread page before allowing a merge', async () => {
+    const h = reviewed({ unresolvedSecondPage: true })
+    expect((await h.run())._tag).toBe('Err')
+    expect(h.pages()).toBe(2)
+    expect(h.mutations()).toBe(0)
+  })
+  it('rechecks reviewers before a direct-merge fallback', async () => {
+    const h = reviewed({ fallback: true, revokeOnFallback: true })
+    expect((await h.run())._tag).toBe('Err')
+    expect(h.mutations()).toBe(0)
+  })
+  it('refuses a pull request closed while external reviews were being read', async () => {
+    const h = reviewed({ closedDuringReviewRead: true })
+    expect((await h.run())._tag).toBe('Err')
+    expect(h.mutations()).toBe(0)
+  })
+})

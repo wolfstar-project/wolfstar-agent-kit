@@ -64,7 +64,7 @@ Every finding in the references carries a tier.
 End with the verification table from [verification](references/verification.md#report).
 List every opt-out kept, every Tier 2 item skipped, and every Tier 3 follow-up, each with a one-line reason.
 
-Example rows, from the trial on a copy of wolfstar.rocks:
+Example rows, from the trial on a copy of harlanzw.com:
 
 | Check          | Result                                                          |
 | -------------- | --------------------------------------------------------------- |

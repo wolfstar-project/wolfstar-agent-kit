@@ -33,22 +33,29 @@ run_check() {
 
 skipped=()
 
-# oxlint
-if should_skip oxlint; then
-  skipped+=("oxlint")
-elif [ -f "node_modules/.bin/oxlint" ]; then
-  run_check oxlint ./node_modules/.bin/oxlint .
+# Use the repository script before choosing a linter.
+if should_skip lint; then
+  skipped+=("lint")
+elif has_script lint; then
+  run_check lint pnpm lint
 else
-  skipped+=("oxlint")
-fi
+  # oxlint
+  if should_skip oxlint; then
+    skipped+=("oxlint")
+  elif [ -f "node_modules/.bin/oxlint" ]; then
+    run_check oxlint ./node_modules/.bin/oxlint .
+  else
+    skipped+=("oxlint")
+  fi
 
-# oxfmt
-if should_skip oxfmt; then
-  skipped+=("oxfmt")
-elif [ -f "node_modules/.bin/oxfmt" ]; then
-  run_check oxfmt ./node_modules/.bin/oxfmt --check .
-else
-  skipped+=("oxfmt")
+  # oxfmt
+  if should_skip oxfmt; then
+    skipped+=("oxfmt")
+  elif [ -f "node_modules/.bin/oxfmt" ]; then
+    run_check oxfmt ./node_modules/.bin/oxfmt --check .
+  else
+    skipped+=("oxfmt")
+  fi
 fi
 
 # Use the repository script before choosing a compiler.

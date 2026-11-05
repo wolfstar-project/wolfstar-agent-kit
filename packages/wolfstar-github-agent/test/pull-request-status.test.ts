@@ -32,7 +32,7 @@ describe('pull request status controller', () => {
       headSha: 'abc123',
       provider: 'codex' as const,
       sessionId: 'session-1',
-      model: 'gpt-5.6-sol',
+      model: 'gpt-6-astra',
       agentVersion: '1',
       skillDigest: 'digest',
       startedAt: '2026-08-13T10:00:00.000Z',

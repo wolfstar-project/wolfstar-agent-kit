@@ -94,7 +94,7 @@ export function useChartTickPlan(opts: UseChartTickPlanOptions) {
     const first = tickPlan.value.indices[0]
     // No ticks → `format` never runs, so a stable sentinel (not a clock read,
     // which would risk an SSR≠client year boundary) is enough.
-    if (first == null || !dates[first]) return 0
+    if (first === undefined || first === null || !dates[first]) return 0
     return Number(dates[first]!.slice(0, 4))
   })
 

@@ -57,7 +57,7 @@ describe('parseKitServiceConfig', () => {
       github: {
         app_id: 123,
         private_key_path: '/private/app.pem',
-        allowed_owners: [' Wolfstar-Project/Wolfstar-Agent-Kit '],
+        allowed_owners: [' Wolfstar-Zw/Wolfstar-Agent-Kit '],
       },
     })
     expect(parseKitServiceConfig(stringify(configured))).toMatchObject({ _tag: 'Ok' })
@@ -70,7 +70,7 @@ describe('parseKitServiceConfig', () => {
 
   it.each([
     ['wolfstar-project', 'invalid/path/extra'],
-    ['wolfstar-project', 'WOLFSTAR-PROJECT'],
+    ['wolfstar-project', 'WOLFSTAR-ZW'],
     ['wolfstar-project', ''],
   ])('rejects invalid Service allow-list entries %j', (...allowed_owners) => {
     expect(
