@@ -11,15 +11,15 @@ Use this Skill with [email-triage](../email-triage/SKILL.md) for inbox checks an
 
 ## Identity map
 
-| Purpose                  | Email address             | Himalaya account                                               |
-| ------------------------ | ------------------------- | -------------------------------------------------------------- |
-| Wolfstar's personal work | `contact@wolfstar.rocks`  | `wolfstarzw`                                                   |
-| Client work              | `clients@harlanzw.com`    | `clients`                                                      |
-| Explicit agent identity  | `agent@harlanzw.com`      | Discover through `account list`; never substitute `wolfstarzw` |
-| Hotmail                  | `wolfstar103@hotmail.com` | `hotmail`                                                      |
+| Purpose                  | Email address             | Himalaya account                                             |
+| ------------------------ | ------------------------- | ------------------------------------------------------------ |
+| Wolfstar's personal work | `contact@wolfstar.rocks`  | `wolfstar`                                                   |
+| Client work              | `clients@harlanzw.com`    | `clients`                                                    |
+| Explicit agent identity  | `agent@harlanzw.com`      | Discover through `account list`; never substitute `wolfstar` |
+| Hotmail                  | `wolfstar103@hotmail.com` | `hotmail`                                                    |
 
 The desktop Himalaya config is `~/.config/himalaya/config.toml`.
-`wolfstarzw` and `clients` authenticate as `contact@wolfstar.rocks` on Zoho.
+`wolfstar` and `clients` authenticate as `contact@wolfstar.rocks` on Zoho.
 They share one mailbox. The `clients` profile selects a different From address.
 A Chrome profile separates cookies and signed-in sessions. It does not separate Zoho mail.
 An Agent profile grants no extra authority to publish or send.
@@ -46,10 +46,10 @@ Discover its accounts separately. Desktop account names do not prove remote avai
 Read commands place options after the subcommand:
 
 ```bash
-himalaya envelope list -a wolfstarzw -o json -s 50 -f INBOX
+himalaya envelope list -a wolfstar -o json -s 50 -f INBOX
 himalaya envelope list -a clients -o json -s 50 -f INBOX to clients@harlanzw.com
 himalaya message read -a clients --preview -f INBOX <id>
-himalaya folder list -a wolfstarzw
+himalaya folder list -a wolfstar
 ```
 
 Always use `--preview` with `message read`. Normal reads set the Seen flag.

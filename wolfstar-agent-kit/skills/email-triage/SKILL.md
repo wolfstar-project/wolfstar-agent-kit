@@ -12,8 +12,8 @@ Read [email-usage](../email-usage/SKILL.md) first for identities, shared mailbox
 
 Honor the requested address, account, folder, date range, and message limit.
 Use explicit `-a <account>` flags on every command.
-For an unspecified inbox check, inspect `wolfstarzw` then `hotmail`, when both exist on the current host.
-Do not scan `clients` again. It shares the `wolfstarzw` mailbox.
+For an unspecified inbox check, inspect `wolfstar` then `hotmail`, when both exist on the current host.
+Do not scan `clients` again. It shares the `wolfstar` mailbox.
 For client-only checks, use `clients` and inspect recipient headers and client folders.
 Do not treat the account flag as a recipient filter.
 For `agent@harlanzw.com`, discover its actual mailbox and delivery route before reading mail.
@@ -22,9 +22,9 @@ If that identity is unavailable, report it rather than substituting another mail
 ## Read and classify
 
 ```bash
-himalaya envelope list -a wolfstarzw -o json -s 50 -f INBOX
-himalaya envelope list -a wolfstarzw -o json -s 50 -f INBOX not flag seen
-himalaya message read -a wolfstarzw --preview -f INBOX <id>
+himalaya envelope list -a wolfstar -o json -s 50 -f INBOX
+himalaya envelope list -a wolfstar -o json -s 50 -f INBOX not flag seen
+himalaya message read -a wolfstar --preview -f INBOX <id>
 ```
 
 Use `--preview` for every body read. Normal reads mark messages as Seen.
@@ -61,8 +61,8 @@ For follow-up requests, inspect Sent from the requested underlying mailbox.
 Use the last 14 days unless Wolfstar supplies another range.
 
 ```bash
-himalaya envelope list -a wolfstarzw -o json -s 50 -f Sent after <yyyy-mm-dd>
-himalaya envelope list -a wolfstarzw -o json -f INBOX subject "<subject>" from "<recipient>"
+himalaya envelope list -a wolfstar -o json -s 50 -f Sent after <yyyy-mm-dd>
+himalaya envelope list -a wolfstar -o json -f INBOX subject "<subject>" from "<recipient>"
 ```
 
 Check relevant client folders and archives for replies before proposing a chase.
