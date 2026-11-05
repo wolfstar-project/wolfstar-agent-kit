@@ -82,7 +82,7 @@ await writeFile(
   JSON.stringify({ providers, plugins: ['./plugins/wolfstar-hooks.ts'] }),
   { mode: 0o600 },
 )
-await writeFile(join(home, '.gitconfig'), '[user]\n name = Wolfstar Agent Kit\n email = agent@harlanzw.com\n', {
+await writeFile(join(home, '.gitconfig'), '[user]\n name = Wolfstar Agent Kit\n email = agent@wolfstar.rocks\n', {
   mode: 0o600,
 })
 const codex = await realpath(values.codex!)

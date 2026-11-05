@@ -15,7 +15,7 @@ Use this Skill with [email-triage](../email-triage/SKILL.md) for inbox checks an
 | ------------------------ | ------------------------- | ------------------------------------------------------------ |
 | Wolfstar's personal work | `contact@wolfstar.rocks`  | `wolfstar`                                                   |
 | Client work              | `clients@harlanzw.com`    | `clients`                                                    |
-| Explicit agent identity  | `agent@harlanzw.com`      | Discover through `account list`; never substitute `wolfstar` |
+| Explicit agent identity  | `agent@wolfstar.rocks`    | Discover through `account list`; never substitute `wolfstar` |
 | Hotmail                  | `wolfstar103@hotmail.com` | `hotmail`                                                    |
 
 The desktop Himalaya config is `~/.config/himalaya/config.toml`.

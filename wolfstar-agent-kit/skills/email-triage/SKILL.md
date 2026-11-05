@@ -16,7 +16,7 @@ For an unspecified inbox check, inspect `wolfstar` then `hotmail`, when both exi
 Do not scan `clients` again. It shares the `wolfstar` mailbox.
 For client-only checks, use `clients` and inspect recipient headers and client folders.
 Do not treat the account flag as a recipient filter.
-For `agent@harlanzw.com`, discover its actual mailbox and delivery route before reading mail.
+For `agent@wolfstar.rocks`, discover its actual mailbox and delivery route before reading mail.
 If that identity is unavailable, report it rather than substituting another mailbox.
 
 ## Read and classify
