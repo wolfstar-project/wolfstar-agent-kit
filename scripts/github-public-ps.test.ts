@@ -56,7 +56,8 @@ function installFakeGh(directory: string, root: string) {
   writeFileSync(script, recorder)
   if (windows) {
     copyFileSync(process.execPath, join(directory, 'gh.exe'))
-    return { NODE_OPTIONS: `--require "${script}"`, FAKE_GH_PRELOAD: '1' }
+    // NODE_OPTIONS reads a backslash as an escape, so pass the path with forward slashes.
+    return { NODE_OPTIONS: `--require "${script.replaceAll('\\', '/')}"`, FAKE_GH_PRELOAD: '1' }
   }
   writeFileSync(join(directory, 'gh'), `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(script)} "$@"\n`, {
     mode: 0o755,
