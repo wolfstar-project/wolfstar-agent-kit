@@ -79,7 +79,7 @@ Never publish under my name without approval. Draft it, show the exact text, wai
 
 - For public GitHub reads, use `agent-gh`. It uses `wolfstar-agent-beep` and a separate API quota.
 - GitHub Agent workers route `gh` reads through the same CLI automatically.
-- The token file is `~/.config/wolfstar-agent-kit/github-public-token`. Keep it owner-only with mode `600`.
+- The token file is `~/.config/wolfstar-agent-kit/github-public-token`. Keep it owner-only with mode `600`. On Windows, `agent-gh --setup-token` writes it with an owner-only ACL.
 - Use a fine-grained token with Public repositories access and no account permissions.
 - If that token fails, stop. Never switch to Wolfstar's credentials to finish a public read.
 - The public CLI refuses writes and raw GraphQL. Use `pr view`, `issue view`, or `search` for GraphQL reads.

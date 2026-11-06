@@ -693,6 +693,8 @@ Dependency updates keep one combined Candidate and a shared open-issue fingerpri
 
 `pnpm sync:context` installs `agent-gh` for public GitHub reads.
 `pnpm sync:context:hogwild` installs it on Hogwild.
+On Windows, `pnpm sync:context` installs the native PowerShell 7 build instead.
+[docs/agent-gh.md](../../docs/agent-gh.md) covers setup on both platforms and troubleshooting.
 Agents use `wolfstar-agent-beep` for these reads.
 The Service gives worker processes the same CLI as `gh`.
 The controller keeps its existing credentials and publication rules.
@@ -701,6 +703,7 @@ Create a fine-grained token on `wolfstar-agent-beep`.
 Select **Public repositories** and add no account permissions.
 Save it in `~/.config/wolfstar-agent-kit/github-public-token` on each Agent host.
 Run `chmod 600` on that file.
+On Windows, run `agent-gh --setup-token`, which writes it with an owner-only ACL.
 Never put the token in Git, Agent instructions, or repository environment files.
 
 Check the account with `agent-gh api user --jq .login`.
