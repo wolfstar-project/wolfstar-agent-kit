@@ -11,6 +11,7 @@ function dependencies(env: Env) {
     webhookSecret: env.GITHUB_WEBHOOK_SECRET,
     webhooks: env.WEBHOOKS,
     state: env.STATE,
+    assets: env.ASSETS,
     // Half a configuration throws, so a mistake fails closed instead of leaving the dashboard open.
     access: accessSettings(env.ACCESS_TEAM_DOMAIN, env.ACCESS_AUD),
     fetch: (input: RequestInfo | URL, init?: RequestInit) => fetch(input, init),

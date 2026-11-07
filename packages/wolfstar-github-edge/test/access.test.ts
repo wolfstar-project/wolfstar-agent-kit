@@ -80,6 +80,8 @@ describe('Cloudflare Access check', () => {
       expect(response.status).toBe(403)
     }
     expect(edge.controller).toHaveLength(0)
+    // The page is behind Access too: its own build is never read for a visitor without a token.
+    expect(edge.shell).toHaveLength(0)
   })
 
   it('refuses a token for another application, another team, a wrong key, or past its expiry', async () => {

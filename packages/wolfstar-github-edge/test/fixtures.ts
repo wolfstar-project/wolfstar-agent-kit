@@ -25,12 +25,25 @@ export interface ControllerCall {
   body: string
 }
 
+/** What the dashboard build holds, by path. */
+export const SHELL_FILES: Record<string, { type: string; body: string }> = {
+  '/': {
+    type: 'text/html; charset=utf-8',
+    body: '<html><style>a{}</style><script>window.__NUXT__={}</script></html>',
+  },
+  '/sessions': { type: 'text/html; charset=utf-8', body: '<html><script src="/_nuxt/a.js"></script></html>' },
+  '/_nuxt/a.js': { type: 'text/javascript; charset=utf-8', body: 'console.log(1)' },
+  '/_payload.json': { type: 'application/json; charset=utf-8', body: '{}' },
+}
+
 export interface TestEdge {
   dependencies: EdgeDependencies
   sent: WebhookDelivery[]
   objects: Map<string, string>
   /** Everything the Worker sent to the controller, webhooks and dashboard requests alike. */
   controller: ControllerCall[]
+  /** Every path the Worker asked its own build for. */
+  shell: string[]
 }
 
 export function createTestEdge(
@@ -46,8 +59,19 @@ export function createTestEdge(
   const sent: WebhookDelivery[] = []
   const objects = new Map<string, string>()
   const controller: ControllerCall[] = []
+  const shell: string[] = []
 
   const dependencies = {
+    assets: {
+      fetch: async (request: Request) => {
+        const path = new URL(request.url).pathname
+        shell.push(path)
+        const file = SHELL_FILES[path]
+        return file === undefined
+          ? new Response('Not found', { status: 404 })
+          : new Response(file.body, { headers: { 'content-type': file.type, etag: '"x"' } })
+      },
+    },
     controllerUrl: CONTROLLER_URL,
     webhookSecret: 'secret' in options ? options.secret : WEBHOOK_SECRET,
     webhooks: {
@@ -87,5 +111,5 @@ export function createTestEdge(
     now: () => options.now ?? Date.parse('2026-10-14T12:00:00.000Z'),
   } as unknown as EdgeDependencies
 
-  return { dependencies, sent, objects, controller }
+  return { dependencies, sent, objects, controller, shell }
 }
