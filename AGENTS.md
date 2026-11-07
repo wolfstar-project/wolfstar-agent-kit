@@ -10,7 +10,7 @@ pnpm lint:fix      # Oxlint autofix + Oxfmt
 pnpm check:context # Verify installed Agent instructions match agent-context/
 pnpm sync:skills   # Sync declared portable Skills through skilld
 pnpm check:skills  # Check installed Skills against .skills/skilld.json
-pnpm sync:context # Install tracked Claude and Codex instructions, the commit-msg hook, and the opencode plugin
+pnpm sync:context # Install tracked Claude and Codex instructions, the commit-msg hook, and the opencode plugin (Windows: agent-gh only)
 pnpm sync:context:hogwild # Install tracked instructions on Hogwild
 pnpm test:opencode-hooks # Run the opencode plugin against the real hook scripts
 pnpm release patch|minor|major  # Bump version, tag, push (syncs plugin.json, marketplace.json, skill frontmatter)
@@ -42,6 +42,8 @@ pnpm release patch|minor|major  # Bump version, tag, push (syncs plugin.json, ma
 **Two service checkouts**: Hogwild runs the controller from its own clone, and the desktop runs `wolfstar-desktop-agent` from a clone of the same path on the desktop. Both halves of an offloaded turn must speak the same shape, so `pnpm service:hogwild:update` moves both and `DESKTOP_PROTOCOL` in `desktop-protocol.ts` guards the gap. A desktop reporting an older protocol is stood down, and the work stays on Hogwild. Raise that constant whenever the turn or report shape changes.
 
 **Cloudflare Worker** (`packages/wolfstar-github-edge/`): a relay in front of the controller, which runs on Hogwild. It holds no Agent and no state beyond a Queue and an R2 bucket. The Worker checks the webhook signature with `GITHUB_WEBHOOK_SECRET` and queues the delivery, so a restarting controller loses none. The queue consumer forwards it to `CONTROLLER_URL/webhook`, and the controller verifies the signature again. Every other path is proxied to the same controller behind Cloudflare Access, with the public Origin translated to the controller's. Agent sessions, provider logins and the journal live on the controller's host, never on the Worker.
+
+**agent-gh** (`scripts/github-public.sh`, `scripts/github-public.ps1`): public GitHub reads as `wolfstar-agent-beep`. The PowerShell build is the native Windows twin; `scripts/github-public-ps.test.ts` holds both to one read policy, so change the allowlist in both. `pnpm sync:context` and `pnpm check:context` go through `scripts/agent-context-platform.ts`, which runs the bash scripts on Linux and `scripts/sync-agent-context.ps1` on Windows. Setup and troubleshooting: `docs/agent-gh.md`.
 
 **Worktrees**: `wt` (worktrunk) owns every worktree, at `<parent>/<repo>.<branch-slug>`. Full rules in `wolfstar-agent-kit/references/worktree-isolation.md`.
 

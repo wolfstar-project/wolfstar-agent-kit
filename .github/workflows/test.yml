@@ -89,6 +89,27 @@ jobs:
       # notes-viewer is a deployed service; its vitepress build has no other gate.
       - run: pnpm --filter notes-viewer build
 
+  # The PowerShell agent-gh on a real Windows host: ACLs, gh.exe resolution,
+  # and the installer. The workspace build scripts need no Windows toolchain
+  # for this, so the install skips them and covers the root package only.
+  windows:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts --filter wolfstar-agent-kit
+      - run: pnpm exec vitest run scripts/github-public-ps.test.ts scripts/agent-context-platform.test.ts
+        shell: pwsh
+
   # This job mirrors `pnpm test`, plus the hook suites that aggregate leaves out.
   # Add a new suite here when you add one to `package.json`.
   test:
@@ -156,6 +177,11 @@ jobs:
 
       - name: Installed Agent commands
         run: pnpm test:agent-cli
+
+      # Hosted Ubuntu ships PowerShell 7, so the PowerShell agent-gh runs here
+      # too, beside the bash wrapper whose policy it must match.
+      - name: Public GitHub CLI
+        run: pnpm test:github-public
 
       - name: Git hook
         run: pnpm test:commit-hook

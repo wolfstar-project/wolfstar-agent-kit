@@ -230,6 +230,8 @@ The Skills defer to these when the rules get long:
 - [Auto-merge](./wolfstar-agent-kit/references/auto-merge.md), what the agent may merge without me
 - [Code comments](./wolfstar-agent-kit/references/code-comments.md), when a comment earns its line
 
+[Public GitHub reads](./docs/agent-gh.md) covers `agent-gh` on Linux and in Windows PowerShell 7.
+
 Design notes for the service live in [`docs/plans/`](./docs/plans).
 
 ## Development
