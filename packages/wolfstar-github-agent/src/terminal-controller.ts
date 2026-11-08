@@ -3,7 +3,7 @@ import type { BrowserAuth } from './browser-auth.ts'
 import type { TerminalDiffSnapshot, TerminalDiffSource } from './terminal-diff.ts'
 import type { AgentSessionsCodexMode } from './types.ts'
 import { timingSafeEqual } from 'node:crypto'
-import { constants } from 'node:fs'
+import { constants, existsSync } from 'node:fs'
 import { access } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -93,6 +93,29 @@ export function createTerminalDiffRequests(now: () => number) {
   }
 }
 
+/**
+ * The files the controller's terminals load from the package layout.
+ *
+ * The source layout keeps this module in `src/`. The build bundles it into
+ * `dist/_chunks/`, one directory deeper, so a path written for one layout
+ * misses in the other. Each path lists both places and takes the one that exists.
+ */
+export function controllerTerminalPaths(moduleUrl: string, exists: (path: string) => boolean = existsSync) {
+  const resolve = (...relative: string[]): string => {
+    const paths = relative.map((path) => fileURLToPath(new URL(path, moduleUrl)))
+    return paths.find((path) => exists(path)) ?? paths[0]!
+  }
+  const extension = moduleUrl.endsWith('.ts') ? 'ts' : 'mjs'
+  return {
+    helperSource: resolve(`./terminal-helper.${extension}`, '../terminal-helper.mjs'),
+    claimScript: resolve(
+      '../../../wolfstar-agent-kit/scripts/worktree-claim.sh',
+      '../../../../wolfstar-agent-kit/scripts/worktree-claim.sh',
+    ),
+    staticDirectory: resolve('../dashboard/.output/public', '../../dashboard/.output/public'),
+  }
+}
+
 export async function createControllerTerminals(options: {
   directory: string
   origin: string
@@ -112,7 +135,7 @@ export async function createControllerTerminals(options: {
     discoverDesktopSessionProjects(homedir()),
   ])
   const providerArguments = controllerTerminalProviderArguments(options.codexMode)
-  const extension = import.meta.url.endsWith('.ts') ? 'ts' : 'mjs'
+  const paths = controllerTerminalPaths(import.meta.url)
   return createTerminalRuntime({
     directory: options.directory,
     origin: options.origin,
@@ -125,9 +148,9 @@ export async function createControllerTerminals(options: {
       claude: { executable: claude, argv: providerArguments.claude },
       opencode: { executable: opencode, argv: providerArguments.opencode },
     },
-    helperSource: fileURLToPath(new URL(`./terminal-helper.${extension}`, import.meta.url)),
-    claimScript: fileURLToPath(new URL('../../../wolfstar-agent-kit/scripts/worktree-claim.sh', import.meta.url)),
-    staticDirectory: fileURLToPath(new URL('../dashboard/.output/public', import.meta.url)),
+    helperSource: paths.helperSource,
+    claimScript: paths.claimScript,
+    staticDirectory: paths.staticDirectory,
     admissionCli: options.admissionCli,
     protectedPaths: options.protectedPaths,
     memoryGiB: options.memoryGiB,

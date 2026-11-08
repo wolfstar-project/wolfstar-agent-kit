@@ -8,6 +8,8 @@ async function helper(): Promise<string> {
   const candidates = [
     join(process.cwd(), 'wolfstar-agent-kit/scripts/worktree-claim.sh'),
     fileURLToPath(new URL('../../../wolfstar-agent-kit/scripts/worktree-claim.sh', import.meta.url)),
+    // The build bundles this module into dist/_chunks, one directory deeper than src.
+    fileURLToPath(new URL('../../../../wolfstar-agent-kit/scripts/worktree-claim.sh', import.meta.url)),
   ]
   for (const path of candidates) {
     const exists = await access(path)
