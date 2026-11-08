@@ -5,13 +5,23 @@
   "compatibility_date": "2026-10-13",
   "upload_source_maps": true,
   "observability": { "enabled": true },
-  // The GitHub App webhook and the Access application name one hostname.
-  // A preview URL would be a second hostname outside Access, so only the workers.dev route serves.
+  // The GitHub App webhook uses the workers.dev hostname, and the Access application covers it.
+  // The dashboard has its own custom domain, which the same Access application covers.
+  // A preview URL would be a hostname outside Access, so previews stay off.
   "workers_dev": true,
   "preview_urls": false,
+  "routes": [{ "pattern": "agent.wolfstar.rocks", "custom_domain": true }],
+  // The dashboard build. The Worker checks Access first, then serves it, so the interface loads with the controller down.
+  "assets": {
+    "directory": "../wolfstar-github-agent/dashboard/.output/public",
+    "binding": "ASSETS",
+    "run_worker_first": true,
+    // The controller serves /sessions, not /sessions/, so the build does too.
+    "html_handling": "drop-trailing-slash",
+  },
   "vars": {
     // Where webhooks and the dashboard go: the controller's public https origin, with no path.
-    "CONTROLLER_URL": "https://agent.harlanzw.com",
+    "CONTROLLER_URL": "https://controller.wolfstar.rocks",
     // Cloudflare Access in front of every route but /webhook. Clear both to turn the check off.
     "ACCESS_TEAM_DOMAIN": "https://wolfstar.cloudflareaccess.com",
     "ACCESS_AUD": "808350b0ce80d953105d631f4e9db423289eb1e973f45de04eb38ca53341242e",

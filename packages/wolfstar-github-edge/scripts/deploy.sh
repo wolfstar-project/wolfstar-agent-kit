@@ -25,6 +25,8 @@ ensure() {
 }
 
 wrangler whoami >/dev/null
+# The Worker serves the dashboard pages from this build.
+(cd "$repository_root" && pnpm --filter wolfstar-github-agent dashboard:build)
 ensure 'queue wolfstar-github-webhooks' wrangler queues create wolfstar-github-webhooks
 ensure 'queue wolfstar-github-webhooks-dlq' wrangler queues create wolfstar-github-webhooks-dlq
 ensure 'bucket wolfstar-github-agent-state' wrangler r2 bucket create wolfstar-github-agent-state

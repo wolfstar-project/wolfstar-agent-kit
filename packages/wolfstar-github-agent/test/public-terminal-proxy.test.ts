@@ -43,7 +43,7 @@ it.skipIf(!caddy)('refuses foreign WebSocket origins before translating the publ
         `http://127.0.0.1:${proxyAddress.port}${path}`,
         {
           headers: {
-            host: 'agent.harlanzw.com',
+            host: 'controller.wolfstar.rocks',
             ...(origin ? { origin } : {}),
             ...(upgrade ? { connection: 'Upgrade', upgrade: 'WebSocket' } : {}),
           },
@@ -61,7 +61,7 @@ it.skipIf(!caddy)('refuses foreign WebSocket origins before translating the publ
     for (const origin of [undefined, 'https://evil.example.com', 'https://hogwild.tailcad325.ts.net'])
       expect(await get('/api/terminal/sessions/example/stream', origin, true)).toBe(403)
     expect(received).toEqual([])
-    expect(await get('/api/terminal/sessions/example/stream', 'https://agent.harlanzw.com', true)).toBe(200)
+    expect(await get('/api/terminal/sessions/example/stream', 'https://controller.wolfstar.rocks', true)).toBe(200)
     expect(received).toEqual([
       expect.objectContaining({
         host: 'hogwild.tailcad325.ts.net',
@@ -70,7 +70,7 @@ it.skipIf(!caddy)('refuses foreign WebSocket origins before translating the publ
       }),
     ])
     for (const path of ['/api/sessions', '/api/desktop/sessions/report', '/api/items/pull-request-diff'])
-      expect(await get(path, 'https://agent.harlanzw.com')).toBe(403)
+      expect(await get(path, 'https://controller.wolfstar.rocks')).toBe(403)
   } finally {
     proxy.kill('SIGTERM')
     await new Promise<void>((resolve) => backend.close(() => resolve()))

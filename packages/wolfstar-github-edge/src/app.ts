@@ -2,6 +2,7 @@ import type { AccessSettings } from './access.ts'
 import type { WebhookDelivery } from './env.ts'
 import { hasAccessToken } from './access.ts'
 import { proxyDashboard } from './dashboard.ts'
+import { serveShell } from './shell.ts'
 import { acceptWebhook, consumeWebhooks } from './webhook.ts'
 
 /** Everything the routes need, so tests run them without Cloudflare bindings. */
@@ -12,6 +13,8 @@ export interface EdgeDependencies {
   webhookSecret: string | undefined
   webhooks: Queue<WebhookDelivery>
   state: R2Bucket
+  /** The dashboard build the Worker serves itself. */
+  assets: { fetch: (request: Request) => Promise<Response> }
   /** Cloudflare Access in front of everything but `/webhook`. Null when Access is not set up. */
   access: AccessSettings | null
   fetch: typeof fetch
@@ -45,7 +48,7 @@ export async function handleRequest(request: Request, dependencies: EdgeDependen
   if (dependencies.access !== null && !(await hasAccessToken(request, dependencies.access, dependencies)))
     return new Response('Sign in through Cloudflare Access.', { status: 403 })
 
-  return proxyDashboard(request, dependencies)
+  return (await serveShell(request, dependencies)) ?? proxyDashboard(request, dependencies)
 }
 
 export async function handleQueue(batch: MessageBatch<WebhookDelivery>, dependencies: EdgeDependencies): Promise<void> {

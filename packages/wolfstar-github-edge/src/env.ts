@@ -16,6 +16,8 @@ export interface Env {
   ACCESS_TEAM_DOMAIN?: string
   /** The Application Audience (AUD) tag of the Access application. */
   ACCESS_AUD?: string
+  /** The dashboard build from `wolfstar-github-agent/dashboard`, served by Workers Static Assets. */
+  ASSETS: Fetcher
   WEBHOOKS: Queue<WebhookDelivery>
   /** Webhook bodies too large for a Queue message, under `deliveries/`. */
   STATE: R2Bucket

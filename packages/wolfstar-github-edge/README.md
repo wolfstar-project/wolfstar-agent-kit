@@ -1,6 +1,6 @@
 # Wolfstar GitHub Edge
 
-A Cloudflare Worker in front of the [Wolfstar GitHub Agent](../wolfstar-github-agent/README.md). It relays webhooks through a Queue and proxies the dashboard. It runs no Agent: the controller, its sessions, its provider logins and its journal stay on the controller's host.
+A Cloudflare Worker in front of the [Wolfstar GitHub Agent](../wolfstar-github-agent/README.md). It relays webhooks through a Queue and serves the dashboard: the pages from its own build, the data from the controller. It runs no Agent: the controller, its sessions, its provider logins and its journal stay on the controller's host.
 
 ```mermaid
 flowchart LR
@@ -11,7 +11,8 @@ flowchart LR
     Queue -->|20 failed attempts| DLQ[wolfstar-github-webhooks-dlq]
     Browser -->|Every other path| Access[Cloudflare Access]
     Access --> Worker
-    Worker -->|Origin translated| Controller
+    Worker -->|Pages and files from its build| Browser
+    Worker -->|API and WebSocket, Origin translated| Controller
     Worker -.->|Deliveries above 100 KB| R2[R2 wolfstar-github-agent-state]
 ```
 
@@ -23,11 +24,14 @@ pnpm --filter wolfstar-github-edge exec wrangler secret put GITHUB_WEBHOOK_SECRE
 pnpm --filter wolfstar-github-edge deploy
 ```
 
+The deploy builds the dashboard first (`pnpm --filter wolfstar-github-agent dashboard:build`) and uploads `dashboard/.output/public` with the Worker as static assets.
+
 The first deploy creates both Queues, the R2 bucket, and its lifecycle rule. Every later run ships an update.
 
 Set these in `wrangler.jsonc` first:
 
 - `CONTROLLER_URL`: the controller's public `https` origin, with no path. It must be a route the controller already serves, such as the Caddy route in [`scripts/public-dashboard.md`](../../scripts/public-dashboard.md). The Worker sends `POST /webhook` and every dashboard request there.
+- `routes`: the Worker's custom domain for the dashboard, `agent.wolfstar.rocks`. It must be a different hostname from `CONTROLLER_URL`, because the controller's tunnel owns that one. Add the custom domain to the Access application's destinations, so the same audience covers both hostnames.
 - `GITHUB_WEBHOOK_SECRET`, a Worker secret: the webhook secret of the GitHub App. It is the same value the controller reads from its `webhook.secret_path`. Until it is set, every delivery gets a 503.
 
 Point the GitHub App's webhook URL at the Worker, `https://<worker hostname>/webhook`.
@@ -51,19 +55,21 @@ With both set, the Worker checks the Access token on every request except `/webh
 
 ## What runs where
 
-| Piece                | Where          | Notes                                                                          |
-| -------------------- | -------------- | ------------------------------------------------------------------------------ |
-| Webhook intake       | Worker         | Checks the signature with the App's secret, answers 204, queues the delivery   |
-| Webhook relay        | Queue consumer | Retries from 10 seconds to 15 minutes, 20 times, then the dead letter queue    |
-| Large webhook bodies | R2             | Above 100 KB under `deliveries/`. Deleted once delivered, expired after 7 days |
-| Dashboard            | Controller     | The Worker proxies it. The controller checks its password on every route       |
-| Agent sessions       | Controller     | A session's terminal stream is a WebSocket, which the proxy passes through     |
+| Piece                | Where          | Notes                                                                                            |
+| -------------------- | -------------- | ------------------------------------------------------------------------------------------------ |
+| Webhook intake       | Worker         | Checks the signature with the App's secret, answers 204, queues the delivery                     |
+| Webhook relay        | Queue consumer | Retries from 10 seconds to 15 minutes, 20 times, then the dead letter queue                      |
+| Large webhook bodies | R2             | Above 100 KB under `deliveries/`. Deleted once delivered, expired after 7 days                   |
+| Dashboard pages      | Worker         | Prerendered Nuxt build as static assets, behind the Access check. Loads with the controller down |
+| Dashboard data       | Controller     | `/api`, `/health` and WebSockets are proxied. The controller checks its password on every route  |
+| Agent sessions       | Controller     | A session's terminal stream is a WebSocket, which the proxy passes through                       |
 
 The controller keeps every check it has: the webhook signature, the dashboard password, Host and Origin. The Worker translates its public Origin to the controller's, and refuses a state changing request whose Origin is not its own.
 
 ## Limits
 
 - **A controller that stays down loses deliveries.** The Queue retries 20 times, for a few hours, before a delivery moves to the dead letter queue. Its R2 body stays for 7 days, and polling still reads the repository.
+- **A page without a controller is empty.** The Worker serves the interface when the controller is down, but its data calls fail until the controller is back.
 - **The controller must be reachable from Cloudflare.** `CONTROLLER_URL` has to be a public route. A Tailscale-only address does not work.
 - **Desktop session routes stay on Tailscale.** The controller's public route refuses them, so the Worker cannot reach them either.
 
