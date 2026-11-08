@@ -31,6 +31,7 @@ The first deploy creates both Queues, the R2 bucket, and its lifecycle rule. Eve
 Set these in `wrangler.jsonc` first:
 
 - `CONTROLLER_URL`: the controller's public `https` origin, with no path. It must be a route the controller already serves, such as the Caddy route in [`scripts/public-dashboard.md`](../../scripts/public-dashboard.md). The Worker sends `POST /webhook` and every dashboard request there.
+- `routes`: the Worker's custom domain for the dashboard, `agent.wolfstar.rocks`. It must be a different hostname from `CONTROLLER_URL`, because the controller's tunnel owns that one. Add the custom domain to the Access application's destinations, so the same audience covers both hostnames.
 - `GITHUB_WEBHOOK_SECRET`, a Worker secret: the webhook secret of the GitHub App. It is the same value the controller reads from its `webhook.secret_path`. Until it is set, every delivery gets a 503.
 
 Point the GitHub App's webhook URL at the Worker, `https://<worker hostname>/webhook`.
