@@ -107,7 +107,7 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile --ignore-scripts --filter wolfstar-agent-kit
-      - run: pnpm exec vitest run scripts/github-public-ps.test.ts scripts/agent-context-platform.test.ts
+      - run: pnpm exec vitest run scripts/github-public-ps.test.ts scripts/install.test.ts scripts/agent-context-platform.test.ts
         shell: pwsh
 
   # This job mirrors `pnpm test`, plus the hook suites that aggregate leaves out.

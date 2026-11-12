@@ -27,6 +27,13 @@ $script:AgentGhClearedVariables = @('GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITH
 $script:AgentGhSystemSid = 'S-1-5-18'
 $script:AgentGhAdministratorsSid = 'S-1-5-32-544'
 
+# The machine account the token belongs to. The wrapper only names it; the
+# installers compare it with the login the token returns.
+function Get-AgentGhLogin {
+  if ($env:WOLFSTAR_AGENT_GITHUB_LOGIN) { return $env:WOLFSTAR_AGENT_GITHUB_LOGIN }
+  return 'wolfstarbot'
+}
+
 class AgentGhRefusal : System.Exception {
   AgentGhRefusal([string]$Message) : base($Message) {}
 }
@@ -300,7 +307,7 @@ function Install-AgentGhToken([switch]$Replace) {
   if ((Test-Path -LiteralPath $path) -and -not $Replace) {
     Stop-AgentGh "The public GitHub token already exists: $path. Run agent-gh --setup-token --replace to rotate it."
   }
-  [Console]::Error.WriteLine('Create a fine-grained token on wolfstar-agent-beep with Public repositories access and no account permissions.')
+  [Console]::Error.WriteLine("Create a fine-grained token on $(Get-AgentGhLogin) with Public repositories access and no account permissions.")
   $secure = Read-Host -Prompt 'Paste the token' -AsSecureString
   $token = [System.Net.NetworkCredential]::new('', $secure).Password.Trim()
   Write-AgentGhToken -Token $token -Path $path -Replace:$Replace
@@ -315,7 +322,7 @@ function Invoke-AgentGh([string[]]$Arguments) {
   try {
     if ($Arguments.Count -gt 0 -and $Arguments[0] -ceq '--help') {
       [Console]::Out.WriteLine('Usage: agent-gh <GitHub CLI read command>')
-      [Console]::Out.WriteLine('Public reads use wolfstar-agent-beep. The controller owns writes.')
+      [Console]::Out.WriteLine("Public reads use $(Get-AgentGhLogin). The controller owns writes.")
       [Console]::Out.WriteLine('Run agent-gh --setup-token once to save the fine-grained token.')
       $script:AgentGhExitCode = 0
       return

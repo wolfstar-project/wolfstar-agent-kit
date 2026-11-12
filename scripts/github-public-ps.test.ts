@@ -299,6 +299,10 @@ foreach ($name in $names) { $after[$name] = [Environment]::GetEnvironmentVariabl
       const result = f.run(['--help'])
       expect(result.status).toBe(0)
       expect(result.stdout).toContain('Usage: agent-gh')
+      expect(result.stdout).toContain('Public reads use wolfstarbot.')
+      expect(f.run(['--help'], { WOLFSTAR_AGENT_GITHUB_LOGIN: 'other-bot' }).stdout).toContain(
+        'Public reads use other-bot.',
+      )
     })
   })
 

@@ -1,6 +1,6 @@
 # Public GitHub reads with agent-gh
 
-`agent-gh` runs GitHub CLI read commands as the `wolfstar-agent-beep` machine account.
+`agent-gh` runs GitHub CLI read commands as the `wolfstarbot` machine account.
 It never uses your own `gh` login, and it never falls back to it.
 It refuses writes, raw [GraphQL](https://graphql.org), and API requests other than `GET`.
 
@@ -11,14 +11,26 @@ Both wrappers allow the same commands, and a test fails if their policies differ
 ## Prerequisites
 
 - The [GitHub CLI](https://cli.github.com), installed at a trusted location (see [Trusted GitHub CLI locations](#trusted-github-cli-locations)).
-- A fine-grained token on `wolfstar-agent-beep`. It begins with `github_pat_`.
+- A fine-grained token on `wolfstarbot`. It begins with `github_pat_`.
   Select **Public repositories** and add no account permissions.
 - On Windows, [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows) or later: `winget install --id Microsoft.PowerShell`.
   Windows PowerShell 5.1 is not supported.
 
 Never put the token in Git, Agent instructions, or repository environment files.
 
+`WOLFSTAR_AGENT_GITHUB_LOGIN` names another machine account, for the installers and the `--help` text.
+
+## Install from nothing
+
+`scripts/install.sh` (Linux and WSL) and `scripts/install.ps1` (Windows, PowerShell 7) do every step below in one run:
+prerequisites, clone, `pnpm install`, `pnpm sync:context`, the token, and a final `agent-gh api user` and `agent-gh api rate_limit`.
+They save the token only after GitHub confirms it belongs to `wolfstarbot`, and they keep a working token unless you confirm its replacement.
+Both accept a dry run (`--dry-run`, `-DryRun`).
+[The Service README](../packages/wolfstar-github-agent/README.md#install) lists their options.
+
 ## Install on Linux
+
+`pnpm sync:context` on Linux needs `jq`, which reads the hook list from the plugin manifest.
 
 ```bash
 pnpm sync:context
