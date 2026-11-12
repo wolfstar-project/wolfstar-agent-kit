@@ -35,7 +35,10 @@ describe('installer requirements', () => {
   it('keeps the Node floor equal to the engines field', () => {
     const engines = JSON.parse(readFileSync('packages/wolfstar-github-agent/package.json', 'utf8')).engines.node
     const floor = engines.replace(/^>=/, '')
-    expect(readFileSync(bashInstaller, 'utf8')).toContain(`\nmin_node=${floor}\n`)
+    // A Windows checkout may carry CRLF line endings.
+    expect(readFileSync(bashInstaller, 'utf8')).toMatch(
+      new RegExp(`^min_node=${floor.replaceAll('.', '\\.')}\r?$`, 'm'),
+    )
     expect(readFileSync(psInstaller, 'utf8')).toContain(`$MinNode = [version]'${floor}'`)
   })
 })
@@ -203,11 +206,14 @@ $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.Security
     expect(stdout).toContain('[dry-run] corepack pnpm sync:context')
     expect(stdout).toContain('Dry run complete. Nothing changed.')
     expect(stdout).not.toContain('github_pat_secret')
-    // pwsh keeps its own module cache under HOME on Linux.
+    // pwsh keeps its own caches under the home: ~/.cache and ~/.local/share
+    // on Linux, AppData on Windows.
     const own = new Set(['.cache', join('.local', 'share')])
     const added = readdirSync(home, { recursive: true })
       .map(String)
-      .filter((path) => !before.includes(path) && !own.has(path) && !/powershell/i.test(path))
+      .filter(
+        (path) => !before.includes(path) && !own.has(path) && !/powershell/i.test(path) && !/^AppData(\\|$)/.test(path),
+      )
     expect(added).toEqual([])
   })
 })
