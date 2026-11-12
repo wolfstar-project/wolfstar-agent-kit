@@ -84,6 +84,9 @@ const claudeFileTools = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
 /** The time a hook may take when the manifest sets no timeout. */
 const defaultTimeoutMilliseconds = 5000
 
+/** A PowerShell hook pays for starting pwsh first, so it gets longer by default. */
+const defaultPowerShellTimeoutMilliseconds = 15_000
+
 /** No hooks at all, used when the manifest cannot be read. */
 const emptyChains: HookChains = { command: [], file: [], shellPost: [] }
 
@@ -138,7 +141,12 @@ function readEntry(hook: unknown): HookEntry | undefined {
   if (file === '') return undefined
   return {
     file,
-    timeoutMilliseconds: typeof timeout === 'number' && timeout > 0 ? timeout : defaultTimeoutMilliseconds,
+    timeoutMilliseconds:
+      typeof timeout === 'number' && timeout > 0
+        ? timeout
+        : file.endsWith('.ps1')
+          ? defaultPowerShellTimeoutMilliseconds
+          : defaultTimeoutMilliseconds,
   }
 }
 
