@@ -23,6 +23,10 @@ function fixture() {
     mkdirSync(join(cwd, dir), { recursive: true })
   for (const dir of ['.claude-plugin', '.codex-plugin'])
     writeFileSync(join(cwd, 'wolfstar-agent-kit', dir, 'plugin.json'), JSON.stringify({ version: '1.0.0' }))
+  writeFileSync(
+    join(cwd, 'wolfstar-agent-kit/.claude-plugin/plugin.windows.json'),
+    JSON.stringify({ version: '1.0.0' }),
+  )
   writeFileSync(join(cwd, '.claude-plugin/marketplace.json'), JSON.stringify({ plugins: [{ version: '1.0.0' }] }))
   git('add', '.')
   git('commit', '--quiet', '-m', 'chore: initial release')
@@ -124,5 +128,11 @@ it('prints the preview before releasing and pushes the new version to a local re
     { encoding: 'utf8' },
   )
   expect(JSON.parse(manifest).version).toBe('1.1.0')
+  const windowsManifest = execFileSync(
+    'git',
+    ['--git-dir', remote, 'show', 'v1.1.0:wolfstar-agent-kit/.claude-plugin/plugin.windows.json'],
+    { encoding: 'utf8' },
+  )
+  expect(JSON.parse(windowsManifest).version).toBe('1.1.0')
   expect(git('status', '--porcelain')).toBe('')
 })

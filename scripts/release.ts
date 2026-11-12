@@ -21,9 +21,11 @@ function bumpVersion(version: string, type: 'patch' | 'minor' | 'major'): string
 // Get current version from plugin.json
 const pluginPath = 'wolfstar-agent-kit/.claude-plugin/plugin.json'
 const codexPluginPath = 'wolfstar-agent-kit/.codex-plugin/plugin.json'
+const windowsPluginPath = 'wolfstar-agent-kit/.claude-plugin/plugin.windows.json'
 const marketplacePath = '.claude-plugin/marketplace.json'
 const plugin = JSON.parse(readFileSync(pluginPath, 'utf-8'))
 const codexPlugin = JSON.parse(readFileSync(codexPluginPath, 'utf-8'))
+const windowsPlugin = JSON.parse(readFileSync(windowsPluginPath, 'utf-8'))
 const marketplace = JSON.parse(readFileSync(marketplacePath, 'utf-8'))
 const oldVersion = plugin.version
 const newVersion = bumpVersion(oldVersion, bumpType)
@@ -77,6 +79,11 @@ console.log(`  ✓ ${pluginPath}`)
 codexPlugin.version = newVersion
 writeFileSync(codexPluginPath, `${JSON.stringify(codexPlugin, null, 2)}\n`)
 console.log(`  ✓ ${codexPluginPath}`)
+
+// Update the Windows hook manifest
+windowsPlugin.version = newVersion
+writeFileSync(windowsPluginPath, `${JSON.stringify(windowsPlugin, null, 2)}\n`)
+console.log(`  ✓ ${windowsPluginPath}`)
 
 // Update marketplace.json (sync version in plugins array)
 marketplace.plugins[0].version = newVersion

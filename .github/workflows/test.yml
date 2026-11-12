@@ -195,6 +195,11 @@ jobs:
       - name: Opencode hooks
         run: pnpm test:opencode-hooks
 
+      # Hosted Ubuntu ships PowerShell 7, so each PowerShell hook runs beside
+      # its bash twin and must give the same answer.
+      - name: PowerShell hooks
+        run: pnpm test:powershell-hooks
+
       - name: Hogwild CLI
         run: pnpm test:hogwild
 

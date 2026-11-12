@@ -197,6 +197,24 @@ Two more scripts run outside the hook events:
 checks, and [`check-config.sh`](./wolfstar-agent-kit/hooks/check-config.sh) reads
 the per-project config the others source.
 
+### Windows
+
+Every hook has a PowerShell 7 twin beside it, a `.ps1` with the same name.
+[`plugin.windows.json`](./wolfstar-agent-kit/.claude-plugin/plugin.windows.json)
+registers them in the same order. A test runs each pair over one command list and
+fails when the answers differ.
+
+In PowerShell 7, run `pnpm sync:context`. It copies the hooks and that manifest to
+`~/.local/share/wolfstar-agent-kit`, and the opencode plugin to
+`~/.config/opencode/plugins`. opencode then runs the `.ps1` hooks in `pwsh`.
+For Claude Code, install the directory as a plugin:
+
+```powershell
+/plugin install $HOME/.local/share/wolfstar-agent-kit
+```
+
+Codex has no Windows hooks yet. A hook change is two edits, the `.sh` and the `.ps1`.
+
 Turn a hook off for one project with `.claude/hooks.json`:
 
 ```json
