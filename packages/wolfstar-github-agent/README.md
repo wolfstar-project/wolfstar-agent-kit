@@ -691,19 +691,70 @@ Dependency updates keep one combined Candidate and a shared open-issue fingerpri
 
 ## Public GitHub reads
 
-`pnpm sync:context` installs `agent-gh` for public GitHub reads.
-`pnpm sync:context:hogwild` installs it on Hogwild.
-On Windows, `pnpm sync:context` installs the native PowerShell 7 build instead.
-[docs/agent-gh.md](../../docs/agent-gh.md) covers setup on both platforms and troubleshooting.
-Agents use `wolfstar-agent-beep` for these reads.
+Agents use `agent-gh` for public GitHub reads, as the `wolfstarbot` machine account.
 The Service gives worker processes the same CLI as `gh`.
 The controller keeps its existing credentials and publication rules.
+[docs/agent-gh.md](../../docs/agent-gh.md) covers both platforms, the read policy, and troubleshooting.
 
-Create a fine-grained token on `wolfstar-agent-beep`.
-Select **Public repositories** and add no account permissions.
-Save it in `~/.config/wolfstar-agent-kit/github-public-token` on each Agent host.
-Run `chmod 600` on that file.
-On Windows, run `agent-gh --setup-token`, which writes it with an owner-only ACL.
+### Install
+
+One script per platform installs `agent-gh` from nothing.
+It checks the prerequisites, clones this repository into `~/pkg/wolfstar-agent-kit` unless it runs from a checkout, installs the root package, and runs `pnpm sync:context`.
+Then it asks for the token with hidden input, checks with GitHub that the token belongs to `wolfstarbot`, and saves it owner-only.
+It ends by running `agent-gh api user --jq .login` and `agent-gh api rate_limit`, and prints the login, the remaining quota, and the binary path.
+
+Create the token first: a fine-grained token on `wolfstarbot`, with **Public repositories** access and no account permissions.
+
+Linux, or Ubuntu in WSL:
+
+```bash
+sudo apt install git curl jq gh
+# Without a checkout: download the script, read it, then run it.
+curl -fsSLO https://raw.githubusercontent.com/wolfstar-project/wolfstar-agent-kit/main/scripts/install.sh
+bash install.sh --dry-run          # print each change instead of making it
+bash install.sh
+# From a checkout, it uses that checkout and clones nothing.
+bash scripts/install.sh
+```
+
+Windows, in PowerShell 7, with no WSL:
+
+```powershell
+winget install --id Git.Git; winget install --id OpenJS.NodeJS.LTS; winget install --id GitHub.cli
+# Without a checkout: download the script, read it, then run it.
+Invoke-WebRequest https://raw.githubusercontent.com/wolfstar-project/wolfstar-agent-kit/main/scripts/install.ps1 -OutFile install.ps1
+pwsh -NoProfile -File .\install.ps1 -DryRun
+pwsh -NoProfile -File .\install.ps1
+# From a checkout, it uses that checkout and clones nothing.
+pwsh -NoProfile -File .\scripts\install.ps1
+```
+
+If PowerShell reports that the downloaded script is not digitally signed, run `Unblock-File .\install.ps1` after reading it.
+
+Both need Node.js 24 or later and Corepack, which activates the pnpm version in `packageManager`.
+Node.js 25 and later no longer bundle Corepack. Install it there with `npm install --global corepack`.
+Options: `--dir` / `-Directory` picks the checkout, `--skip-clone` / `-SkipClone` never clones, and `--replace-token` / `-ReplaceToken` rotates a working token without asking.
+`-AddToPath` adds `~\.local\bin` to the Windows user `PATH`. Without it, the script asks first.
+On Linux the script prints the line to add to `~/.bashrc` or `~/.zshrc` and edits neither.
+
+Running either script again is safe.
+It keeps a saved token that still belongs to `wolfstarbot` unless you confirm the replacement, and it replaces one that GitHub rejects.
+A token for any other account stops the script before anything is saved.
+
+For unattended runs, set `WOLFSTAR_AGENT_GITHUB_TOKEN` instead of answering the prompt.
+Read it without echo, so it never reaches the shell history: `read -rs WOLFSTAR_AGENT_GITHUB_TOKEN && export WOLFSTAR_AGENT_GITHUB_TOKEN`.
+The script removes it from the environment before it starts any other program, and never passes the token as an argument.
+
+`pnpm sync:context` is the same command the scripts run.
+On Linux it also installs the Agent instructions in `~/.claude` and `~/.codex`, the hooks, and the global git `commit-msg` hook.
+On Windows it installs only the native PowerShell build of `agent-gh`.
+`pnpm sync:context:hogwild` installs it on Hogwild.
+
+`WOLFSTAR_AGENT_GITHUB_LOGIN` renames the expected account, for the installers and the `agent-gh --help` text.
+
+The token lives in `~/.config/wolfstar-agent-kit/github-public-token` on each Agent host.
+On Linux it has mode `600` in a `700` directory.
+On Windows its ACL grants the current user only, with inheritance removed.
 Never put the token in Git, Agent instructions, or repository environment files.
 
 Check the account with `agent-gh api user --jq .login`.

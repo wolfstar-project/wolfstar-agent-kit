@@ -77,7 +77,7 @@ Never publish under my name without approval. Draft it, show the exact text, wai
 
 - When using Claude, default to `claude-opus-5-5` (Opus 5.5), unless Wolfstar explicitly selects another model.
 
-- For public GitHub reads, use `agent-gh`. It uses `wolfstar-agent-beep` and a separate API quota.
+- For public GitHub reads, use `agent-gh`. It uses `wolfstarbot` and a separate API quota.
 - GitHub Agent workers route `gh` reads through the same CLI automatically.
 - The token file is `~/.config/wolfstar-agent-kit/github-public-token`. Keep it owner-only with mode `600`. On Windows, `agent-gh --setup-token` writes it with an owner-only ACL.
 - Use a fine-grained token with Public repositories access and no account permissions.

@@ -51,6 +51,14 @@ exit "\${RESULT:-0}"
 }
 
 describe('public GitHub CLI access', () => {
+  it('names the machine account in its usage, and lets the installers rename it', () => {
+    const f = fixture()
+    expect(f.run(['--help']).stdout).toContain('Public reads use wolfstarbot.')
+    expect(f.run(['--help'], { WOLFSTAR_AGENT_GITHUB_LOGIN: 'other-bot' }).stdout).toContain(
+      'Public reads use other-bot.',
+    )
+  })
+
   it('uses the agent credential rather than inherited personal credentials', () => {
     const f = fixture()
     expect(f.run(['pr', 'view', '123', '--repo', 'owner/repo']).status).toBe(0)

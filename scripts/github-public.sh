@@ -2,9 +2,12 @@
 # Public GitHub reads use the machine account. Controller writes use ordinary gh.
 set -euo pipefail
 fail() { printf '%s\n' "$1" >&2; exit 1; }
+# The machine account the token belongs to. The wrapper only names it; the
+# installers compare it with the login the token returns.
+login="${WOLFSTAR_AGENT_GITHUB_LOGIN:-wolfstarbot}"
 
 if [ "${1:-}" = --help ]; then
-  printf '%s\n' 'Usage: agent-gh <GitHub CLI read command>' 'Public reads use wolfstar-agent-beep. The controller owns writes.'
+  printf '%s\n' 'Usage: agent-gh <GitHub CLI read command>' "Public reads use $login. The controller owns writes."
   exit 0
 fi
 case "${1:-} ${2:-}" in
