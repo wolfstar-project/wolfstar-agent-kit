@@ -6,8 +6,18 @@ fail() { printf '%s\n' "$1" >&2; exit 1; }
 # installers compare it with the login the token returns.
 login="${WOLFSTAR_AGENT_GITHUB_LOGIN:-wolfstarbot}"
 
+# --full reads with your own gh login instead of the machine account, for hosts
+# that run no controller. It changes the credential only. The read policy stays.
+full=false
+if [ "${1:-}" = --full ]; then
+  full=true
+  shift
+fi
+
 if [ "${1:-}" = --help ]; then
-  printf '%s\n' 'Usage: agent-gh <GitHub CLI read command>' "Public reads use $login. The controller owns writes."
+  printf '%s\n' 'Usage: agent-gh [--full] <GitHub CLI read command>' \
+    "Public reads use $login. The controller owns writes." \
+    '--full reads with your own gh login and needs no machine-account token.'
   exit 0
 fi
 case "${1:-} ${2:-}" in
@@ -45,14 +55,20 @@ for arg in "$@"; do
   esac
 done
 
-token_file="$HOME/.config/wolfstar-agent-kit/github-public-token"
-[ -f "$token_file" ] && [ ! -L "$token_file" ] || fail "The public GitHub token is missing: $token_file"
-[ "$(stat -c '%a:%u' "$token_file")" = "600:$(id -u)" ] || fail 'The public GitHub token needs owner-only access. Run chmod 600 on its file.'
-GH_TOKEN=$(< "$token_file")
-[[ "$GH_TOKEN" = github_pat_* ]] || fail 'Use a fine-grained token with Public repositories access and no account permissions.'
-export GH_TOKEN GH_HOST=github.com GH_PROMPT_DISABLED=1
-export GH_CONFIG_DIR="$HOME/.config/wolfstar-agent-kit/gh-public"
-unset GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN GH_DEBUG
+if [ "$full" = true ]; then
+  # Your own login: gh keeps its default config directory and any token you set.
+  export GH_HOST=github.com GH_PROMPT_DISABLED=1
+  unset GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN GH_DEBUG
+else
+  token_file="$HOME/.config/wolfstar-agent-kit/github-public-token"
+  [ -f "$token_file" ] && [ ! -L "$token_file" ] || fail "The public GitHub token is missing: $token_file"
+  [ "$(stat -c '%a:%u' "$token_file")" = "600:$(id -u)" ] || fail 'The public GitHub token needs owner-only access. Run chmod 600 on its file.'
+  GH_TOKEN=$(< "$token_file")
+  [[ "$GH_TOKEN" = github_pat_* ]] || fail 'Use a fine-grained token with Public repositories access and no account permissions.'
+  export GH_TOKEN GH_HOST=github.com GH_PROMPT_DISABLED=1
+  export GH_CONFIG_DIR="$HOME/.config/wolfstar-agent-kit/gh-public"
+  unset GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN GH_DEBUG
+fi
 
 # Use trusted host binaries, never a repository binary that can capture the token.
 self=$(readlink -f "${BASH_SOURCE[0]}")

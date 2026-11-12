@@ -94,6 +94,22 @@ Headers, `--hostname`, `--input`, and `--web` are refused.
 
 Every argument reaches `gh` unchanged, and `agent-gh` exits with the status `gh` returns.
 
+## Use your own login with --full
+
+A host that runs no controller has no use for the machine account.
+`agent-gh --full` runs the same read commands with your own `gh` login:
+
+```bash
+agent-gh --full pr view 236 -R wolfstar-project/stars-components
+agent-gh --full api user --jq .login
+```
+
+`--full` changes the credential only.
+The read policy, the trusted `gh` locations, and the refusal of writes and raw GraphQL stay.
+It needs no token file, and it works for private repositories your login can read.
+`gh` keeps its own config directory and any `GH_TOKEN` or `GITHUB_TOKEN` you set.
+Put `--full` first. The hook for `gh` reads accepts `agent-gh` calls, so `--full` is never blocked.
+
 ## How the credential stays isolated
 
 For the `gh` process only, `agent-gh` sets `GH_TOKEN` from the token file, `GH_HOST=github.com`, `GH_PROMPT_DISABLED=1`, and `GH_CONFIG_DIR` to `~/.config/wolfstar-agent-kit/gh-public`.

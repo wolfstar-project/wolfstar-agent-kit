@@ -294,6 +294,35 @@ foreach ($name in $names) { $after[$name] = [Environment]::GetEnvironmentVariabl
       expect(f.request()?.env.GH_TOKEN).toBe(fixtureToken)
     })
 
+    it('--full reads with your own login and needs no machine-account token', () => {
+      const f = fixture()
+      const result = f.run(['--full', 'pr', 'view', '1', '-R', 'owner/repo'], {
+        GH_TOKEN: 'personal',
+        GH_CONFIG_DIR: '/personal',
+      })
+      expect(result.stderr).toBe('')
+      expect(result.status).toBe(0)
+      expect(f.request()?.args).toEqual(['pr', 'view', '1', '-R', 'owner/repo'])
+      expect(f.request()?.env).toMatchObject({
+        GH_TOKEN: 'personal',
+        GH_CONFIG_DIR: '/personal',
+        GH_HOST: 'github.com',
+        GH_PROMPT_DISABLED: '1',
+      })
+    })
+
+    it('--full keeps the read policy', () => {
+      const f = fixture()
+      for (const args of [
+        ['issue', 'create'],
+        ['pr', 'merge', '1'],
+        ['api', 'graphql'],
+      ]) {
+        expect(f.run(['--full', ...args]).status).toBe(1)
+      }
+      expect(f.request()).toBeUndefined()
+    })
+
     it('prints usage without a token', () => {
       const f = fixture()
       const result = f.run(['--help'])

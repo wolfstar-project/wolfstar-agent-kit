@@ -81,7 +81,7 @@ for call in "${calls[@]}"; do
       [ "$matched" = true ] && [ "$mismatch" = false ] && continue
     fi
   fi
-  reason='Use agent-gh for public GitHub reads. For verified private repositories, set WOLFSTAR_AGENT_GITHUB_PRIVATE=owner/repo on that command. Specify the same repository. Never switch credentials after agent-gh fails. Use the Service Control API to watch a tracked pull request.'
+  reason='Use agent-gh for public GitHub reads. For verified private repositories, set WOLFSTAR_AGENT_GITHUB_PRIVATE=owner/repo on that command. Specify the same repository. Never switch credentials after agent-gh fails. On a host with no controller, agent-gh --full reads with your own gh login. Use the Service Control API to watch a tracked pull request.'
   jq -nc --arg reason "$reason" '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$reason}}'
   exit 0
 done
