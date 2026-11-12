@@ -4,7 +4,17 @@
 // function in a plugin file as a plugin. So every test goes through that.
 
 import { randomUUID } from 'node:crypto'
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import {
+  chmodSync,
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import process from 'node:process'
@@ -234,5 +244,43 @@ describe('tool.execute.after', () => {
     const output = { title: 'bash', output: 'src', metadata: {} }
     await plugin['tool.execute.after']({ tool: 'bash', sessionID: randomUUID(), args: { command: 'ls' } }, output)
     expect(output.output).toBe('src')
+  })
+})
+
+// The Windows install registers the PowerShell twins through plugin.windows.json.
+// The plugin runs them in pwsh, whatever the host, so Linux proves the contract.
+const pwsh = process.env.WOLFSTAR_PWSH ?? 'pwsh'
+const hasPwsh = spawnSync(pwsh, ['-NoProfile', '-NonInteractive', '-Command', '1']).status === 0
+if (!hasPwsh && process.env.CI) throw new Error(`PowerShell 7 is required in CI: ${pwsh}`)
+
+describe.skipIf(!hasPwsh)('PowerShell hooks from the Windows manifest', { timeout: 60_000 }, () => {
+  /** A plugin root with the Windows manifest and the real hook scripts. */
+  function windowsInstall(): string {
+    const root = mkdtempSync(join(tmpdir(), 'wolfstar-hooks-windows-'))
+    mkdirSync(join(root, '.claude-plugin'), { recursive: true })
+    copyFileSync(join(pluginRoot, '.claude-plugin', 'plugin.windows.json'), join(root, '.claude-plugin', 'plugin.json'))
+    symlinkSync(hooksDirectory, join(root, 'hooks'))
+    return join(root, 'hooks')
+  }
+
+  async function run(command: string): Promise<string> {
+    const plugin = await loadPlugin(workingDirectory, windowsInstall())
+    const args = { command }
+    await plugin['tool.execute.before']({ tool: 'bash' }, { args })
+    return args.command
+  }
+
+  it('denies a call a .ps1 hook refuses', async () => {
+    await expect(run('git worktree add ../x y')).rejects.toThrow(/Use wt/)
+    await expect(run('gh api repos/owner/public/issues')).rejects.toThrow(/agent-gh/)
+    await expect(run('himalaya message delete 1')).rejects.toThrow(/read only/)
+  })
+
+  it('applies a .ps1 rewrite', async () => {
+    expect(await run('npx vitest run')).toBe('pnpm dlx vitest run')
+  })
+
+  it('allows a command no hook refuses', async () => {
+    expect(await run('git status')).toBe('git status')
   })
 })

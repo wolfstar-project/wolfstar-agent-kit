@@ -3,7 +3,9 @@
 // The GitHub agent workers run as opencode sessions. Those sessions never load
 // a Claude Code plugin, so none of the rules in `.claude-plugin/plugin.json`
 // reach them. This plugin runs the same bash scripts over the same stdin and
-// stdout contract, so one implementation serves both providers. PreToolUse
+// stdout contract, so one implementation serves both providers. A Windows
+// install registers the PowerShell twins of those scripts, and the plugin runs
+// each `.ps1` hook in pwsh. PreToolUse
 // Bash hooks get their decisions from the hook stdout; `command-not-found.sh`
 // gets its `followup_message` appended to the shell tool output.
 //
@@ -82,6 +84,9 @@ const claudeFileTools = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
 /** The time a hook may take when the manifest sets no timeout. */
 const defaultTimeoutMilliseconds = 5000
 
+/** A PowerShell hook pays for starting pwsh first, so it gets longer by default. */
+const defaultPowerShellTimeoutMilliseconds = 15_000
+
 /** No hooks at all, used when the manifest cannot be read. */
 const emptyChains: HookChains = { command: [], file: [], shellPost: [] }
 
@@ -125,12 +130,23 @@ function readEntry(hook: unknown): HookEntry | undefined {
   if (typeof hook !== 'object' || hook === null) return undefined
   const { command, timeout } = hook as { command?: unknown; timeout?: unknown }
   if (typeof command !== 'string') return undefined
-  // The manifest prefixes every command with `${CLAUDE_PLUGIN_ROOT}/hooks/`.
-  const file = command.split('/').pop() ?? ''
+  // The manifest prefixes every script with `${CLAUDE_PLUGIN_ROOT}/hooks/`. The
+  // Windows manifest wraps it as `pwsh -File "<script>"`, so read the last word.
+  const word = command.trim().split(/\s+/).pop() ?? ''
+  const file =
+    word
+      .replace(/^["']|["']$/g, '')
+      .split(/[\\/]/)
+      .pop() ?? ''
   if (file === '') return undefined
   return {
     file,
-    timeoutMilliseconds: typeof timeout === 'number' && timeout > 0 ? timeout : defaultTimeoutMilliseconds,
+    timeoutMilliseconds:
+      typeof timeout === 'number' && timeout > 0
+        ? timeout
+        : file.endsWith('.ps1')
+          ? defaultPowerShellTimeoutMilliseconds
+          : defaultTimeoutMilliseconds,
   }
 }
 
@@ -190,6 +206,19 @@ function reportHookFailure(reason: string): void {
   process.stderr.write(`wolfstar-hooks: ${reason}\n`)
 }
 
+/**
+ * The program that runs one hook script. A `.ps1` hook runs in PowerShell 7,
+ * which the Windows install registers. Everything else runs in bash.
+ */
+function interpreterFor(scriptPath: string): { command: string; args: readonly string[] } {
+  if (scriptPath.endsWith('.ps1'))
+    return {
+      command: process.env.WOLFSTAR_PWSH ?? 'pwsh',
+      args: ['-NoProfile', '-NonInteractive', '-File', scriptPath],
+    }
+  return { command: 'bash', args: [scriptPath] }
+}
+
 /** Runs one hook script over the stdin and stdout contract. */
 async function runHook(
   scriptPath: string,
@@ -198,7 +227,8 @@ async function runHook(
   options: WolfstarHookOptions,
 ): Promise<HookRun> {
   return new Promise<HookRun>((resolve) => {
-    const child = spawn('bash', [scriptPath], {
+    const interpreter = interpreterFor(scriptPath)
+    const child = spawn(interpreter.command, [...interpreter.args], {
       cwd: options.workingDirectory,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: options.sessionId === undefined ? process.env : { ...process.env, CLAUDE_SESSION_ID: options.sessionId },
