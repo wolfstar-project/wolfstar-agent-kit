@@ -276,16 +276,22 @@ function Install-Workspace([string]$Repository) {
     # Makes this version the default outside any project too.
     Invoke-Step 'corepack' @('install', '--global', "pnpm@$version")
   }
-  # Corepack runs the packageManager version whatever pnpm is first on PATH.
-  # agent-gh needs the root package only, as the Windows CI job shows.
-  Invoke-Step 'corepack' @('pnpm', 'install', '--frozen-lockfile', '--filter', 'wolfstar-agent-kit')
   $syncArguments = @('pnpm', 'sync:context')
   if ($IsWindows -and -not (Test-PathEntry ([Environment]::GetEnvironmentVariable('Path', 'User')) $BinDir) -and -not (Test-PathEntry $env:PATH $BinDir)) {
     if ($AddToPath -or (Confirm-Choice "Add $BinDir to your user PATH, so agent-gh runs from any window?")) {
       $syncArguments += @('--', '-AddToPath')
     }
   }
-  Invoke-Step 'corepack' $syncArguments
+  # pnpm reads the workspace from the current directory, which may be the
+  # folder the script was downloaded to.
+  Push-Location -LiteralPath $Repository
+  try {
+    # Corepack runs the packageManager version whatever pnpm is first on PATH.
+    # agent-gh needs the root package only, as the Windows CI job shows.
+    Invoke-Step 'corepack' @('pnpm', 'install', '--frozen-lockfile', '--filter', 'wolfstar-agent-kit')
+    Invoke-Step 'corepack' $syncArguments
+  }
+  finally { Pop-Location }
 }
 
 # Asks GitHub who a token belongs to. Status is ok, rejected, or unreachable.
@@ -411,8 +417,9 @@ function Install-Token {
   return $path
 }
 
-# Runs the installed agent-gh in a fresh pwsh, as a user would.
-function Invoke-AgentGh([string[]]$Arguments) {
+# Runs the installed agent-gh in a fresh pwsh, as a user would. The name
+# differs from the dot-sourced wrapper's Invoke-AgentGh, which would replace it.
+function Invoke-InstalledAgentGh([string[]]$Arguments) {
   $output = & ([Environment]::ProcessPath) -NoProfile -File $AgentGh @Arguments
   if ($LASTEXITCODE -ne 0) { Stop-Install "agent-gh $($Arguments -join ' ') failed with exit code $LASTEXITCODE." }
   return ($output -join "`n")
@@ -425,9 +432,9 @@ function Test-Installation([string]$Repository, [string]$TokenPath) {
     return
   }
   if (-not [System.IO.File]::Exists($AgentGh)) { Stop-Install "pnpm sync:context did not install $AgentGh." }
-  $login = (Invoke-AgentGh @('api', 'user', '--jq', '.login')).Trim()
+  $login = (Invoke-InstalledAgentGh @('api', 'user', '--jq', '.login')).Trim()
   if ($login -cne $ExpectedLogin) { Stop-Install "agent-gh reads as $login, not $ExpectedLogin." }
-  $core = (Invoke-AgentGh @('api', 'rate_limit') | ConvertFrom-Json).resources.core
+  $core = (Invoke-InstalledAgentGh @('api', 'rate_limit') | ConvertFrom-Json).resources.core
   $reset = [DateTimeOffset]::FromUnixTimeSeconds([long]$core.reset).LocalDateTime
   Write-Line
   Write-Line 'agent-gh is ready.'

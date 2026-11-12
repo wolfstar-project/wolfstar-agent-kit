@@ -140,6 +140,34 @@ $rules = @($acl.GetAccessRules($true, $true, [System.Security.Principal.Security
     expect(acl.sids).toEqual([acl.user])
   }
 
+  it('defines no function that the dot-sourced agent-gh would replace', () => {
+    const names = (path: string) =>
+      new Set([...readFileSync(path, 'utf8').matchAll(/^function ([\w-]+)/gm)].map((m) => m[1]))
+    const wrapperNames = names(wrapper)
+    expect([...names(psInstaller)].filter((name) => wrapperNames.has(name))).toEqual([])
+  })
+
+  it('runs pnpm inside the checkout, wherever it starts', async () => {
+    const home = tempHome()
+    const record = join(home, 'corepack.log')
+    // A function named corepack wins over the real command, so each call
+    // records its directory and arguments.
+    const result = await snippet(
+      home,
+      `function corepack { Add-Content -LiteralPath ${quote(record)} -Value "$((Get-Location).ProviderPath)|$($args -join ' ')"; $global:LASTEXITCODE = 0 }
+Set-Location -LiteralPath ${quote(home)}
+Install-Workspace ${quote(resolve('.'))}`,
+    )
+    expect(result.stderr).toBe('')
+    const calls = readFileSync(record, 'utf8').trim().split(/\r?\n/)
+    const pnpm = calls.filter((line) => line.split('|')[1].startsWith('pnpm '))
+    expect(pnpm.map((line) => line.split('|')[1])).toEqual([
+      'pnpm install --frozen-lockfile --filter wolfstar-agent-kit',
+      'pnpm sync:context',
+    ])
+    for (const line of pnpm) expect(line.split('|')[0]).toBe(resolve('.'))
+  })
+
   it('prints its options', async () => {
     const { stdout } = await run(pwsh, ['-NoProfile', '-NonInteractive', '-File', psInstaller, '-Help'])
     for (const option of ['-DryRun', '-SkipClone', '-Directory', '-ReplaceToken', '-AddToPath'])
