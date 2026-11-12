@@ -218,15 +218,22 @@ function Resolve-AgentGh([string[]]$Candidates = (Get-AgentGhCandidates), [strin
 
 # Runs gh with the agent credential in this process only. The caller's session
 # keeps its own variables: every value set here is restored afterwards, and
-# nothing reaches the user or machine environment.
-function Invoke-AgentGhProcess([string]$Executable, [string[]]$Arguments, [string]$Token, [string]$ConfigDir) {
+# nothing reaches the user or machine environment. With -Full, gh keeps your
+# own login: no token, no config directory, and your GH_TOKEN passes through.
+function Invoke-AgentGhProcess([string]$Executable, [string[]]$Arguments, [string]$Token, [string]$ConfigDir, [switch]$Full) {
   $assigned = [ordered]@{
-    GH_TOKEN           = $Token
     GH_HOST            = 'github.com'
     GH_PROMPT_DISABLED = '1'
-    GH_CONFIG_DIR      = $ConfigDir
   }
-  $names = @($assigned.Keys) + $script:AgentGhClearedVariables
+  $cleared = $script:AgentGhClearedVariables
+  if ($Full) {
+    $cleared = @('GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'GH_DEBUG')
+  }
+  else {
+    $assigned['GH_TOKEN'] = $Token
+    $assigned['GH_CONFIG_DIR'] = $ConfigDir
+  }
+  $names = @($assigned.Keys) + $cleared
   $saved = @{}
   foreach ($name in $names) { $saved[$name] = [Environment]::GetEnvironmentVariable($name) }
   # PowerShell passes $null to a .NET string parameter as an empty string, which
@@ -238,7 +245,7 @@ function Invoke-AgentGhProcess([string]$Executable, [string[]]$Arguments, [strin
   }
   try {
     foreach ($name in $assigned.Keys) { & $restore $name $assigned[$name] }
-    foreach ($name in $script:AgentGhClearedVariables) { & $restore $name $null }
+    foreach ($name in $cleared) { & $restore $name $null }
     # Pass each argument to gh exactly as given, empty strings and quotes included.
     $PSNativeCommandArgumentPassing = 'Standard'
     # gh output stays on the pipeline, so `agent-gh ... | ConvertFrom-Json` works.
@@ -320,9 +327,14 @@ function Install-AgentGhToken([switch]$Replace) {
 function Invoke-AgentGh([string[]]$Arguments) {
   $script:AgentGhExitCode = 1
   try {
+    # --full reads with your own gh login, for hosts that run no controller.
+    # It changes the credential only. The read policy stays.
+    $full = $Arguments.Count -gt 0 -and $Arguments[0] -ceq '--full'
+    if ($full) { $Arguments = [string[]]@($Arguments | Select-Object -Skip 1) }
     if ($Arguments.Count -gt 0 -and $Arguments[0] -ceq '--help') {
-      [Console]::Out.WriteLine('Usage: agent-gh <GitHub CLI read command>')
+      [Console]::Out.WriteLine('Usage: agent-gh [--full] <GitHub CLI read command>')
       [Console]::Out.WriteLine("Public reads use $(Get-AgentGhLogin). The controller owns writes.")
+      [Console]::Out.WriteLine('--full reads with your own gh login and needs no machine-account token.')
       [Console]::Out.WriteLine('Run agent-gh --setup-token once to save the fine-grained token.')
       $script:AgentGhExitCode = 0
       return
@@ -335,10 +347,10 @@ function Invoke-AgentGh([string[]]$Arguments) {
       return
     }
     $forward = Get-AgentGhArguments $Arguments
-    $token = Read-AgentGhToken
+    $token = if ($full) { $null } else { Read-AgentGhToken }
     $gh = Resolve-AgentGh
     if ($null -eq $gh) { Stop-AgentGh 'The GitHub CLI is missing. Install it from https://cli.github.com.' }
-    Invoke-AgentGhProcess -Executable $gh -Arguments $forward -Token $token -ConfigDir (Get-AgentGhConfigDir)
+    Invoke-AgentGhProcess -Executable $gh -Arguments $forward -Token $token -ConfigDir (Get-AgentGhConfigDir) -Full:$full
   }
   catch [AgentGhRefusal] {
     [Console]::Error.WriteLine($_.Exception.Message)

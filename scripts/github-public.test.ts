@@ -30,6 +30,7 @@ exit "\${RESULT:-0}"
     { mode: 0o755 },
   )
   return {
+    bin,
     token,
     recorded,
     run: (args: string[], extra: Record<string, string> = {}) =>
@@ -107,6 +108,47 @@ describe('public GitHub CLI access', () => {
     rmSync(f.token)
     expect(f.run(['api', 'user']).status).toBe(1)
     expect(() => readFileSync(f.recorded)).toThrow()
+  })
+
+  describe('--full', () => {
+    // A gh that records the credential variables it received.
+    const recordEnv = (f: ReturnType<typeof fixture>) =>
+      writeFileSync(
+        join(f.bin, 'gh'),
+        `#!/usr/bin/env bash
+printf '%s\\n' "token=\${GH_TOKEN:-}" "host=\${GH_HOST:-}" "config=\${GH_CONFIG_DIR:-}" "prompt=\${GH_PROMPT_DISABLED:-}" "args=$*" > "$RECORD"
+`,
+        { mode: 0o755 },
+      )
+
+    it('reads with your own login and needs no machine-account token', () => {
+      const f = fixture()
+      recordEnv(f)
+      rmSync(f.token)
+      expect(f.run(['--full', 'pr', 'view', '1', '-R', 'owner/repo']).status).toBe(0)
+      expect(readFileSync(f.recorded, 'utf8')).toBe(
+        'token=personal\nhost=github.com\nconfig=/personal\nprompt=1\nargs=pr view 1 -R owner/repo\n',
+      )
+    })
+
+    it('keeps the read policy', () => {
+      const f = fixture()
+      recordEnv(f)
+      for (const args of [
+        ['issue', 'create'],
+        ['pr', 'merge', '1'],
+        ['api', 'graphql'],
+        ['api', 'repos/owner/repo', '-X', 'DELETE'],
+        ['pr', 'view', '1', '--web'],
+      ]) {
+        expect(f.run(['--full', ...args]).status).toBe(1)
+      }
+      expect(() => readFileSync(f.recorded)).toThrow()
+    })
+
+    it('names itself in the usage', () => {
+      expect(fixture().run(['--full', '--help']).stdout).toContain('--full')
+    })
   })
 
   it('passes failures through without switching credentials', () => {
